@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"twinwright/internal/chaos"
 	"twinwright/internal/checkpoint"
 	"twinwright/internal/compiler"
 	"twinwright/internal/store"
@@ -87,6 +88,9 @@ func ReconstructForReplay(ctx context.Context, source *store.Store, child store.
 		return nil, err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO tool_results(run_id,call_id,operation_id,arguments,status,body) SELECT ?,call_id,operation_id,arguments,status,body FROM tool_results WHERE run_id=?`, child.ID, parent.ID); err != nil {
+		return nil, err
+	}
+	if err := chaos.CopyRunInTx(ctx, tx, parent.ID, child.ID); err != nil {
 		return nil, err
 	}
 	if err := store.AppendEventTx(ctx, tx, child.ID, "execution.forked", map[string]any{

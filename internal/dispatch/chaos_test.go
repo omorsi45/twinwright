@@ -228,3 +228,34 @@ func TestConcurrentActorMutatesBeforeAgentRead(t *testing.T) {
 		t.Fatalf("actor events=%d err=%v", actorEvents, err)
 	}
 }
+
+func TestMalformedResponsePreservesServiceRejection(t *testing.T) {
+	d, s, run := chaosRun(t, "type: malformed_response\n    operations: [getCharge]\n    body: '{broken'\n    times: 1")
+	result, err := d.Invoke(context.Background(), run.ID, "missing", "getCharge", map[string]any{"id": "CH-MISSING"})
+	if err != nil || result.Status != 404 {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	var hidden int
+	if err := s.DB.QueryRow("SELECT status FROM chaos_hidden_outcomes WHERE run_id=? AND call_id='missing'", run.ID).Scan(&hidden); err != nil || hidden != 404 {
+		t.Fatalf("hidden=%d err=%v", hidden, err)
+	}
+}
+
+func TestTimeoutAfterCommitPreservesRejectedWrite(t *testing.T) {
+	d, s, run := chaosRun(t, "type: timeout_after_commit\n    operations: [createRefund]\n    times: 1")
+	ctx := context.Background()
+	bad := map[string]any{"charge_id": "CH-MISSING", "amount_cents": 500, "reason": "partial"}
+	result, err := d.Invoke(ctx, run.ID, "bad", "createRefund", bad)
+	if err != nil || result.Status != 404 {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	var injections int
+	if err := s.DB.QueryRowContext(ctx, "SELECT injections FROM chaos_rule_state WHERE run_id=? AND rule_id='target'", run.ID).Scan(&injections); err != nil || injections != 0 {
+		t.Fatalf("injections=%d err=%v", injections, err)
+	}
+	good := map[string]any{"charge_id": "CH-1002", "amount_cents": 500, "reason": "partial"}
+	committed, err := d.Invoke(ctx, run.ID, "good", "createRefund", good)
+	if err != nil || committed.Status != 0 {
+		t.Fatalf("committed=%+v err=%v", committed, err)
+	}
+}

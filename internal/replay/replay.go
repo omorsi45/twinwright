@@ -63,6 +63,10 @@ func Verify(ctx context.Context, source *store.Store, runID string, manifest com
 	if digest != manifest.Digest {
 		return report, fmt.Errorf("manifest mismatch for run %s", runID)
 	}
+	policyJSON, policyDigest, policyErr := source.ChaosPolicy(ctx, runID)
+	if policyErr != nil && policyErr != sql.ErrNoRows {
+		return report, policyErr
+	}
 	lineage, lineageErr := source.Lineage(ctx, runID)
 	if lineageErr != nil && lineageErr != sql.ErrNoRows {
 		return report, lineageErr
@@ -91,6 +95,9 @@ func Verify(ctx context.Context, source *store.Store, runID string, manifest com
 			if err == nil {
 				worldID = world.ID
 				_, err = target.CreateReplayRun(ctx, original, world.ID)
+				if err == nil && policyErr == nil {
+					err = target.AttachChaos(ctx, original.ID, policyJSON, policyDigest)
+				}
 			}
 		}
 	}
@@ -139,6 +146,11 @@ func Verify(ctx context.Context, source *store.Store, runID string, manifest com
 	}
 	report.ToolCalls = len(sourceResults)
 	if difference := compareResults(sourceResults, targetResults); difference != "" {
+		return diverged(report, difference), nil
+	}
+	if difference, err := compareChaosState(ctx, source.DB, target.DB, runID); err != nil {
+		return report, err
+	} else if difference != "" {
 		return diverged(report, difference), nil
 	}
 	if !sameJSON([]byte(original.Transcript), []byte(replayed.Transcript)) {
@@ -226,7 +238,7 @@ func recordedMessages(run store.Run, events []store.Event, forked bool) ([]agent
 			if i != len(events)-1 {
 				return nil, fmt.Errorf("completion event is not last")
 			}
-		case "execution.paused", "tool.request", "tool.response", "state.mutation", "retry":
+		case "execution.paused", "tool.request", "tool.response", "state.mutation", "retry", "chaos.injected", "chaos.actor_mutation":
 		case "model.request":
 			requests++
 		case "model.response":
@@ -260,7 +272,7 @@ func recordedMessages(run store.Run, events []store.Event, forked bool) ([]agent
 
 func semantic(typ string) bool {
 	switch typ {
-	case "model.request", "model.response", "tool.request", "tool.response", "state.mutation", "error", "retry":
+	case "model.request", "model.response", "tool.request", "tool.response", "state.mutation", "error", "retry", "chaos.injected", "chaos.actor_mutation":
 		return true
 	}
 	return false
@@ -350,8 +362,35 @@ func compareResults(left, right []savedResult) string {
 	return ""
 }
 
+func compareChaosState(ctx context.Context, source, target *sql.DB, runID string) (string, error) {
+	tables := []struct{ name, columns, order string }{
+		{"run_chaos", "policy_json,digest", "run_id"},
+		{"chaos_rule_state", "rule_id,matching_calls,injections", "rule_id"},
+		{"chaos_snapshots", "rule_id,arguments_digest,status,body", "rule_id,arguments_digest"},
+		{"chaos_hidden_outcomes", "call_id,rule_id,status,body", "call_id"},
+	}
+	for _, table := range tables {
+		left, err := stateRows(ctx, source, table.name, table.columns, table.order, runID)
+		if err != nil {
+			return "", err
+		}
+		right, err := stateRows(ctx, target, table.name, table.columns, table.order, runID)
+		if err != nil {
+			return "", err
+		}
+		if !reflect.DeepEqual(left, right) {
+			return table.name + " state differs", nil
+		}
+	}
+	return "", nil
+}
+
 func stateRows(ctx context.Context, db *sql.DB, table, columns, orderBy, worldID string) ([][]string, error) {
-	query := fmt.Sprintf("SELECT %s FROM %s WHERE world_id=? ORDER BY %s", columns, table, orderBy)
+	key := "world_id"
+	if table == "run_chaos" || table == "chaos_rule_state" || table == "chaos_snapshots" || table == "chaos_hidden_outcomes" {
+		key = "run_id"
+	}
+	query := fmt.Sprintf("SELECT %s FROM %s WHERE %s=? ORDER BY %s", columns, table, key, orderBy)
 	rows, err := db.QueryContext(ctx, query, worldID)
 	if err != nil {
 		return nil, err

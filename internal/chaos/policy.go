@@ -9,6 +9,7 @@ import (
 	"io"
 	"regexp"
 	"sort"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 	"twinwright/internal/compiler"
@@ -160,14 +161,11 @@ func Parse(raw []byte, manifest compiler.Manifest) (Policy, error) {
 		if entry.Type != "latency" && entry.DurationMS != nil {
 			return Policy{}, fmt.Errorf("rule %s does not accept duration_ms", entry.ID)
 		}
-		if entry.Type != "rate_limit" && entry.Type != "permission_revocation" && entry.Type != "stale_read" && entry.AfterCalls != nil {
-			return Policy{}, fmt.Errorf("rule %s does not accept after_calls", entry.ID)
-		}
 		if entry.Type == "timeout_after_commit" || entry.Type == "stale_read" {
 			for _, id := range entry.Operations {
-				method := manifest.Operation(id).Method
-				if entry.Type == "timeout_after_commit" && method != "POST" || entry.Type == "stale_read" && method != "GET" {
-					return Policy{}, fmt.Errorf("rule %s cannot target %s operation %s", entry.ID, method, id)
+				behavior := manifest.Operation(id).Behavior
+				if entry.Type == "timeout_after_commit" && !mutatingBehavior(behavior) || entry.Type == "stale_read" && !readingBehavior(behavior) {
+					return Policy{}, fmt.Errorf("rule %s cannot target behavior %s", entry.ID, behavior)
 				}
 			}
 		}
@@ -187,8 +185,8 @@ func Parse(raw []byte, manifest compiler.Manifest) (Policy, error) {
 				return Policy{}, fmt.Errorf("rule %s requires actor", entry.ID)
 			}
 			op := manifest.Operation(entry.Actor.Operation)
-			if op == nil || op.Method != "POST" {
-				return Policy{}, fmt.Errorf("rule %s actor must use a compiled POST operation", entry.ID)
+			if op == nil || !mutatingBehavior(op.Behavior) {
+				return Policy{}, fmt.Errorf("rule %s actor must use a compiled mutating operation", entry.ID)
 			}
 			if err := validateArguments(*op, entry.Actor.Arguments); err != nil {
 				return Policy{}, fmt.Errorf("rule %s actor: %w", entry.ID, err)
@@ -224,7 +222,7 @@ func validateArguments(op compiler.Operation, args map[string]any) error {
 		}
 		switch typeName {
 		case "string":
-			if text, ok := value.(string); !ok || text == "" {
+			if text, ok := value.(string); !ok || strings.TrimSpace(text) == "" {
 				return fmt.Errorf("invalid %s", name)
 			}
 		case "integer":
@@ -235,7 +233,44 @@ func validateArguments(op compiler.Operation, args map[string]any) error {
 			return fmt.Errorf("unsupported argument type %s", typeName)
 		}
 	}
+	switch op.Behavior {
+	case "billing.createRefund":
+		if args["amount_cents"].(int) <= 0 {
+			return fmt.Errorf("invalid amount_cents")
+		}
+	case "crm.updateAccountStatus":
+		value := args["status"].(string)
+		if value != "active" && value != "needs_followup" && value != "resolved" {
+			return fmt.Errorf("invalid status")
+		}
+	case "ticket.createIssue":
+		value := args["priority"].(string)
+		if value != "low" && value != "medium" && value != "high" {
+			return fmt.Errorf("invalid priority")
+		}
+	case "ticket.transitionIssue":
+		value := args["status"].(string)
+		if value != "open" && value != "investigating" && value != "resolved" {
+			return fmt.Errorf("invalid status")
+		}
+	}
 	return nil
+}
+
+func mutatingBehavior(name string) bool {
+	switch name {
+	case "billing.createRefund", "crm.addAccountNote", "crm.updateAccountStatus", "ticket.createIssue", "ticket.addComment", "ticket.transitionIssue", "messaging.postMessage":
+		return true
+	}
+	return false
+}
+
+func readingBehavior(name string) bool {
+	switch name {
+	case "billing.getCustomer", "billing.getSubscription", "billing.listInvoices", "billing.listCharges", "billing.getCharge", "crm.getAccount", "crm.searchAccounts", "ticket.getIssue", "ticket.searchIssues", "messaging.listChannels", "messaging.readChannel":
+		return true
+	}
+	return false
 }
 
 func (p Policy) CanonicalJSON() ([]byte, error) { return json.Marshal(p) }

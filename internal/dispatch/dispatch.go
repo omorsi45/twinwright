@@ -167,9 +167,17 @@ func (d *Dispatcher) Invoke(ctx context.Context, runID, callID, operationID stri
 		}
 	}
 	if postEffect {
-		if !handlerRan || status < 200 || status >= 300 || (decision.Rule.Type == "timeout_after_commit" && mutation == nil) {
-			return Result{}, fmt.Errorf("chaos rule %s expected a successful service effect", decision.RuleID)
+		if !handlerRan {
+			return Result{}, fmt.Errorf("chaos rule %s handler did not run", decision.RuleID)
 		}
+		if decision.Rule.Type == "timeout_after_commit" && (status < 200 || status >= 300 || mutation == nil) {
+			if _, err := tx.ExecContext(ctx, "UPDATE chaos_rule_state SET injections=injections-1 WHERE run_id=? AND rule_id=?", runID, decision.RuleID); err != nil {
+				return Result{}, err
+			}
+			postEffect = false
+		}
+	}
+	if postEffect {
 		actual, marshalErr := json.Marshal(response)
 		if marshalErr != nil {
 			return Result{}, marshalErr

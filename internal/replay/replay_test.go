@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"twinwright/internal/agent"
+	"twinwright/internal/chaos"
 	"twinwright/internal/checkpoint"
 	"twinwright/internal/compiler"
 	"twinwright/internal/dispatch"
@@ -89,6 +90,106 @@ func TestVerifyCompletedRunWith503AndPause(t *testing.T) {
 	}
 	if len(after) != len(before) {
 		t.Fatalf("source ledger changed: %d to %d", len(before), len(after))
+	}
+}
+
+func completedChaosRun(t *testing.T) (*store.Store, store.Run, compiler.Manifest) {
+	t.Helper()
+	ctx := context.Background()
+	source, _, manifest := completedRun(t)
+	world, err := source.Seed(ctx, 42, manifest.Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := chaos.Parse([]byte("version: 1\nrules:\n  - id: temporary-billing-failure\n    type: http_error\n    operations: [listCharges]\n    status: 503\n    times: 1\n"), manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := policy.CanonicalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := source.CreateRunWithChaos(ctx, world.ID, "duplicate-charge", "scripted", "fixture-v1", "task", "", encoded, policy.Digest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := agent.Runner{Store: source, Dispatch: &dispatch.Dispatcher{Store: source, Manifest: manifest}, Manifest: manifest, Provider: agent.ScriptedProvider{}}
+	done, err := runner.Execute(ctx, run.ID, 20)
+	if err != nil || done.Status != "completed" {
+		t.Fatalf("chaos run=%+v err=%v", done, err)
+	}
+	return source, done, manifest
+}
+
+func TestVerifyChaosRunAndFork(t *testing.T) {
+	ctx := context.Background()
+	source, parent, manifest := completedChaosRun(t)
+	rootReport, err := Verify(ctx, source, parent.ID, manifest)
+	if err != nil || !rootReport.Verified {
+		t.Fatalf("root replay=%+v err=%v", rootReport, err)
+	}
+	points, err := checkpoint.List(ctx, source, parent.ID, manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, eventType := range []string{"model.response", "tool.response"} {
+		t.Run(eventType, func(t *testing.T) {
+			var selected checkpoint.Checkpoint
+			for _, point := range points {
+				if point.EventType == eventType {
+					selected = point
+					break
+				}
+			}
+			if selected.ID == "" {
+				t.Fatalf("no %s checkpoint", eventType)
+			}
+			created, err := fork.Create(ctx, source, source, selected, manifest, fork.Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := source.ChaosPolicy(ctx, created.Run.ID); err != nil {
+				t.Fatalf("child lost chaos policy: %v", err)
+			}
+			runner := agent.Runner{Store: source, Dispatch: &dispatch.Dispatcher{Store: source, Manifest: manifest}, Manifest: manifest, Provider: agent.ScriptedProvider{}}
+			child, err := runner.Execute(ctx, created.Run.ID, 20)
+			if err != nil || child.Status != "completed" {
+				t.Fatalf("child=%+v err=%v", child, err)
+			}
+			childReport, err := Verify(ctx, source, child.ID, manifest)
+			if err != nil || !childReport.Verified {
+				t.Fatalf("child replay=%+v err=%v", childReport, err)
+			}
+		})
+	}
+}
+
+func TestVerifyChaosRejectsTamperedPolicyAndEvent(t *testing.T) {
+	for _, update := range []string{
+		"UPDATE run_chaos SET policy_json='{}' WHERE run_id=?",
+		"UPDATE events SET payload='{}' WHERE run_id=? AND type='chaos.injected'",
+	} {
+		t.Run(update, func(t *testing.T) {
+			source, run, manifest := completedChaosRun(t)
+			if _, err := source.DB.ExecContext(context.Background(), update, run.ID); err != nil {
+				t.Fatal(err)
+			}
+			if report, err := Verify(context.Background(), source, run.ID, manifest); err == nil && report.Verified {
+				t.Fatal("tampered chaos history accepted")
+			}
+		})
+	}
+}
+
+func TestVerifyChaosRejectsTamperedCounter(t *testing.T) {
+	ctx := context.Background()
+	source, run, manifest := completedChaosRun(t)
+	if _, err := source.DB.ExecContext(ctx, "UPDATE chaos_rule_state SET matching_calls=99 WHERE run_id=?", run.ID); err != nil {
+		t.Fatal(err)
+	}
+	report, err := Verify(ctx, source, run.ID, manifest)
+	if err == nil && report.Verified {
+		t.Fatal("tampered chaos counter accepted")
 	}
 }
 

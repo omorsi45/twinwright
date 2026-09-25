@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 
+	"twinwright/internal/chaos"
 	"twinwright/internal/checkpoint"
 	"twinwright/internal/compiler"
 	"twinwright/internal/store"
@@ -130,6 +131,9 @@ func Create(ctx context.Context, sourceReadOnly, destination *store.Store, selec
 		return Result{}, err
 	}
 	if err := copyToolResults(ctx, rebuiltStore.DB, tx, parent.ID, child.ID); err != nil {
+		return Result{}, err
+	}
+	if err := chaos.CopyRun(ctx, rebuiltStore.DB, tx, parent.ID, child.ID); err != nil {
 		return Result{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO checkpoints(id,run_id,event_seq,format_version,manifest_digest,prefix_digest) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`,

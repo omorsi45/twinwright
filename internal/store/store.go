@@ -322,6 +322,15 @@ func (s *Store) ChaosPolicy(ctx context.Context, runID string) ([]byte, string, 
 	return []byte(encoded), digest, nil
 }
 
+// AttachChaos initializes policy for a replay run before tool execution.
+func (s *Store) AttachChaos(ctx context.Context, runID string, policyJSON []byte, digest string) error {
+	if !json.Valid(policyJSON) { return fmt.Errorf("invalid chaos policy JSON") }
+	hash := sha256.Sum256(policyJSON)
+	if hex.EncodeToString(hash[:]) != digest { return fmt.Errorf("chaos policy digest mismatch") }
+	_, err := s.DB.ExecContext(ctx, "INSERT INTO run_chaos(run_id,policy_json,digest) VALUES(?,?,?)", runID, string(policyJSON), digest)
+	return err
+}
+
 func (s *Store) Run(ctx context.Context, id string) (Run, error) {
 	var r Run
 	err := s.DB.QueryRowContext(ctx, "SELECT id,world_id,scenario,provider,model,task,status,step,transcript,fault_operation FROM runs WHERE id=?", id).Scan(&r.ID, &r.WorldID, &r.Scenario, &r.Provider, &r.Model, &r.Task, &r.Status, &r.Step, &r.Transcript, &r.FaultOperation)

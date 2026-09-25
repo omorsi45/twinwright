@@ -102,3 +102,33 @@ func TestParseRejectsInvalidPolicies(t *testing.T) {
 		}
 	}
 }
+
+func TestParseUsesBehaviorSemanticsForSearchAndActor(t *testing.T) {
+	root := filepath.Join("..", "..", "examples", "company")
+	spec, _ := os.ReadFile(filepath.Join(root, "openapi.yaml"))
+	bindings, _ := os.ReadFile(filepath.Join(root, "bindings.yaml"))
+	manifest, err := compiler.Compile(spec, bindings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rule := range []string{
+		"type: stale_read\n    operations: [crmSearchAccounts]\n    after_calls: 1",
+		"type: timeout\n    operations: [crmSearchAccounts]\n    times: 1\n    after_calls: 2",
+	} {
+		if _, err := Parse([]byte("version: 1\nrules:\n  - id: x\n    "+rule+"\n"), manifest); err != nil {
+			t.Fatalf("valid rule rejected: %v", err)
+		}
+	}
+	for _, rule := range []string{
+		"type: timeout_after_commit\n    operations: [crmSearchAccounts]\n    times: 1",
+		"type: concurrent_mutation\n    operations: [getCharge]\n    times: 1\n    actor:\n      operation: crmSearchAccounts\n      arguments: {query: Morgan}",
+		"type: concurrent_mutation\n    operations: [getCharge]\n    times: 1\n    actor:\n      operation: crmUpdateAccountStatus\n      arguments: {account_id: A-104, status: bogus}",
+	} {
+		if _, err := Parse([]byte("version: 1\nrules:\n  - id: x\n    "+rule+"\n"), manifest); err == nil {
+			t.Fatalf("invalid rule accepted: %s", rule)
+		}
+	}
+	if _, err := Parse([]byte("version: 1\nrules:\n  - id: x\n    type: concurrent_mutation\n    operations: [getCharge]\n    times: 1\n    actor:\n      operation: createRefund\n      arguments: {charge_id: CH-1002, amount_cents: -1, reason: actor}\n"), manifest); err == nil {
+		t.Fatal("negative actor refund accepted")
+	}
+}
