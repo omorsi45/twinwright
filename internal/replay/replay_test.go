@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -190,6 +191,37 @@ func TestVerifyChaosRejectsTamperedCounter(t *testing.T) {
 	report, err := Verify(ctx, source, run.ID, manifest)
 	if err == nil && report.Verified {
 		t.Fatal("tampered chaos counter accepted")
+	}
+}
+
+func TestVerifyAmbiguousCommitFixtures(t *testing.T) {
+	for _, unsafe := range []bool{false, true} {
+		t.Run(fmt.Sprint(unsafe), func(t *testing.T) {
+			ctx := context.Background()
+			s, _, manifest := completedRun(t)
+			world, err := s.SeedScenario(ctx, 43, manifest.Digest, "ambiguous-commit")
+			if err != nil {
+				t.Fatal(err)
+			}
+			policy, err := chaos.Parse([]byte("version: 1\nrules:\n  - id: lost\n    type: timeout_after_commit\n    operations: [createRefund]\n    times: 1\n"), manifest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			encoded, _ := policy.CanonicalJSON()
+			run, err := s.CreateRunWithChaos(ctx, world.ID, "ambiguous-commit", "scripted", "fixture-v1", "task", "", encoded, policy.Digest())
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner := agent.Runner{Store: s, Dispatch: &dispatch.Dispatcher{Store: s, Manifest: manifest}, Manifest: manifest, Provider: agent.AmbiguousScriptedProvider{Unsafe: unsafe}}
+			completed, err := runner.Execute(ctx, run.ID, 8)
+			if err != nil || completed.Status != "completed" {
+				t.Fatalf("run=%+v err=%v", completed, err)
+			}
+			report, err := Verify(ctx, s, run.ID, manifest)
+			if err != nil || !report.Verified {
+				t.Fatalf("replay=%+v err=%v", report, err)
+			}
+		})
 	}
 }
 

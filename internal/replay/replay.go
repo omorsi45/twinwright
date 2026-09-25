@@ -51,7 +51,7 @@ func Verify(ctx context.Context, source *store.Store, runID string, manifest com
 		return report, fmt.Errorf("run %s is %s; replay requires a completed run", runID, original.Status)
 	}
 	switch original.Scenario {
-	case "duplicate-charge", "company-incident", "company-routine", "company-no-duplicate":
+	case "duplicate-charge", "ambiguous-commit", "company-incident", "company-routine", "company-no-duplicate":
 	default:
 		return report, fmt.Errorf("unsupported scenario %q", original.Scenario)
 	}
@@ -163,7 +163,7 @@ func Verify(ctx context.Context, source *store.Store, runID string, manifest com
 		{"charges", "id,invoice_id,amount_cents,refunded_cents,created_at", "id"},
 		{"refunds", "id,charge_id,amount_cents,reason,created_at", "id"},
 	}
-	if original.Scenario != "duplicate-charge" {
+	if original.Scenario != "duplicate-charge" && original.Scenario != "ambiguous-commit" {
 		tables = append(tables, []tableSpec{
 			{"subscriptions", "id,customer_id,status,plan", "id"},
 			{"crm_accounts", "id,customer_id,status,representative_id", "id"},

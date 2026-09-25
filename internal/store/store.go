@@ -166,7 +166,7 @@ func (s *Store) Seed(ctx context.Context, seed int64, digest string) (World, err
 
 func (s *Store) SeedScenario(ctx context.Context, seed int64, digest, scenario string) (World, error) {
 	switch scenario {
-	case "duplicate-charge", "company-incident", "company-routine", "company-no-duplicate":
+	case "duplicate-charge", "ambiguous-commit", "company-incident", "company-routine", "company-no-duplicate":
 	default:
 		return World{}, fmt.Errorf("unknown scenario %q", scenario)
 	}
@@ -324,9 +324,13 @@ func (s *Store) ChaosPolicy(ctx context.Context, runID string) ([]byte, string, 
 
 // AttachChaos initializes policy for a replay run before tool execution.
 func (s *Store) AttachChaos(ctx context.Context, runID string, policyJSON []byte, digest string) error {
-	if !json.Valid(policyJSON) { return fmt.Errorf("invalid chaos policy JSON") }
+	if !json.Valid(policyJSON) {
+		return fmt.Errorf("invalid chaos policy JSON")
+	}
 	hash := sha256.Sum256(policyJSON)
-	if hex.EncodeToString(hash[:]) != digest { return fmt.Errorf("chaos policy digest mismatch") }
+	if hex.EncodeToString(hash[:]) != digest {
+		return fmt.Errorf("chaos policy digest mismatch")
+	}
 	_, err := s.DB.ExecContext(ctx, "INSERT INTO run_chaos(run_id,policy_json,digest) VALUES(?,?,?)", runID, string(policyJSON), digest)
 	return err
 }
