@@ -1374,3 +1374,26 @@ cases:
 		t.Fatalf("compare=%s", out.String())
 	}
 }
+
+func TestShadowCLIObserveOnly(t *testing.T) {
+	examples := filepath.Join("..", "..", "examples")
+	dir := t.TempDir()
+	manifest := filepath.Join(dir, "manifest.json")
+	if err := runCLI([]string{"build", filepath.Join(examples, "billing", "openapi.yaml"), "--out", manifest}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := runCLI([]string{
+		"shadow", "--config", filepath.Join(examples, "shadow", "observe-only.yaml"),
+		"--examples", examples, "--manifest", manifest, "--scenario", "duplicate-charge",
+		"--agent", "scripted", "--work-dir", filepath.Join(dir, "work"),
+	}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), `"experimental":true`) || !strings.Contains(out.String(), `"comparison"`) {
+		t.Fatalf("%s", out.String())
+	}
+	if err := runCLI([]string{"shadow", "--config", filepath.Join(dir, "missing.yaml"), "--examples", examples, "--manifest", manifest}, &bytes.Buffer{}); err == nil {
+		t.Fatal("missing config accepted")
+	}
+}

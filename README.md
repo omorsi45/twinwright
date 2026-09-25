@@ -55,6 +55,7 @@ A run can:
 - summarize a run and render its ledger as a trace, including an OpenTelemetry JSON export
 - drive a run with OpenAI Responses, an OpenAI-compatible chat endpoint, Anthropic Messages, or a scripted fixture
 - run Twinwright Bench, a curated suite with deterministic ground truth and JSON reports
+- experimentally observe recorded actions, simulate proposed local tool calls, and compare them without production writes
 
 The project includes a minimal billing world and a multi-service company world spanning billing, CRM, ticketing, and messaging.
 
@@ -401,6 +402,22 @@ This is intervention analysis. The counts describe the forks that ran; they are 
 
 See `examples/counterfactual/` and `docs/adr/0011-counterfactual-analysis.md`.
 
+## Experimental shadow mode
+
+**Experimental.** Shadow mode does not connect to production systems. It reads an observe-only config, loads a JSONL observation log, simulates what an agent would do in a local Twinwright world, and compares proposed tool calls to observed human actions. Write mode and production adapters are rejected.
+
+```bash
+go run ./cmd/twinwright build examples/billing/openapi.yaml --out twinwright.manifest.json
+go run ./cmd/twinwright shadow \
+  --config examples/shadow/observe-only.yaml \
+  --examples examples \
+  --manifest twinwright.manifest.json \
+  --scenario duplicate-charge \
+  --agent scripted
+```
+
+The JSON output always sets `experimental: true`. Secret env names listed in the config are never printed. See `docs/adr/0015-shadow-mode.md`.
+
 ## Twinwright Bench
 
 `twinwright bench` runs a curated suite of serious scenarios with deterministic judges (scenario evaluation or assertion files). The first public suite is `examples/bench/standard.yaml`: 16 cases across reliability, reasoning, safety, security, recovery, and long-horizon categories. It is not a thousand trivial templates.
@@ -608,6 +625,7 @@ internal/
   checkpoint/         checkpoint discovery and reconstruction
   fork/               fork execution and trajectory comparison
   counterfactual/     intervention analysis over forks
+  shadow/             experimental observe-only shadow simulation
   redact/             secret redaction before storage or display
   trace/              ledger traces, text trees, and OTLP export
 
@@ -619,6 +637,7 @@ examples/
   assertions/         declarative assertions for the example scenarios
   counterfactual/     intervention files for the example failures
   bench/              Twinwright Bench suite definitions
+  shadow/             experimental observe-only configs and sample observations
 
 docs/adr/             architecture decision records
 ```
@@ -704,6 +723,7 @@ Major runtime contracts are documented as ADRs under `docs/adr/`, including:
 - ledger traces and provider error redaction
 - multiple agent providers behind one internal message shape
 - Twinwright Bench suite runner and report comparison
+- experimental observe-only shadow mode
 
 The ADRs document not only what Twinwright does, but why the implementation makes those tradeoffs.
 

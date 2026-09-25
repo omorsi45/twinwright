@@ -24,6 +24,7 @@ import (
 	"twinwright/internal/eval"
 	"twinwright/internal/fork"
 	"twinwright/internal/replay"
+	"twinwright/internal/shadow"
 	"twinwright/internal/store"
 	"twinwright/internal/trace"
 )
@@ -37,7 +38,7 @@ func main() {
 
 func runCLI(args []string, out io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: twinwright build|build-world|run|resume|inspect|trace|replay|checkpoints|fork|compare|evaluate|counterfactual|bench ...")
+		return fmt.Errorf("usage: twinwright build|build-world|run|resume|inspect|trace|replay|checkpoints|fork|compare|evaluate|counterfactual|bench|shadow ...")
 	}
 	ctx := context.Background()
 	switch args[0] {
@@ -651,6 +652,87 @@ func runCLI(args []string, out io.Writer) error {
 			}
 		}
 		return emit(out, report)
+	case "shadow":
+		fs := flag.NewFlagSet("shadow", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		configPath := fs.String("config", "", "experimental observe-only shadow config YAML")
+		examplesRoot := fs.String("examples", "examples", "examples directory")
+		manifestPath := fs.String("manifest", "twinwright.manifest.json", "compiled manifest")
+		scenario := fs.String("scenario", "duplicate-charge", "local scenario to simulate")
+		providerName := fs.String("agent", "scripted", "scripted, openai, openai-compatible, or anthropic")
+		model := fs.String("model", "", "provider model")
+		baseURL := fs.String("base-url", os.Getenv("OPENAI_BASE_URL"), "base URL for openai-compatible")
+		steps := fs.Int("steps", 20, "maximum model turns for the local simulation")
+		workDir := fs.String("work-dir", "", "local DB directory; defaults to a temp dir")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *configPath == "" {
+			return fmt.Errorf("shadow requires --config")
+		}
+		raw, err := os.ReadFile(*configPath)
+		if err != nil {
+			return err
+		}
+		cfg, err := shadow.Parse(raw, *examplesRoot)
+		if err != nil {
+			return err
+		}
+		for _, name := range cfg.SecretEnv {
+			_ = os.Getenv(name) // presence only; never log values
+		}
+		if *model == "" {
+			*model = defaultModel(*providerName)
+		}
+		*model = resolveRunModel(*providerName, *model)
+		manifest, err := readManifest(*manifestPath)
+		if err != nil {
+			return err
+		}
+		if err := checkScenarioManifest(manifest, *scenario); err != nil {
+			return err
+		}
+		task, err := scenarioTask(*scenario)
+		if err != nil {
+			return err
+		}
+		provider, err := selectProvider(*providerName, *model, *scenario, *baseURL)
+		if err != nil {
+			return err
+		}
+		dir := *workDir
+		if dir == "" {
+			dir, err = os.MkdirTemp("", "twinwright-shadow-*")
+			if err != nil {
+				return err
+			}
+			defer os.RemoveAll(dir)
+		}
+		proposed, runID, err := shadow.Simulate(ctx, shadow.SimulateOptions{
+			Manifest: manifest, Scenario: *scenario, Task: task, Provider: provider,
+			AgentName: *providerName, Model: *model, Steps: *steps, WorkDir: dir,
+		})
+		if err != nil {
+			return err
+		}
+		observed, err := shadow.LoadObservations(*examplesRoot, cfg.Source.Path)
+		if err != nil {
+			return err
+		}
+		comparison, err := shadow.Compare(proposed, observed)
+		if err != nil {
+			return err
+		}
+		return emit(out, map[string]any{
+			"experimental":  true,
+			"label":         cfg.Label,
+			"mode":          cfg.Mode,
+			"config_digest": cfg.Digest(),
+			"run_id":        runID,
+			"proposed":      proposed,
+			"observed":      observed,
+			"comparison":    comparison,
+		})
 	case "trace":
 		if len(args) < 2 {
 			return fmt.Errorf("usage: twinwright trace <run-id> [--format json|text|otlp] [--db path]")
