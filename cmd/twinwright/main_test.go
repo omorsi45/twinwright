@@ -1110,3 +1110,110 @@ func TestCLIFailedForkDoesNotMigrateLegacyDatabase(t *testing.T) {
 		t.Fatalf("failed fork created %d lineage tables", count)
 	}
 }
+
+type counterfactualReportForTest struct {
+	RunID   string `json:"run_id"`
+	Failure struct {
+		Judge  string   `json:"judge"`
+		Failed []string `json:"failed"`
+	} `json:"failure"`
+	Candidates []struct {
+		EventSeq     int    `json:"event_seq"`
+		Intervention string `json:"intervention"`
+		CallID       string `json:"call_id"`
+		Forks        int    `json:"forks"`
+		Changed      int    `json:"changed"`
+		Summary      string `json:"summary"`
+		Evidence     []struct {
+			RunID  string `json:"run_id"`
+			Status string `json:"status"`
+		} `json:"evidence"`
+	} `json:"candidates"`
+}
+
+func TestCounterfactualFromCLI(t *testing.T) {
+	root := filepath.Join("..", "..", "examples")
+	dir := t.TempDir()
+	billing, company, db := filepath.Join(dir, "billing.json"), filepath.Join(dir, "company.json"), filepath.Join(dir, "world.db")
+	must := func(args ...string) []byte {
+		t.Helper()
+		var out bytes.Buffer
+		if err := runCLI(args, &out); err != nil {
+			t.Fatalf("%v: %v", args, err)
+		}
+		return out.Bytes()
+	}
+	runID := func(out []byte) string {
+		t.Helper()
+		var result struct {
+			Run struct {
+				ID string `json:"id"`
+			} `json:"run"`
+		}
+		if err := json.Unmarshal(out, &result); err != nil {
+			t.Fatal(err)
+		}
+		return result.Run.ID
+	}
+	analyze := func(args ...string) counterfactualReportForTest {
+		t.Helper()
+		var report counterfactualReportForTest
+		if err := json.Unmarshal(must(append([]string{"counterfactual"}, args...)...), &report); err != nil {
+			t.Fatal(err)
+		}
+		return report
+	}
+	must("build", filepath.Join(root, "billing", "openapi.yaml"), "--out", billing)
+	must("build", filepath.Join(root, "company", "openapi.yaml"), "--bindings", filepath.Join(root, "company", "bindings.yaml"), "--out", company)
+	interventions := filepath.Join(root, "counterfactual", "ambiguous-commit.yaml")
+
+	missing := filepath.Join(dir, "missing.db")
+	if err := runCLI([]string{"counterfactual", "R-x", "--interventions", interventions, "--manifest", billing, "--db", missing}, &bytes.Buffer{}); err == nil {
+		t.Fatal("missing database accepted")
+	}
+	if _, err := os.Stat(missing); !os.IsNotExist(err) {
+		t.Fatalf("counterfactual created a database: %v", err)
+	}
+
+	unsafe := runID(must("run", "ambiguous-commit", "--agent", "scripted", "--recovery", "unsafe", "--manifest", billing, "--db", db, "--chaos", filepath.Join(root, "chaos", "ambiguous-commit.yaml")))
+	scenario := analyze(unsafe, "--interventions", interventions, "--manifest", billing, "--db", db)
+	if scenario.RunID != unsafe || scenario.Failure.Judge != "scenario_evaluation" || len(scenario.Candidates) != 6 {
+		t.Fatalf("report=%+v", scenario)
+	}
+	top := scenario.Candidates[0]
+	if top.Intervention != "latency-instead-of-lost-response" || top.EventSeq != 4 || top.Changed != 1 || !strings.Contains(top.Summary, "corrected the final outcome in 1/1 forks") {
+		t.Fatalf("top candidate=%+v", top)
+	}
+	must("replay", top.Evidence[0].RunID, "--manifest", billing, "--db", db)
+
+	withAssertions := analyze(unsafe, "--interventions", interventions, "--assertions", filepath.Join(root, "assertions", "ambiguous-commit.yaml"), "--trials", "2", "--manifest", billing, "--db", db)
+	changed := map[string]int{}
+	for _, c := range withAssertions.Candidates {
+		if c.Forks != 2 {
+			t.Fatalf("candidate=%+v", c)
+		}
+		changed[strconv.Itoa(c.EventSeq)+" "+c.Intervention] = c.Changed
+	}
+	if withAssertions.Failure.Judge != "assertions" || changed["7 refund-delivered"] != 2 || changed["4 latency-instead-of-lost-response"] != 0 {
+		t.Fatalf("assertion-judged changes=%v", changed)
+	}
+
+	for name, args := range map[string][]string{
+		"missing interventions": {"counterfactual", unsafe, "--manifest", billing, "--db", db},
+		"zero trials":           {"counterfactual", unsafe, "--interventions", interventions, "--trials", "0", "--manifest", billing, "--db", db},
+		"zero steps":            {"counterfactual", unsafe, "--interventions", interventions, "--steps", "0", "--manifest", billing, "--db", db},
+		"wrong manifest":        {"counterfactual", unsafe, "--interventions", filepath.Join(root, "counterfactual", "prompt-injection-ticket.yaml"), "--manifest", company, "--db", db},
+		"passing run":           {"counterfactual", runID(must("run", "ambiguous-commit", "--agent", "scripted", "--manifest", billing, "--db", db, "--chaos", filepath.Join(root, "chaos", "ambiguous-commit.yaml"))), "--interventions", interventions, "--manifest", billing, "--db", db},
+	} {
+		if err := runCLI(args, &bytes.Buffer{}); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+
+	open := runID(must("run", "prompt-injection-ticket", "--agent", "scripted", "--manifest", company, "--db", db, "--auth", filepath.Join(root, "security", "overprivileged-policy.yaml")))
+	security := analyze(open, "--interventions", filepath.Join(root, "counterfactual", "prompt-injection-ticket.yaml"), "--assertions", filepath.Join(root, "assertions", "prompt-injection-ticket.yaml"), "--manifest", company, "--db", db)
+	if len(security.Candidates) != 4 || security.Candidates[0].CallID != "security-1" || security.Candidates[0].Changed != 1 || security.Candidates[3].Changed != 0 {
+		t.Fatalf("security report=%+v", security)
+	}
+	must("replay", security.Candidates[0].Evidence[0].RunID, "--manifest", company, "--db", db)
+}

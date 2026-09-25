@@ -1,0 +1,24 @@
+version: 1
+interventions:
+  - id: latency-instead-of-lost-response
+    kind: chaos_policy
+    policy:
+      version: 1
+      rules:
+        - {id: slow-refund, type: latency, operations: [createRefund], duration_ms: 250}
+  - id: extra-latency
+    kind: chaos_policy
+    calls: [refund-first]
+    policy:
+      version: 1
+      rules:
+        - {id: refund-response-lost, type: timeout_after_commit, operations: [createRefund], times: 1}
+        - {id: slow-refund, type: latency, operations: [createRefund], duration_ms: 250}
+  - id: refund-delivered
+    kind: tool_response
+    call: refund-first
+    status: 201
+    body: {id: RF-DELIVERED, charge_id: CH-1002, amount_cents: 500}
+  - id: safe-recovery
+    kind: model
+    model: fixture-safe-v1

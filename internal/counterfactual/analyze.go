@@ -78,55 +78,81 @@ type plan struct {
 	provider   agent.Provider
 }
 
-// Analyze forks a failed root run once per candidate and trial, executes each
-// child, and ranks candidates by how often the judged outcome changed. The
-// source must be a read-only handle to the destination's database file.
+// Analysis is a validated set of forks to run against one parent.
+type Analysis struct {
+	header   Report
+	plans    []plan
+	manifest compiler.Manifest
+	judge    Judge
+	options  Options
+}
+
+// Analyze prepares and runs an analysis in one call.
 func Analyze(ctx context.Context, source, destination *store.Store, runID string, manifest compiler.Manifest, set Set, judge Judge, options Options) (Report, error) {
+	analysis, err := Prepare(ctx, source, runID, manifest, set, judge, options)
+	if err != nil {
+		return Report{}, err
+	}
+	return analysis.Run(ctx, source, destination)
+}
+
+// Prepare checks that the run is a completed, failing root run and validates
+// every fork it will create. It only reads.
+func Prepare(ctx context.Context, source *store.Store, runID string, manifest compiler.Manifest, set Set, judge Judge, options Options) (*Analysis, error) {
 	if len(set.interventions) == 0 || set.manifest.Digest != manifest.Digest {
-		return Report{}, fmt.Errorf("intervention set was not parsed for this manifest")
+		return nil, fmt.Errorf("intervention set was not parsed for this manifest")
 	}
 	if judge.check == nil {
-		return Report{}, fmt.Errorf("judge is required")
+		return nil, fmt.Errorf("judge is required")
 	}
 	if options.Trials < 1 || options.Trials > 100 || options.Steps < 1 || options.ProviderFor == nil {
-		return Report{}, fmt.Errorf("counterfactual analysis requires 1 to 100 trials, positive steps, and a provider source")
+		return nil, fmt.Errorf("counterfactual analysis requires 1 to 100 trials, positive steps, and a provider source")
 	}
 	parent, err := source.Run(ctx, runID)
 	if err != nil {
-		return Report{}, err
+		return nil, err
 	}
 	if parent.Status != "completed" {
-		return Report{}, fmt.Errorf("run %s is %s; counterfactual analysis requires a completed run", runID, parent.Status)
+		return nil, fmt.Errorf("run %s is %s; counterfactual analysis requires a completed run", runID, parent.Status)
 	}
 	points, err := checkpoint.List(ctx, source, runID, manifest)
 	if err != nil {
-		return Report{}, err
+		return nil, err
 	}
 	events, err := source.Events(ctx, runID)
 	if err != nil {
-		return Report{}, err
+		return nil, err
 	}
 	passed, failed, err := judge.check(ctx, source, parent)
 	if err != nil {
-		return Report{}, err
+		return nil, err
 	}
 	if passed {
-		return Report{}, fmt.Errorf("run %s passes its %s; counterfactual analysis explains failures", runID, judge.Name)
+		return nil, fmt.Errorf("run %s passes its %s; counterfactual analysis explains failures", runID, judge.Name)
 	}
 	calls, err := discoverCalls(events)
 	if err != nil {
-		return Report{}, err
+		return nil, err
 	}
 	plans, err := planForks(ctx, source, parent, manifest, set, calls, points, options)
 	if err != nil {
-		return Report{}, err
+		return nil, err
 	}
-	report := Report{RunID: runID, Method: method, Failure: Failure{Judge: judge.Name, Digest: judge.Digest, Failed: failed},
-		Interventions: set.Digest(), Trials: options.Trials, Candidates: []Candidate{}}
-	for _, p := range plans {
+	header := Report{RunID: runID, Method: method, Failure: Failure{Judge: judge.Name, Digest: judge.Digest, Failed: failed},
+		Interventions: set.Digest(), Trials: options.Trials}
+	return &Analysis{header: header, plans: plans, manifest: manifest, judge: judge, options: options}, nil
+}
+
+// Run forks the parent once per candidate and trial, executes each child, and
+// ranks candidates by how often the judged outcome changed. The source must be
+// a read-only handle to the destination's database file.
+func (a *Analysis) Run(ctx context.Context, source, destination *store.Store) (Report, error) {
+	report := a.header
+	report.Candidates = []Candidate{}
+	for _, p := range a.plans {
 		c := p.candidate
-		for trial := 0; trial < options.Trials; trial++ {
-			outcome, err := runFork(ctx, source, destination, manifest, p, judge, options.Steps)
+		for trial := 0; trial < a.options.Trials; trial++ {
+			outcome, err := runFork(ctx, source, destination, a.manifest, p, a.judge, a.options.Steps)
 			if err != nil {
 				return Report{}, err
 			}
@@ -145,17 +171,17 @@ func Analyze(ctx context.Context, source, destination *store.Store, runID string
 		report.Candidates = append(report.Candidates, c)
 	}
 	sort.SliceStable(report.Candidates, func(i, j int) bool {
-		a, b := report.Candidates[i], report.Candidates[j]
-		if a.Changed*b.Forks != b.Changed*a.Forks {
-			return a.Changed*b.Forks > b.Changed*a.Forks
+		x, y := report.Candidates[i], report.Candidates[j]
+		if x.Changed*y.Forks != y.Changed*x.Forks {
+			return x.Changed*y.Forks > y.Changed*x.Forks
 		}
-		if a.Changed != b.Changed {
-			return a.Changed > b.Changed
+		if x.Changed != y.Changed {
+			return x.Changed > y.Changed
 		}
-		if a.EventSeq != b.EventSeq {
-			return a.EventSeq < b.EventSeq
+		if x.EventSeq != y.EventSeq {
+			return x.EventSeq < y.EventSeq
 		}
-		return a.Intervention < b.Intervention
+		return x.Intervention < y.Intervention
 	})
 	return report, nil
 }
