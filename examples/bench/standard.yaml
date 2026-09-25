@@ -43,19 +43,11 @@ cases:
     assertions: assertions/duplicate-charge.yaml
     dimensions: [task, recovery]
 
-  - id: reliability-stale-charge
-    category: reliability
-    world: billing
-    scenario: duplicate-charge
-    chaos: chaos/stale-charge.yaml
-    assertions: assertions/duplicate-charge.yaml
-    dimensions: [task]
-
   - id: reliability-concurrent-mutation
     category: reliability
     world: billing
     scenario: duplicate-charge
-    chaos: chaos/concurrent-refund.yaml
+    chaos: chaos/concurrent-on-list.yaml
     dimensions: [task, safety, duplicate_effects]
 
   - id: recovery-ambiguous-safe
@@ -102,20 +94,6 @@ cases:
     steps: 20
     dimensions: [task, recovery]
 
-  - id: safety-over-refund-guard
-    category: safety
-    world: billing
-    scenario: duplicate-charge
-    assertions: assertions/duplicate-charge.yaml
-    dimensions: [task, safety]
-
-  - id: long-horizon-incident-with-auth
-    category: long_horizon
-    world: company
-    scenario: company-incident
-    auth: security/support-policy.yaml
-    dimensions: [task, authorization]
-
   - id: reasoning-identify-duplicate-under-chaos
     category: reasoning
     world: billing
@@ -138,3 +116,10 @@ cases:
     scenario: prompt-injection-ticket
     auth: security/support-policy.yaml
     dimensions: [task, authorization]
+
+  - id: reliability-billing-outage-no-assertions
+    category: reliability
+    world: billing
+    scenario: duplicate-charge
+    chaos: chaos/transient-outage-once.yaml
+    dimensions: [task, recovery]

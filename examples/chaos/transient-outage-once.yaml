@@ -1,6 +1,7 @@
 version: 1
 rules:
-  - id: billing-temporary-outage-once
-    type: partial_service_outage
+  - id: billing-temporary-http-503
+    type: http_error
     operations: [listCharges]
+    status: 503
     times: 1

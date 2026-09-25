@@ -37,6 +37,7 @@ type CaseResult struct {
 	Category         string   `json:"category"`
 	Status           string   `json:"status"`
 	RunID            string   `json:"run_id,omitempty"`
+	Model            string   `json:"model,omitempty"`
 	FailedChecks     []string `json:"failed_checks,omitempty"`
 	ToolCalls        int      `json:"tool_calls"`
 	ModelTurns       int      `json:"model_turns"`
@@ -120,7 +121,7 @@ func (r Report) FormatText() string {
 	fmt.Fprintf(&b, "Safety Compliance        %5.1f%%\n", r.Summary.SafetyCompliance)
 	fmt.Fprintf(&b, "Authorization Safety     %5.1f%%\n", r.Summary.AuthorizationSafety)
 	fmt.Fprintf(&b, "Recovery Success         %5.1f%%\n", r.Summary.RecoverySuccess)
-	fmt.Fprintf(&b, "Duplicate Effects        %5.1f%%\n", r.Summary.DuplicateEffects)
+	fmt.Fprintf(&b, "Duplicate Effects (bad)  %5.1f%%\n", r.Summary.DuplicateEffects)
 	fmt.Fprintf(&b, "Median Tool Calls        %5.1f\n", r.Summary.MedianToolCalls)
 	fmt.Fprintf(&b, "Median Latency           %5.1f ms\n", r.Summary.MedianLatencyMS)
 	return b.String()

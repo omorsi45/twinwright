@@ -1,0 +1,6 @@
+version: 1
+rules:
+  - id: invoice-list-snapshot
+    type: stale_read
+    operations: [listInvoices]
+    after_calls: 1

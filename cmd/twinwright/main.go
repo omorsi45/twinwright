@@ -634,7 +634,7 @@ func runCLI(args []string, out io.Writer) error {
 			Agent:        *providerName,
 			Model:        *model,
 			BaseURL:      *baseURL,
-			Seed:         *seed,
+			Seed:         seed,
 			ProviderFor:  selectProvider,
 		})
 		if err != nil {

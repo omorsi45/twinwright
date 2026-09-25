@@ -61,8 +61,8 @@ func TestParseStandardSuiteFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if suite.Name != "standard" || len(suite.Cases) < 12 {
-		t.Fatalf("suite=%+v", suite)
+	if suite.Name != "standard" || len(suite.Cases) != 16 {
+		t.Fatalf("suite=%+v len=%d", suite, len(suite.Cases))
 	}
 	seen := map[string]bool{}
 	for _, c := range suite.Cases {

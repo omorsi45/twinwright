@@ -403,7 +403,7 @@ See `examples/counterfactual/` and `docs/adr/0011-counterfactual-analysis.md`.
 
 ## Twinwright Bench
 
-`twinwright bench` runs a curated suite of serious scenarios with deterministic judges (scenario evaluation or assertion files). The first public suite is `examples/bench/standard.yaml`: 18 cases across reliability, reasoning, safety, security, recovery, and long-horizon categories. It is not a thousand trivial templates.
+`twinwright bench` runs a curated suite of serious scenarios with deterministic judges (scenario evaluation or assertion files). The first public suite is `examples/bench/standard.yaml`: 16 cases across reliability, reasoning, safety, security, recovery, and long-horizon categories. It is not a thousand trivial templates.
 
 ```bash
 go run ./cmd/twinwright bench \

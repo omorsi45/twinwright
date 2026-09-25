@@ -27,7 +27,7 @@ type Options struct {
 	Agent        string
 	Model        string
 	BaseURL      string
-	Seed         int64
+	Seed         *int64
 	ProviderFor  func(provider, model, scenario, baseURL string) (agent.Provider, error)
 }
 
@@ -45,8 +45,9 @@ func Run(ctx context.Context, suite Suite, options Options) (Report, error) {
 	if options.Agent == "scripted" && options.Model == "" {
 		options.Model = "fixture-v1"
 	}
-	if options.Seed == 0 {
-		options.Seed = 42
+	seed := int64(42)
+	if options.Seed != nil {
+		seed = *options.Seed
 	}
 	if err := os.MkdirAll(options.WorkDir, 0755); err != nil {
 		return Report{}, err
@@ -62,12 +63,20 @@ func Run(ctx context.Context, suite Suite, options Options) (Report, error) {
 		Model:  options.Model,
 		Cases:  make([]CaseResult, 0, len(suite.Cases)),
 	}
+	models := map[string]bool{}
 	for _, c := range suite.Cases {
-		result := runCase(ctx, c, manifests, options)
+		result := runCase(ctx, c, manifests, options, seed)
 		report.Cases = append(report.Cases, result)
+		if result.Model != "" {
+			models[result.Model] = true
+		}
 	}
-	if report.Model == "" && len(report.Cases) > 0 {
-		// surface the model actually used on the first successful create
+	if len(models) > 1 {
+		report.Model = "mixed"
+	} else if len(models) == 1 {
+		for m := range models {
+			report.Model = m
+		}
 	}
 	report.Aggregate()
 	return report, nil
@@ -138,12 +147,17 @@ func confinedLoader(directory string) (func(string) ([]byte, error), error) {
 	}, nil
 }
 
-func runCase(ctx context.Context, c Case, manifests worldManifests, options Options) CaseResult {
+func runCase(ctx context.Context, c Case, manifests worldManifests, options Options, seed int64) CaseResult {
 	start := time.Now()
 	result := CaseResult{ID: c.ID, Category: c.Category, Dimensions: append([]string(nil), c.Dimensions...), Status: "error"}
 	manifest, err := manifestFor(c.World, manifests)
 	if err != nil {
 		result.Error = err.Error()
+		result.WallMS = time.Since(start).Milliseconds()
+		return result
+	}
+	if c.Fault != "" && manifest.Operation(c.Fault) == nil {
+		result.Error = fmt.Sprintf("unknown fault operation %q", c.Fault)
 		result.WallMS = time.Since(start).Milliseconds()
 		return result
 	}
@@ -161,6 +175,7 @@ func runCase(ctx context.Context, c Case, manifests worldManifests, options Opti
 		result.WallMS = time.Since(start).Milliseconds()
 		return result
 	}
+	result.Model = model
 	provider, err := options.ProviderFor(options.Agent, model, c.Scenario, options.BaseURL)
 	if err != nil {
 		result.Error = err.Error()
@@ -182,7 +197,7 @@ func runCase(ctx context.Context, c Case, manifests worldManifests, options Opti
 		return result
 	}
 	defer s.Close()
-	world, err := s.SeedScenario(ctx, options.Seed, manifest.Digest, c.Scenario)
+	world, err := s.SeedScenario(ctx, seed, manifest.Digest, c.Scenario)
 	if err != nil {
 		result.Error = err.Error()
 		result.WallMS = time.Since(start).Milliseconds()

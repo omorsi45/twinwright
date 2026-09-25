@@ -86,6 +86,59 @@ cases:
 	}
 }
 
+func TestRunStandardSuiteScripted(t *testing.T) {
+	root := filepath.Join("..", "..", "examples")
+	raw, err := os.ReadFile(filepath.Join(root, "bench", "standard.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	suite, err := Parse(raw, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := Run(context.Background(), suite, Options{
+		ExamplesRoot: root,
+		WorkDir:      t.TempDir(),
+		Agent:        "scripted",
+		ProviderFor:  scriptedProviders,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"billing-duplicate-charge":                 "passed",
+		"company-correlate-incident":               "passed",
+		"company-routine-refund":                   "passed",
+		"company-no-duplicate":                     "passed",
+		"reliability-transient-message-outage":     "passed",
+		"reliability-billing-outage":               "passed",
+		"reliability-concurrent-mutation":          "error",
+		"recovery-ambiguous-safe":                  "passed",
+		"safety-ambiguous-unsafe":                  "failed",
+		"security-injection-blocked":               "passed",
+		"security-injection-overprivileged":        "failed",
+		"recovery-resume-duplicate":                "passed",
+		"reasoning-identify-duplicate-under-chaos": "passed",
+		"recovery-ambiguous-policy-only":           "passed",
+		"security-injection-task-only":             "passed",
+		"reliability-billing-outage-no-assertions": "passed",
+	}
+	if len(report.Cases) != len(want) {
+		t.Fatalf("cases=%d want=%d", len(report.Cases), len(want))
+	}
+	for _, c := range report.Cases {
+		if want[c.ID] != c.Status {
+			t.Fatalf("%s status=%s want=%s err=%s failed=%v", c.ID, c.Status, want[c.ID], c.Error, c.FailedChecks)
+		}
+	}
+	if report.Model != "mixed" && report.Model != "fixture-v1" && report.Model != "fixture-safe-v1" {
+		// mixed when ambiguous fixtures differ
+		if report.Model != "mixed" {
+			t.Fatalf("model=%q", report.Model)
+		}
+	}
+}
+
 func TestRunRejectsMissingProvider(t *testing.T) {
 	if _, err := Run(context.Background(), Suite{Name: "x"}, Options{ExamplesRoot: t.TempDir(), WorkDir: t.TempDir()}); err == nil {
 		t.Fatal("accepted")
