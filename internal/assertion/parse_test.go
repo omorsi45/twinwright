@@ -121,6 +121,13 @@ func TestDigestCoversManifest(t *testing.T) {
 	}
 }
 
+func TestParseAcceptsObservationOverrideEvents(t *testing.T) {
+	file := []byte("version: 1\nassertions: [{id: saw_real_response, type: event_absent, event: observation.overridden}]\n")
+	if _, err := Parse(file, manifestFrom(t, "billing"), testCustoms); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCheckRejectsUnparsedSet(t *testing.T) {
 	f := newFixture(t)
 	if _, err := Check(context.Background(), f.store, f.run.ID, Set{}); err == nil {

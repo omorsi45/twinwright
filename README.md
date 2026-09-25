@@ -347,9 +347,9 @@ Removing the lost response at the first refund, showing the agent a delivered re
 | `model` | Switches the provider or model for the next decision | After the targeted call's response |
 | `tool_response` | Substitutes what the agent saw as one call's response | At that response |
 
-`calls` limits an intervention to named call IDs; without it, every eligible call is a candidate. Everything is validated before the first fork is created. `--assertions` defines success; without it the scenario evaluation is used. The definition matters: `examples/assertions/ambiguous-commit.yaml` requires that the lost response was observed, so a fork that removes the fault fails it even though its refund is correct.
+`calls` limits an intervention to named call IDs; without it, every eligible call is a candidate. Everything is validated before the first fork is created. An intervention that would change nothing, such as the run's own model or fault, or two things at once, such as a chaos policy on a run with a legacy fault, is rejected. `--assertions` defines success; without it the scenario evaluation is used. The definition matters: `examples/assertions/ambiguous-commit.yaml` requires that the lost response was observed, so a fork that removes the fault fails it even though its refund is correct.
 
-A `tool_response` fork changes only what the child saw: its transcript and saved result for that call. World state stays as it was. The substitution is recorded in `fork_observations` and as an `observation.overridden` event, so replay applies the same change and detects tampering with either.
+A `tool_response` fork changes only what the child saw: its transcript and saved result for that call. World state stays as it was. The substitution is recorded in `fork_observations` and as an `observation.overridden` event, so replay applies the same change and detects tampering with either. Assertions on such a fork still see the parent's original response in the inherited history; an `event_absent` assertion on `observation.overridden` excludes these forks from a success definition.
 
 `examples/counterfactual/prompt-injection-ticket.yaml` does the same for the overprivileged prompt-injection run: the support policy corrects the outcome when applied at the ticket read or the foreign customer lookup, and has no effect once the lookup has already succeeded.
 

@@ -220,6 +220,51 @@ func TestAnalyzeAmbiguousUnsafeRun(t *testing.T) {
 	}
 }
 
+func TestAnalyzeFindsModelDecisionAfterPauseAndResume(t *testing.T) {
+	f := ambiguousFixture(t, "fixture-unsafe-v1", 1)
+	if f.run.Status != "paused" {
+		t.Fatalf("parent status=%s", f.run.Status)
+	}
+	runner := agent.Runner{Store: f.destination, Dispatch: &dispatch.Dispatcher{Store: f.destination, Manifest: f.manifest}, Manifest: f.manifest, Provider: agent.AmbiguousScriptedProvider{Unsafe: true}}
+	completed, err := runner.Execute(context.Background(), f.run.ID, 20)
+	if err != nil || completed.Status != "completed" {
+		t.Fatalf("resumed=%+v err=%v", completed, err)
+	}
+	f.run = completed
+	report := analyze(t, f, "version: 1\ninterventions:\n  - {id: safe-recovery, kind: model, model: fixture-safe-v1, calls: [refund-first]}\n", ScenarioJudge(), 1)
+	if len(report.Candidates) != 1 || report.Candidates[0].EventSeq != 10 || report.Candidates[0].CheckpointSeq != 7 || report.Candidates[0].Changed != 1 {
+		t.Fatalf("candidates=%+v", report.Candidates)
+	}
+}
+
+func TestAnalyzeRejectsInterventionsThatChangeNothingOrTwoThings(t *testing.T) {
+	f := newFixture(t, billingManifest(t), "duplicate-charge", "fixture-v1", store.RunOptions{FaultOperation: "listCharges"}, 20)
+	failing := Judge{Name: "test", check: func(context.Context, *store.Store, store.Run) (bool, []string, error) {
+		return false, []string{"forced"}, nil
+	}}
+	cases := map[string]string{
+		"chaos policy with legacy fault": "{id: a, kind: chaos_policy, policy: {version: 1, rules: [{id: r, type: latency, operations: [createRefund], duration_ms: 1}]}}",
+		"same fault":                     "{id: a, kind: fault, operation: listCharges}",
+		"model ignored by provider":      "{id: a, kind: model, model: fixture-v2}",
+	}
+	for name, intervention := range cases {
+		set, err := Parse([]byte("version: 1\ninterventions:\n  - "+intervention+"\n"), f.manifest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Prepare(context.Background(), f.source, f.run.ID, f.manifest, set, failing, Options{Trials: 1, Steps: 20, ProviderFor: scriptedProviders}); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	set, err := Parse([]byte("version: 1\ninterventions:\n  - {id: a, kind: fault}\n"), f.manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Prepare(context.Background(), f.source, f.run.ID, f.manifest, set, failing, Options{Trials: 1, Steps: 20, ProviderFor: scriptedProviders}); err != nil {
+		t.Fatalf("clearing the legacy fault rejected: %v", err)
+	}
+}
+
 func stripRunIDs(report Report) string {
 	for i := range report.Candidates {
 		for j := range report.Candidates[i].Evidence {
@@ -359,9 +404,12 @@ func TestAnalyzeRejectsUnsuitableParentsAndTargets(t *testing.T) {
 	if n := forks(f); n != 0 {
 		t.Fatalf("rejected analyses wrote %d forks", n)
 	}
+	if err := run(f, f.run.ID, "version: 1\ninterventions:\n  - {id: a, kind: model, model: fixture-unsafe-v1}\n"); err == nil || !strings.Contains(err.Error(), "does not change") {
+		t.Fatalf("unchanged model error=%v", err)
+	}
 	report := analyze(t, f, ambiguousInterventions, ScenarioJudge(), 1)
-	if err := run(f, report.Candidates[0].Evidence[0].RunID, ambiguousInterventions); err == nil {
-		t.Fatal("fork of a fork accepted")
+	if err := run(f, report.Candidates[0].Evidence[0].RunID, ambiguousInterventions); err == nil || !strings.Contains(err.Error(), "requires a root run") {
+		t.Fatalf("fork of a fork error=%v", err)
 	}
 	if err := run(f, f.run.ID, ambiguousInterventions); err != nil {
 		t.Fatalf("repeat analysis failed: %v", err)

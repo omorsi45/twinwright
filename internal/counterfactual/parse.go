@@ -85,8 +85,19 @@ func Parse(raw []byte, manifest compiler.Manifest) (Set, error) {
 	}
 	root := node.Content[0]
 	for i := 0; i+1 < len(root.Content); i += 2 {
-		if root.Content[i].Value == "version" && root.Content[i+1].Tag != "!!int" {
+		key, value := root.Content[i].Value, root.Content[i+1]
+		if key == "version" && value.Tag != "!!int" {
 			return Set{}, fmt.Errorf("interventions version must be an integer")
+		}
+		if key != "interventions" || value.Kind != yaml.SequenceNode {
+			continue
+		}
+		for _, item := range value.Content {
+			for j := 0; item.Kind == yaml.MappingNode && j+1 < len(item.Content); j += 2 {
+				if item.Content[j].Value == "status" && item.Content[j+1].Tag != "!!int" {
+					return Set{}, fmt.Errorf("intervention status must be an integer")
+				}
+			}
 		}
 	}
 	if err := rejectNulls(root, "interventions file"); err != nil {
@@ -214,9 +225,9 @@ func normalize(in rawIntervention, manifest compiler.Manifest) (Intervention, er
 		if !present["body"] {
 			return Intervention{}, fmt.Errorf("kind tool_response requires body")
 		}
-		var value any
-		if err := in.Body.Decode(&value); err != nil {
-			return Intervention{}, fmt.Errorf("body: %w", err)
+		value, err := bodyValue(&in.Body)
+		if err != nil {
+			return Intervention{}, err
 		}
 		body, err := json.Marshal(value)
 		if err != nil {
@@ -227,6 +238,56 @@ func normalize(in rawIntervention, manifest compiler.Manifest) (Intervention, er
 	return out, nil
 }
 
+// bodyValue converts a YAML body to a JSON value, keeping number literals exact
+// and scalars such as dates as their written text.
+func bodyValue(n *yaml.Node) (any, error) {
+	switch n.Kind {
+	case yaml.AliasNode:
+		return bodyValue(n.Alias)
+	case yaml.MappingNode:
+		value := map[string]any{}
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			key := n.Content[i]
+			if key.Kind != yaml.ScalarNode || key.Tag != "!!str" {
+				return nil, fmt.Errorf("body keys must be strings")
+			}
+			item, err := bodyValue(n.Content[i+1])
+			if err != nil {
+				return nil, err
+			}
+			value[key.Value] = item
+		}
+		return value, nil
+	case yaml.SequenceNode:
+		value := []any{}
+		for _, child := range n.Content {
+			item, err := bodyValue(child)
+			if err != nil {
+				return nil, err
+			}
+			value = append(value, item)
+		}
+		return value, nil
+	case yaml.ScalarNode:
+		switch n.Tag {
+		case "!!null":
+			return nil, nil
+		case "!!bool":
+			var value bool
+			err := n.Decode(&value)
+			return value, err
+		case "!!int", "!!float":
+			if json.Valid([]byte(n.Value)) {
+				return json.Number(n.Value), nil
+			}
+			return nil, fmt.Errorf("body number %q is not a JSON number", n.Value)
+		case "!!str", "!!timestamp":
+			return n.Value, nil
+		}
+	}
+	return nil, fmt.Errorf("unsupported body value with tag %s", n.Tag)
+}
+
 func rejectNulls(n *yaml.Node, path string) error {
 	switch n.Kind {
 	case yaml.ScalarNode:
@@ -235,6 +296,9 @@ func rejectNulls(n *yaml.Node, path string) error {
 		}
 	case yaml.MappingNode:
 		for i := 0; i+1 < len(n.Content); i += 2 {
+			if path == "interventions file.interventions[]" && n.Content[i].Value == "body" {
+				continue
+			}
 			if err := rejectNulls(n.Content[i+1], path+"."+n.Content[i].Value); err != nil {
 				return err
 			}

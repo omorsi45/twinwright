@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"sort"
 
 	"twinwright/internal/agent"
@@ -115,6 +116,11 @@ func Prepare(ctx context.Context, source *store.Store, runID string, manifest co
 	if parent.Status != "completed" {
 		return nil, fmt.Errorf("run %s is %s; counterfactual analysis requires a completed run", runID, parent.Status)
 	}
+	if _, err := source.Lineage(ctx, runID); err == nil {
+		return nil, fmt.Errorf("run %s is a fork; counterfactual analysis requires a root run", runID)
+	} else if err != sql.ErrNoRows {
+		return nil, err
+	}
 	points, err := checkpoint.List(ctx, source, runID, manifest)
 	if err != nil {
 		return nil, err
@@ -187,11 +193,12 @@ func (a *Analysis) Run(ctx context.Context, source, destination *store.Store) (R
 }
 
 // discoverCalls reads tool calls from a ledger already validated by
-// checkpoint.List, where event i has sequence i+1.
+// checkpoint.List. The decision after a call is the next model response when
+// no other tool call comes first; a pause and resume may sit between them.
 func discoverCalls(events []store.Event) ([]call, error) {
 	var calls []call
 	decisionFor := -1
-	for i, event := range events {
+	for _, event := range events {
 		switch event.Type {
 		case "tool.request":
 			var request struct {
@@ -202,13 +209,10 @@ func discoverCalls(events []store.Event) ([]call, error) {
 				return nil, err
 			}
 			calls = append(calls, call{id: request.CallID, operation: request.OperationID, request: event.Seq})
+			decisionFor = -1
 		case "tool.response":
 			calls[len(calls)-1].response = event.Seq
-		case "model.request":
-			decisionFor = -1
-			if i > 0 && events[i-1].Type == "tool.response" {
-				decisionFor = len(calls) - 1
-			}
+			decisionFor = len(calls) - 1
 		case "model.response":
 			if decisionFor >= 0 {
 				calls[decisionFor].decision = event.Seq
@@ -249,6 +253,9 @@ func planForks(ctx context.Context, source *store.Store, parent store.Run, manif
 		if in.Kind == KindFault && chaosErr == nil {
 			return nil, fmt.Errorf("intervention %s: a legacy fault cannot be combined with the run's chaos policy", in.ID)
 		}
+		if in.Kind == KindChaosPolicy && parent.FaultOperation != "" {
+			return nil, fmt.Errorf("intervention %s: a chaos policy would also clear the run's legacy fault; use one variable per intervention", in.ID)
+		}
 		forkOptions := fork.Options{}
 		switch in.Kind {
 		case KindChaosPolicy:
@@ -259,6 +266,9 @@ func planForks(ctx context.Context, source *store.Store, parent store.Run, manif
 			operation := ""
 			if in.Operation != nil {
 				operation = *in.Operation
+			}
+			if operation == parent.FaultOperation {
+				return nil, fmt.Errorf("intervention %s does not change the run's legacy fault", in.ID)
 			}
 			forkOptions.FaultOperation = &operation
 		case KindModel:
@@ -279,6 +289,9 @@ func planForks(ctx context.Context, source *store.Store, parent store.Run, manif
 		provider, err := options.ProviderFor(providerName, model, parent.Scenario)
 		if err != nil {
 			return nil, fmt.Errorf("intervention %s: %w", in.ID, err)
+		}
+		if in.Kind == KindModel && unchangedProvider(options, parent, providerName, model, provider) {
+			return nil, fmt.Errorf("intervention %s does not change the run's provider behavior", in.ID)
 		}
 		for _, c := range targets {
 			candidate := Candidate{CallID: c.id, OperationID: c.operation, Intervention: in.ID, Kind: in.Kind}
@@ -310,6 +323,18 @@ func planForks(ctx context.Context, source *store.Store, parent store.Run, manif
 		return nil, fmt.Errorf("interventions produced no candidate events in run %s", parent.ID)
 	}
 	return plans, nil
+}
+
+// unchangedProvider reports a model intervention that names the run's own
+// provider and model, or selects a provider identical to the run's, such as a
+// scripted fixture that ignores the model name. A parent provider that cannot
+// be built, for example without credentials, cannot be shown identical.
+func unchangedProvider(options Options, parent store.Run, providerName, model string, selected agent.Provider) bool {
+	if providerName == parent.Provider && model == parent.Model {
+		return true
+	}
+	original, err := options.ProviderFor(parent.Provider, parent.Model, parent.Scenario)
+	return err == nil && reflect.DeepEqual(original, selected)
 }
 
 // runFork creates and executes one child. A failed child execution is recorded

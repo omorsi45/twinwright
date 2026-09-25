@@ -78,6 +78,27 @@ func TestParseAcceptsEveryKind(t *testing.T) {
 	}
 }
 
+func TestParseKeepsToolResponseBodyExact(t *testing.T) {
+	manifest := billingManifest(t)
+	cases := map[string]string{
+		"{id: 123456789012345678901234567890, ratio: 0.1}": `{"id":123456789012345678901234567890,"ratio":0.1}`,
+		"null":                     `null`,
+		"''":                       `""`,
+		"{note: '', flag: yes}":    `{"flag":"yes","note":""}`,
+		"[1, true, x, 2026-01-02]": `[1,true,"x","2026-01-02"]`,
+	}
+	for body, want := range cases {
+		set, err := Parse([]byte("version: 1\ninterventions:\n  - id: a\n    kind: tool_response\n    call: c1\n    status: 200\n    body: "+body+"\n"), manifest)
+		if err != nil {
+			t.Errorf("%s: %v", body, err)
+			continue
+		}
+		if got := string(set.interventions[0].Body); got != want {
+			t.Errorf("%s: body %s, want %s", body, got, want)
+		}
+	}
+}
+
 func TestParseDigestIsStableAcrossKeyOrder(t *testing.T) {
 	manifest := billingManifest(t)
 	left, err := Parse([]byte("version: 1\ninterventions:\n  - {id: a, kind: tool_response, call: c1, status: 200, body: {x: 1, y: 2}}\n"), manifest)
@@ -125,8 +146,11 @@ func TestParseRejectsInvalidFiles(t *testing.T) {
 		"response with calls":   {one("{id: a, kind: tool_response, calls: [c1], call: c1, status: 200, body: {}}"), "does not accept calls"},
 		"response no status":    {one("{id: a, kind: tool_response, call: c1, body: {}}"), "requires status"},
 		"response bad status":   {one("{id: a, kind: tool_response, call: c1, status: 700, body: {}}"), "status 700"},
-		"response quoted":       {one("{id: a, kind: tool_response, call: c1, status: '200', body: {}}"), "cannot unmarshal"},
+		"response quoted":       {one("{id: a, kind: tool_response, call: c1, status: '200', body: {}}"), "status must be an integer"},
 		"response no body":      {one("{id: a, kind: tool_response, call: c1, status: 200}"), "requires body"},
+		"fractional status":     {one("{id: a, kind: tool_response, call: c1, status: 200.5, body: {}}"), "status must be an integer"},
+		"non-string body key":   {one("{id: a, kind: tool_response, call: c1, status: 200, body: {1: x}}"), "keys must be strings"},
+		"binary body":           {one("{id: a, kind: tool_response, call: c1, status: 200, body: !!binary aGk=}"), "unsupported body value"},
 	}
 	for name, tc := range cases {
 		_, err := Parse([]byte(tc.input), manifest)
