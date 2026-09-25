@@ -2,6 +2,7 @@ package messaging
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"twinwright/internal/store"
@@ -22,13 +23,15 @@ func TestMessagesAreStatefulAndWorldScoped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	callNumber := 0
 	invoke := func(worldID, behavior string, args map[string]any) (int, any, any) {
 		t.Helper()
+		callNumber++
 		tx, err := s.DB.BeginTx(ctx, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
-		status, body, mutation, err := Handle(ctx, tx, worldID, "run", "call-1", behavior, args)
+		status, body, mutation, err := Handle(ctx, tx, worldID, "run", fmt.Sprintf("call-%d", callNumber), behavior, args)
 		if err != nil {
 			tx.Rollback()
 			t.Fatal(err)
@@ -58,6 +61,10 @@ func TestMessagesAreStatefulAndWorldScoped(t *testing.T) {
 	status, _, _ = invoke(first.ID, "messaging.postMessage", map[string]any{"channel_id": "missing", "body": "text"})
 	if status != 404 {
 		t.Fatalf("missing channel status=%d", status)
+	}
+	status, _, mutation = invoke(first.ID, "messaging.postMessage", map[string]any{"channel_id": "CH-SUPPORT", "body": " \t "})
+	if status != 400 || mutation != nil {
+		t.Fatalf("blank message status=%d mutation=%v", status, mutation)
 	}
 }
 

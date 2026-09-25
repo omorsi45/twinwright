@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -78,7 +79,7 @@ func Handle(ctx context.Context, tx *sql.Tx, worldID, runID, callID, behavior st
 	case "messaging.postMessage":
 		channelID, channelOK := args["channel_id"].(string)
 		body, bodyOK := args["body"].(string)
-		if !channelOK || channelID == "" || !bodyOK || body == "" {
+		if !channelOK || strings.TrimSpace(channelID) == "" || !bodyOK || strings.TrimSpace(body) == "" {
 			return 400, map[string]string{"error": "invalid message arguments"}, nil, nil
 		}
 		var existing string

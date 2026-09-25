@@ -289,11 +289,11 @@ func scenarioTask(scenario string) (string, error) {
 	case "duplicate-charge":
 		return "Customer C-104 says they were charged twice. Investigate the account and refund only the duplicate charge if appropriate.", nil
 	case "company-incident":
-		return "Investigate C-104 across billing and CRM. Refund only a duplicate charge. Record a CRM resolution note, track the software incident in ticketing, and notify the support channel.", nil
+		return "Investigate customer C-104 and CRM account A-104. Refund only a duplicate charge. Record the finding in a CRM note. If the account has software incident evidence, create an engineering issue in project PROJ-ENG and notify the support channel in workspace WS-1.", nil
 	case "company-routine":
-		return "Investigate C-104 across billing and CRM. Refund only a duplicate charge, record a CRM resolution note, and escalate only if there is software incident evidence.", nil
+		return "Investigate customer C-104 and CRM account A-104. Refund only a duplicate charge, record the finding in a CRM note, and escalate only if there is software incident evidence. Engineering project PROJ-ENG and support workspace WS-1 are available if escalation is needed.", nil
 	case "company-no-duplicate":
-		return "Investigate C-104 across billing and CRM. Refund only if a duplicate charge exists, record the finding in CRM, and escalate only if there is software incident evidence.", nil
+		return "Investigate customer C-104 and CRM account A-104. Refund only if a duplicate charge exists, record the finding in a CRM note, and escalate only if there is software incident evidence. Engineering project PROJ-ENG and support workspace WS-1 are available if escalation is needed.", nil
 	default:
 		return "", fmt.Errorf("unknown scenario %q", scenario)
 	}

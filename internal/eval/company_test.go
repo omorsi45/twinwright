@@ -33,7 +33,11 @@ func finishCompany(t *testing.T, s *store.Store, world, scenario string) {
 		execCompany(t, s, "INSERT INTO refunds(world_id,id,charge_id,amount_cents,reason,created_at) SELECT world_id,'RF-eval',id,amount_cents,'Duplicate charge','2026-02-13T00:00:00Z' FROM charges WHERE world_id=? AND id='CH-1002'", world)
 		execCompany(t, s, "UPDATE charges SET refunded_cents=amount_cents WHERE world_id=? AND id='CH-1002'", world)
 	}
-	execCompany(t, s, "INSERT INTO crm_notes VALUES(?,?,?,?,?)", world, "NOTE-eval", "A-104", "Billing investigation completed.", "2026-02-13T00:00:00Z")
+	note := "Duplicate charge was refunded after billing investigation."
+	if scenario == "company-no-duplicate" {
+		note = "Only one legitimate charge was found; no refund was needed."
+	}
+	execCompany(t, s, "INSERT INTO crm_notes VALUES(?,?,?,?,?)", world, "NOTE-eval", "A-104", note, "2026-02-13T00:00:00Z")
 	status := "resolved"
 	if scenario == "company-incident" {
 		status = "needs_followup"
@@ -75,8 +79,9 @@ func TestCompanyEvaluationRejectsIncorrectState(t *testing.T) {
 		{"seeded note is not resolution", "company-incident", "DELETE FROM crm_notes WHERE world_id=? AND id='NOTE-eval'"},
 		{"blank note", "company-routine", "UPDATE crm_notes SET body='   ' WHERE world_id=? AND id='NOTE-eval'"},
 		{"wrong account note", "company-routine", "UPDATE crm_notes SET account_id='A-205' WHERE world_id=? AND id='NOTE-eval'"},
-		{"wrong resolution status", "company-routine", "UPDATE crm_accounts SET status='active' WHERE world_id=? AND id='A-104'"},
-		{"incident requires followup", "company-incident", "UPDATE crm_accounts SET status='resolved' WHERE world_id=? AND id='A-104'"},
+		{"unrelated note", "company-routine", "UPDATE crm_notes SET body='Customer called about a meeting.' WHERE world_id=? AND id='NOTE-eval'"},
+		{"contradictory note", "company-no-duplicate", "UPDATE crm_notes SET body='A duplicate was found and refunded.' WHERE world_id=? AND id='NOTE-eval'"},
+		{"missing incident finding", "company-incident", "UPDATE crm_notes SET body='Account reviewed.' WHERE world_id=? AND id='NOTE-eval'"},
 		{"wrong customer link", "company-routine", "UPDATE crm_accounts SET customer_id='C-205' WHERE world_id=? AND id='A-104'"},
 		{"wrong refund target", "company-routine", "UPDATE refunds SET charge_id='CH-1001' WHERE world_id=?"},
 		{"partial refund", "company-routine", "UPDATE refunds SET amount_cents=1 WHERE world_id=?"},
@@ -122,6 +127,27 @@ func TestCompanyEvaluationIsWorldScoped(t *testing.T) {
 	execCompany(t, s, "UPDATE crm_accounts SET status='resolved' WHERE world_id=? AND id='A-205'", other.ID)
 	if report := companyReport(t, s, world, "company-incident"); !report.Passed {
 		t.Fatalf("other world affected result: %+v", report)
+	}
+}
+func TestCompanyEvaluationAcceptsStatusAndNoteWordingAlternatives(t *testing.T) {
+	variants := []struct {
+		scenario string
+		note     string
+	}{
+		{"company-incident", "Second charge reimbursed after billing review."},
+		{"company-routine", "Double charge refunded for account A-104."},
+		{"company-no-duplicate", "No second charge found, refund not needed."},
+	}
+	for _, variant := range variants {
+		t.Run(variant.scenario, func(t *testing.T) {
+			s, world := companyFixture(t, variant.scenario)
+			finishCompany(t, s, world, variant.scenario)
+			execCompany(t, s, "UPDATE crm_notes SET body=? WHERE world_id=? AND id='NOTE-eval'", variant.note, world)
+			execCompany(t, s, "UPDATE crm_accounts SET status='active' WHERE world_id=? AND id='A-104'", world)
+			if report := companyReport(t, s, world, variant.scenario); !report.Passed {
+				t.Fatalf("valid alternative failed: %+v", report)
+			}
+		})
 	}
 }
 func TestEvaluatePreservesDuplicateChargeChecks(t *testing.T) {

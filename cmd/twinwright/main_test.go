@@ -277,6 +277,10 @@ func TestCompanyScenariosFromCLI(t *testing.T) {
 			if run["status"] != "paused" {
 				t.Fatalf("run=%v", run)
 			}
+			task := run["task"].(string)
+			if !strings.Contains(task, "PROJ-ENG") || !strings.Contains(task, "WS-1") {
+				t.Fatalf("company resources are not discoverable in task: %s", task)
+			}
 			id := run["id"].(string)
 			completed := invoke("resume", id, "--agent", "scripted", "--manifest", manifest, "--db", db, "--steps", "30")
 			if completed["run"].(map[string]any)["status"] != "completed" || completed["evaluation"].(map[string]any)["passed"] != true {

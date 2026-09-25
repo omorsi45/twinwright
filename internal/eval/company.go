@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"strings"
 
 	"twinwright/internal/store"
 )
@@ -41,16 +42,16 @@ func company(ctx context.Context, s *store.Store, worldID, scenario string) (Rep
 		}
 		checks = append(checks, Check{"no_refund", refunds == 0 && changedCharges == 0}, Check{"no_duplicate_charge", duplicates == 0})
 	}
-	expectedStatus := "resolved"
-	if scenario == "company-incident" {
-		expectedStatus = "needs_followup"
+	notePassed, err := hasFindingNote(ctx, s, worldID, scenario)
+	if err != nil {
+		return Report{}, err
 	}
+	checks = append(checks, Check{"crm_finding_note", notePassed})
 	queries := []struct {
 		name, query string
 		args        []any
 	}{
-		{"crm_resolution_note", `SELECT EXISTS(SELECT 1 FROM crm_notes WHERE world_id=? AND account_id='A-104' AND id NOT LIKE 'SEED-%' AND trim(body,char(9)||char(10)||char(13)||' ')<>'')`, []any{worldID}},
-		{"crm_account_status", `SELECT EXISTS(SELECT 1 FROM crm_accounts WHERE world_id=? AND id='A-104' AND customer_id='C-104' AND status=?)`, []any{worldID, expectedStatus}},
+		{"crm_account_linked", `SELECT EXISTS(SELECT 1 FROM crm_accounts WHERE world_id=? AND id='A-104' AND customer_id='C-104')`, []any{worldID}},
 		{"unrelated_account_untouched", `SELECT
             EXISTS(SELECT 1 FROM crm_accounts WHERE world_id=?1 AND id='A-205' AND customer_id='C-205' AND status='active' AND representative_id='REP-1')
             AND EXISTS(SELECT 1 FROM customers WHERE world_id=?1 AND id='C-205' AND name='Taylor Reed')
@@ -102,3 +103,33 @@ func company(ctx context.Context, s *store.Store, worldID, scenario string) (Rep
 }
 
 var targetAccountReference = regexp.MustCompile(`(?i)\b(?:A|C)-104\b`)
+
+var duplicateFinding = regexp.MustCompile(`\bduplicate\b|\bduplicated\b|\bdouble charge\b|\bsecond\b.*\bcharge\b`)
+var refundFinding = regexp.MustCompile(`\brefund(?:ed)?\b|\breimburs(?:ed|ement)\b`)
+var noDuplicateFinding = regexp.MustCompile(`\bno duplicate\b|\bno second charge\b|\bonly one\b|\bone legitimate\b|\bsingle legitimate\b`)
+var noRefundFinding = regexp.MustCompile(`\bno refund\b|\brefund not\b|\bdid not refund\b|\bwithout refund\b`)
+
+func hasFindingNote(ctx context.Context, s *store.Store, worldID, scenario string) (bool, error) {
+	rows, err := s.DB.QueryContext(ctx, "SELECT id,body FROM crm_notes WHERE world_id=? AND account_id='A-104' ORDER BY id", worldID)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	found := false
+	for rows.Next() {
+		var id, body string
+		if err = rows.Scan(&id, &body); err != nil {
+			return false, err
+		}
+		if strings.HasPrefix(id, "SEED-") {
+			continue
+		}
+		body = strings.ToLower(strings.TrimSpace(body))
+		if scenario == "company-no-duplicate" {
+			found = found || noDuplicateFinding.MatchString(body) && noRefundFinding.MatchString(body)
+		} else {
+			found = found || duplicateFinding.MatchString(body) && refundFinding.MatchString(body) && !noRefundFinding.MatchString(body)
+		}
+	}
+	return found, rows.Err()
+}
