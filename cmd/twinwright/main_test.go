@@ -488,6 +488,89 @@ func TestResolveRunModel(t *testing.T) {
 	}
 }
 
+func TestSecurityScenarioFromCLI(t *testing.T) {
+	root := filepath.Join("..", "..", "examples")
+	dir := t.TempDir()
+	manifest, db := filepath.Join(dir, "manifest.json"), filepath.Join(dir, "world.db")
+	support := filepath.Join(root, "security", "support-policy.yaml")
+	overprivileged := filepath.Join(root, "security", "overprivileged-policy.yaml")
+	invoke := func(args ...string) map[string]any {
+		t.Helper()
+		var out bytes.Buffer
+		if err := runCLI(args, &out); err != nil {
+			t.Fatalf("%v: %v", args, err)
+		}
+		var value map[string]any
+		if err := json.Unmarshal(out.Bytes(), &value); err != nil {
+			t.Fatal(err)
+		}
+		return value
+	}
+	detected := func(result map[string]any, finding string) bool {
+		return result["security"].(map[string]any)[finding].(map[string]any)["detected"] == true
+	}
+	invoke("build", filepath.Join(root, "company", "openapi.yaml"), "--bindings", filepath.Join(root, "company", "bindings.yaml"), "--out", manifest)
+
+	invalid := filepath.Join(dir, "invalid.yaml")
+	if err := os.WriteFile(invalid, []byte("version: 1\nprincipal: {id: ''}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := runCLI([]string{"run", "prompt-injection-ticket", "--agent", "scripted", "--manifest", manifest, "--db", db, "--auth", invalid}, &bytes.Buffer{}); err == nil {
+		t.Fatal("invalid authorization policy accepted")
+	}
+	if _, err := os.Stat(db); !os.IsNotExist(err) {
+		t.Fatalf("database created before policy validation: %v", err)
+	}
+
+	paused := invoke("run", "prompt-injection-ticket", "--agent", "scripted", "--manifest", manifest, "--db", db, "--auth", support, "--steps", "2")
+	run := paused["run"].(map[string]any)
+	if run["status"] != "paused" || run["principal_id"] != "support-agent-1" {
+		t.Fatalf("paused=%v", run)
+	}
+	id := run["id"].(string)
+	completed := invoke("resume", id, "--agent", "scripted", "--manifest", manifest, "--db", db, "--steps", "10")
+	if completed["run"].(map[string]any)["principal_id"] != "support-agent-1" || completed["evaluation"].(map[string]any)["passed"] != true {
+		t.Fatalf("completed=%v", completed)
+	}
+	if !detected(completed, "blocked_violation") || detected(completed, "successful_violation") {
+		t.Fatalf("security=%v", completed["security"])
+	}
+	inspected := invoke("inspect", id, "--db", db, "--manifest", manifest)
+	if !detected(inspected, "blocked_violation") {
+		t.Fatalf("inspect security=%v", inspected["security"])
+	}
+	invoke("replay", id, "--manifest", manifest, "--db", db)
+
+	open := invoke("run", "prompt-injection-ticket", "--agent", "scripted", "--manifest", manifest, "--db", db, "--auth", overprivileged)
+	if !detected(open, "successful_violation") || open["evaluation"].(map[string]any)["passed"] != false {
+		t.Fatalf("overprivileged=%v", open)
+	}
+
+	points := invoke("checkpoints", id, "--manifest", manifest, "--db", db)["checkpoints"].([]any)
+	seq := 0
+	for _, point := range points {
+		if p := point.(map[string]any); p["event_type"] == "tool.response" {
+			seq = int(p["event_seq"].(float64))
+			break
+		}
+	}
+	forked := invoke("fork", id, "--at-event", strconv.Itoa(seq), "--manifest", manifest, "--db", db, "--auth", overprivileged, "--steps", "10")
+	child := forked["fork"].(map[string]any)["run"].(map[string]any)
+	if child["principal_id"] != "overprivileged-agent" {
+		t.Fatalf("fork child=%v", child)
+	}
+	childID := child["id"].(string)
+	if lineage := invoke("inspect", childID, "--db", db, "--manifest", manifest)["lineage"].(map[string]any); lineage["auth_replaced"] != true {
+		t.Fatalf("lineage=%v", lineage)
+	}
+	invoke("replay", childID, "--manifest", manifest, "--db", db)
+
+	plain := invoke("run", "company-routine", "--agent", "scripted", "--manifest", manifest, "--db", db)
+	if plain["run"].(map[string]any)["principal_id"] != "local-unrestricted" {
+		t.Fatalf("unrestricted run=%v", plain["run"])
+	}
+}
+
 func TestCompanyScenariosFromCLI(t *testing.T) {
 	root := filepath.Join("..", "..", "examples", "company")
 	for _, scenario := range []string{"company-incident", "company-routine", "company-no-duplicate"} {

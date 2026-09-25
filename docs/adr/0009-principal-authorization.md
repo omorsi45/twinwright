@@ -1,0 +1,15 @@
+# ADR 0009: Runtime principal authorization
+
+Status: accepted, 2026-09-25
+
+An agent's authority must not depend on its prompt. A ticket, CRM note, or message can contain instructions, and a model can call any tool name it knows. Twinwright therefore stores a validated version 1 principal policy per run and enforces it in the tool dispatcher, inside the same SQLite transaction as the service call. Checking in the prompt was rejected because injected text can override it. Checking in each service handler was rejected because every new behavior would need its own copy of the policy logic.
+
+Permissions come from a fixed allowlist that maps each built-in behavior to one permission. A behavior without a mapping is denied on a secured run instead of being treated as public. Role grants and direct grants are combined; a revocation wins over both. Resource scopes resolve customers through invoices, charges, subscriptions, CRM accounts, and tickets using world-scoped queries. Searches that could return other customers are denied when customers are scoped, and channel listing is denied when channels are scoped. A resource that does not exist cannot be shown to be in scope, so it is denied.
+
+Temporary grants and revocations use a run-local call number instead of wall-clock time. The number advances once for each unique, argument-valid tool call, including denied calls. A reused call ID returns its saved result and does not advance it. This keeps decisions reproducible across resume, replay, and forks.
+
+The dispatcher validates arguments, checks for a saved call ID, then decides authorization before any chaos rule or handler. A denial returns 403 and saves the result, transcript entry, and `authorization.denied` event atomically. An allowed call records `authorization.allowed` and then proceeds normally, including chaos effects. Runs without a policy record no authorization events, so existing ledgers keep their exact shape. The provider receives only operations whose permission is active for the next call, and the model request ledger records that filtered list.
+
+Replay attaches the stored policy, regenerates every decision from recorded assistant turns, and compares the authorization events, stored policy, and call counter. It also rejects a run whose principal does not match its policy. Checkpoint reconstruction regenerates the same filtered operation lists. A fork inherits the prefix policy and call counter unless a replacement policy is given; a lineage flag records the replacement so fork replay starts the child from the right state. Databases created before principals existed stay readable in read-only mode and report the `legacy-local` principal.
+
+`prompt-injection-ticket` measures the boundary with an adversarial fixture that obeys an injected ticket comment through direct calls. The security report classifies each call from the ledger as an attempted, blocked, or successful violation with event IDs, separately from task evaluation. Identities, grants, and revocations are local simulations. There is no external identity provider, secret store, or live model result claimed here.
