@@ -52,6 +52,7 @@ A run can:
 - fork a run and change future model or fault conditions
 - compare parent and forked trajectories
 - fork a failed run at candidate events, change one variable per fork, and rank which events the failure was sensitive to
+- summarize a run and render its ledger as a trace, including an OpenTelemetry JSON export
 
 The project includes a minimal billing world and a multi-service company world spanning billing, CRM, ticketing, and messaging.
 
@@ -147,9 +148,50 @@ go run ./cmd/twinwright replay <run-id> \
   --db company.db
 ```
 
-`inspect` exposes persisted execution state, ledger events, lineage, deterministic evaluation results, and run analysis.
+`inspect` leads with a summary (counts, wall-clock time, model time, tool time, simulated latency, token usage when a provider recorded it, and the evaluation result), then the persisted run, ledger, lineage, and analysis.
 
 `replay` reconstructs the run in an isolated world using the recorded assistant decisions. It makes no model call and does not mutate the source database. Twinwright compares semantic events, saved tool results, transcripts, and final world state to detect divergence.
+
+## Run traces
+
+`trace` projects the same ledger into a span tree. It does not record a second copy of the run, and it does not change the database.
+
+```bash
+go run ./cmd/twinwright trace <run-id> --db company.db
+go run ./cmd/twinwright trace <run-id> --format text --db company.db
+go run ./cmd/twinwright trace <run-id> --format otlp --db company.db
+```
+
+The default is JSON. `text` is an indented tree. `otlp` is one OpenTelemetry JSON document (`resourceSpans`) with hex trace and span IDs, so a collector can ingest it. A fork's root span links to its parent's root span. The same ledger always produces the same IDs.
+
+A scripted billing run that hits one injected 503 reads like this. Times are wall-clock commit times from the ledger, so they change between runs:
+
+```text
+run R-c4c57a885f400873b62689ff completed 38.655ms
+  model.invocation scripted/fixture-v1 2.041ms
+  tool.call getCustomer status=200
+  model.invocation scripted/fixture-v1 2.118ms
+  tool.call listInvoices status=200
+  model.invocation scripted/fixture-v1 2.098ms
+  tool.call listCharges status=503 server_error
+    fault.injected
+  model.invocation scripted/fixture-v1 2.086ms
+  tool.call listCharges status=200 0.539ms
+    retry
+  model.invocation scripted/fixture-v1 2.084ms
+  tool.call createRefund status=201 0.516ms
+    state.mutation
+  model.invocation scripted/fixture-v1 2.564ms
+  evaluation passed
+```
+
+Each model response and each tool call is a span. Inside a tool call, the trace records authorization checks, injected faults, retries, state mutations, and chaos actor writes. The run span carries the scenario, provider, model, principal, world, and, for a fork, the parent run. An evaluation span is added for a completed run and is marked as computed when the trace is read, not as something the agent did.
+
+Tool time is the time inside the local transaction. Model time includes a live provider round trip only when the run used one. Simulated chaos latency is a separate attribute, not added into the wall clock. Token usage is recorded when the provider reports it. Scripted fixtures do not, and no live model run has been verified. The export has not been sent to a collector in this repository.
+
+Provider error text is redacted before it is stored: the configured API key, `sk-` API keys, and bearer tokens. `trace` and `inspect` apply the same redactor to error messages already in a ledger, including `OPENAI_API_KEY` when it is set. Like `replay` and `evaluate`, they open the database read-only and still need a writable directory, because SQLite in WAL mode creates `-wal` and `-shm` files.
+
+See `docs/adr/0012-ledger-traces.md`.
 
 ## Declarative assertions
 
@@ -378,7 +420,7 @@ go run ./cmd/twinwright run company-incident \
 
 Use `OPENAI_MODEL` or `--model` to select a model.
 
-Live model behavior is nondeterministic. Twinwright's world state, tool execution, recorded decisions, and deterministic evaluators provide the reproducible boundary around it.
+Live model behavior is nondeterministic. Twinwright's world state, tool execution, recorded decisions, and deterministic evaluators provide the reproducible boundary around it. When the Responses API reports token usage, the assistant turn stores it. Error bodies are redacted before they reach the ledger.
 
 ## Engineering guarantees
 
@@ -521,6 +563,8 @@ internal/
   checkpoint/         checkpoint discovery and reconstruction
   fork/               fork execution and trajectory comparison
   counterfactual/     intervention analysis over forks
+  redact/             secret redaction before storage or display
+  trace/              ledger traces, text trees, and OTLP export
 
 examples/
   billing/            minimal stateful reference world
@@ -611,6 +655,7 @@ Major runtime contracts are documented as ADRs under `docs/adr/`, including:
 - runtime principal authorization
 - declarative run assertions
 - counterfactual intervention analysis and observation overrides
+- ledger traces and provider error redaction
 
 The ADRs document not only what Twinwright does, but why the implementation makes those tradeoffs.
 

@@ -25,6 +25,14 @@ type Message struct {
 	Status      int               `json:"status,omitempty"`
 	RawOutput   []json.RawMessage `json:"raw_output,omitempty"`
 	RawBody     string            `json:"raw_body,omitempty"`
+	Usage       *Usage            `json:"usage,omitempty"`
+}
+
+// Usage is the token count a provider reported for one turn.
+type Usage struct {
+	InputTokens  int `json:"input_tokens"`
+	OutputTokens int `json:"output_tokens"`
+	TotalTokens  int `json:"total_tokens"`
 }
 type Provider interface {
 	Next(context.Context, string, []Message, []compiler.Operation) (Message, error)

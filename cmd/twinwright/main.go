@@ -24,6 +24,7 @@ import (
 	"twinwright/internal/fork"
 	"twinwright/internal/replay"
 	"twinwright/internal/store"
+	"twinwright/internal/trace"
 )
 
 func main() {
@@ -35,7 +36,7 @@ func main() {
 
 func runCLI(args []string, out io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: twinwright build|build-world|run|resume|inspect|replay|checkpoints|fork|compare|evaluate|counterfactual ...")
+		return fmt.Errorf("usage: twinwright build|build-world|run|resume|inspect|trace|replay|checkpoints|fork|compare|evaluate|counterfactual ...")
 	}
 	ctx := context.Background()
 	switch args[0] {
@@ -559,6 +560,47 @@ func runCLI(args []string, out io.Writer) error {
 			return err
 		}
 		return emit(out, report)
+	case "trace":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: twinwright trace <run-id> [--format json|text|otlp] [--db path]")
+		}
+		fs := flag.NewFlagSet("trace", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		dbPath := fs.String("db", "twinwright.db", "SQLite world database")
+		format := fs.String("format", "json", "json, text, or otlp")
+		if err := fs.Parse(args[2:]); err != nil {
+			return err
+		}
+		switch *format {
+		case "json", "text", "otlp":
+		default:
+			return fmt.Errorf("unknown trace format %q", *format)
+		}
+		s, err := store.OpenReadOnly(*dbPath)
+		if err != nil {
+			return err
+		}
+		defer s.Close()
+		built, err := trace.Build(ctx, s, args[1], configuredSecrets()...)
+		if err != nil {
+			return err
+		}
+		switch *format {
+		case "text":
+			_, err = io.WriteString(out, trace.Text(built))
+			return err
+		case "otlp":
+			encoded, err := trace.OTLP(built)
+			if err != nil {
+				return err
+			}
+			if _, err = out.Write(append(encoded, '\n')); err != nil {
+				return err
+			}
+			return nil
+		default:
+			return emit(out, built)
+		}
 	case "inspect":
 		if len(args) < 2 {
 			return fmt.Errorf("usage: twinwright inspect <run-id> [--db path] [--manifest path]")
@@ -591,19 +633,25 @@ func runCLI(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		result := map[string]any{"run": run, "events": events, "evaluation": report, "analysis": analysis}
+		built, err := trace.Build(ctx, s, run.ID, configuredSecrets()...)
+		if err != nil {
+			return err
+		}
+		result := inspection{Summary: built.Summary, Run: run, Evaluation: report, Analysis: analysis, Events: events}
 		if run.Scenario == securityScenario {
 			manifest, err := readManifest(*manifestPath)
 			if err != nil {
 				return err
 			}
-			if err := addSecurity(ctx, result, s, run, manifest); err != nil {
+			security, err := eval.AnalyzeSecurity(ctx, s, run.ID, manifest)
+			if err != nil {
 				return err
 			}
+			result.Security = &security
 		}
 		lineage, err := s.Lineage(ctx, run.ID)
 		if err == nil {
-			result["lineage"] = lineage
+			result.Lineage = &lineage
 		} else if err != sql.ErrNoRows {
 			return err
 		}
@@ -695,6 +743,24 @@ func addSecurity(ctx context.Context, result map[string]any, s *store.Store, run
 	return nil
 }
 func emit(out io.Writer, value any) error { return json.NewEncoder(out).Encode(value) }
+
+func configuredSecrets() []string {
+	if key := os.Getenv("OPENAI_API_KEY"); key != "" {
+		return []string{key}
+	}
+	return nil
+}
+
+// inspection keeps summary first. A map would sort keys and bury it under the raw ledger.
+type inspection struct {
+	Summary    trace.Summary          `json:"summary"`
+	Run        store.Run              `json:"run"`
+	Evaluation eval.Report            `json:"evaluation"`
+	Analysis   eval.RunAnalysis       `json:"analysis"`
+	Security   *eval.SecurityAnalysis `json:"security,omitempty"`
+	Lineage    *store.ForkLineage     `json:"lineage,omitempty"`
+	Events     []store.Event          `json:"events"`
+}
 
 func scenarioTask(scenario string) (string, error) {
 	switch scenario {
