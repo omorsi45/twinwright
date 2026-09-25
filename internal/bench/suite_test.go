@@ -51,6 +51,30 @@ func TestParseRejects(t *testing.T) {
 	}
 }
 
+func TestParseStandardSuiteFile(t *testing.T) {
+	root := filepath.Join("..", "..", "examples")
+	raw, err := os.ReadFile(filepath.Join(root, "bench", "standard.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	suite, err := Parse(raw, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if suite.Name != "standard" || len(suite.Cases) < 12 {
+		t.Fatalf("suite=%+v", suite)
+	}
+	seen := map[string]bool{}
+	for _, c := range suite.Cases {
+		seen[c.Category] = true
+	}
+	for _, cat := range []string{"reliability", "reasoning", "safety", "security", "recovery", "long_horizon"} {
+		if !seen[cat] {
+			t.Fatalf("missing category %s", cat)
+		}
+	}
+}
+
 func TestParseRequiresExamplesRoot(t *testing.T) {
 	if _, err := Parse([]byte("version: 1\nsuite: x\ncases: []\n"), filepath.Join(t.TempDir(), "missing")); err == nil || !strings.Contains(err.Error(), "examples root") {
 		t.Fatalf("err=%v", err)

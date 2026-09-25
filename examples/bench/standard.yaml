@@ -1,0 +1,140 @@
+# Twinwright Bench standard suite.
+# Curated cases over the billing and company worlds. Not a thousand trivial clones.
+version: 1
+suite: standard
+cases:
+  - id: billing-duplicate-charge
+    category: reasoning
+    world: billing
+    scenario: duplicate-charge
+    assertions: assertions/duplicate-charge.yaml
+    dimensions: [task]
+
+  - id: company-correlate-incident
+    category: long_horizon
+    world: company
+    scenario: company-incident
+    dimensions: [task]
+
+  - id: company-routine-refund
+    category: reasoning
+    world: company
+    scenario: company-routine
+    dimensions: [task]
+
+  - id: company-no-duplicate
+    category: reasoning
+    world: company
+    scenario: company-no-duplicate
+    dimensions: [task]
+
+  - id: reliability-transient-message-outage
+    category: reliability
+    world: company
+    scenario: company-incident
+    fault: messagePostMessage
+    dimensions: [task, recovery]
+
+  - id: reliability-billing-outage
+    category: reliability
+    world: billing
+    scenario: duplicate-charge
+    chaos: chaos/transient-outage-once.yaml
+    assertions: assertions/duplicate-charge.yaml
+    dimensions: [task, recovery]
+
+  - id: reliability-stale-charge
+    category: reliability
+    world: billing
+    scenario: duplicate-charge
+    chaos: chaos/stale-charge.yaml
+    assertions: assertions/duplicate-charge.yaml
+    dimensions: [task]
+
+  - id: reliability-concurrent-mutation
+    category: reliability
+    world: billing
+    scenario: duplicate-charge
+    chaos: chaos/concurrent-refund.yaml
+    dimensions: [task, safety, duplicate_effects]
+
+  - id: recovery-ambiguous-safe
+    category: recovery
+    world: billing
+    scenario: ambiguous-commit
+    chaos: chaos/ambiguous-commit.yaml
+    assertions: assertions/ambiguous-commit.yaml
+    recovery: safe
+    dimensions: [task, recovery, duplicate_effects]
+
+  - id: safety-ambiguous-unsafe
+    category: safety
+    world: billing
+    scenario: ambiguous-commit
+    chaos: chaos/ambiguous-commit.yaml
+    assertions: assertions/ambiguous-commit.yaml
+    recovery: unsafe
+    dimensions: [task, safety, duplicate_effects]
+
+  - id: security-injection-blocked
+    category: security
+    world: company
+    scenario: prompt-injection-ticket
+    auth: security/support-policy.yaml
+    assertions: assertions/prompt-injection-ticket.yaml
+    dimensions: [task, authorization, safety]
+
+  - id: security-injection-overprivileged
+    category: security
+    world: company
+    scenario: prompt-injection-ticket
+    auth: security/overprivileged-policy.yaml
+    assertions: assertions/prompt-injection-ticket.yaml
+    dimensions: [task, authorization, safety]
+
+  - id: recovery-resume-duplicate
+    category: recovery
+    world: billing
+    scenario: duplicate-charge
+    assertions: assertions/duplicate-charge.yaml
+    resume: true
+    resume_at: 2
+    steps: 20
+    dimensions: [task, recovery]
+
+  - id: safety-over-refund-guard
+    category: safety
+    world: billing
+    scenario: duplicate-charge
+    assertions: assertions/duplicate-charge.yaml
+    dimensions: [task, safety]
+
+  - id: long-horizon-incident-with-auth
+    category: long_horizon
+    world: company
+    scenario: company-incident
+    auth: security/support-policy.yaml
+    dimensions: [task, authorization]
+
+  - id: reasoning-identify-duplicate-under-chaos
+    category: reasoning
+    world: billing
+    scenario: duplicate-charge
+    chaos: chaos/transient-outage-once.yaml
+    assertions: assertions/duplicate-charge.yaml
+    dimensions: [task]
+
+  - id: recovery-ambiguous-policy-only
+    category: recovery
+    world: billing
+    scenario: ambiguous-commit
+    chaos: chaos/ambiguous-commit.yaml
+    recovery: safe
+    dimensions: [task, recovery, duplicate_effects]
+
+  - id: security-injection-task-only
+    category: security
+    world: company
+    scenario: prompt-injection-ticket
+    auth: security/support-policy.yaml
+    dimensions: [task, authorization]
