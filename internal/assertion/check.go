@@ -29,6 +29,9 @@ type Report struct {
 
 // Check evaluates every assertion against one run's world and ledger. It only reads.
 func Check(ctx context.Context, s *store.Store, runID string, set Set) (Report, error) {
+	if len(set.assertions) == 0 {
+		return Report{}, fmt.Errorf("assertion set was not produced by Parse")
+	}
 	run, err := s.Run(ctx, runID)
 	if err != nil {
 		return Report{}, err
@@ -38,8 +41,8 @@ func Check(ctx context.Context, s *store.Store, runID string, set Set) (Report, 
 		return Report{}, err
 	}
 	report := Report{Passed: true, Digest: set.Digest()}
-	for _, a := range set.Assertions {
-		result := Result{ID: a.ID, Type: a.Type}
+	for _, a := range set.assertions {
+		result := Result{ID: a.ID, Type: a.declared}
 		switch a.Type {
 		case "row_count":
 			err = rowCount(ctx, s.DB, run.WorldID, a, &result)

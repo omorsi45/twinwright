@@ -93,7 +93,7 @@ func TestParseEveryAssertionType(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(set.Assertions) != 12 || set.Digest() == "" {
+	if len(set.assertions) != 12 || set.Digest() == "" {
 		t.Fatalf("set=%+v", set)
 	}
 	again, err := Parse([]byte(everyType), manifest, testCustoms)
@@ -103,6 +103,28 @@ func TestParseEveryAssertionType(t *testing.T) {
 	changed, err := Parse([]byte(strings.Replace(everyType, "equals: 1", "equals: 2", 1)), manifest, testCustoms)
 	if err != nil || changed.Digest() == set.Digest() {
 		t.Fatalf("changed bound kept digest: %v", err)
+	}
+}
+
+func TestDigestCoversManifest(t *testing.T) {
+	file := []byte("version: 1\nassertions: [{id: a, type: event_absent, event: error}]\n")
+	company, err := Parse(file, manifestFrom(t, "company"), testCustoms)
+	if err != nil {
+		t.Fatal(err)
+	}
+	billing, err := Parse(file, manifestFrom(t, "billing"), testCustoms)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if company.Digest() == billing.Digest() {
+		t.Fatal("digest ignores the manifest")
+	}
+}
+
+func TestCheckRejectsUnparsedSet(t *testing.T) {
+	f := newFixture(t)
+	if _, err := Check(context.Background(), f.store, f.run.ID, Set{}); err == nil {
+		t.Fatal("unparsed set evaluated")
 	}
 }
 
@@ -144,6 +166,9 @@ func TestParseRejectsInvalidAssertions(t *testing.T) {
 		"order missing then":      one("id: a\ntype: event_order\nfirst: {event: tool.request}"),
 		"unknown custom":          one("id: a\ntype: custom\nname: missing"),
 		"duplicate ids":           "version: 1\nassertions: [{id: a, type: event_absent, event: error}, {id: a, type: event_absent, event: retry}]\n",
+		"empty ignored field":     one("id: a\ntype: event_exists\nevent: error\ntable: ''"),
+		"empty value_from":        one("id: a\ntype: field_equals\nentity: charges.CH-1001\nfield: refunded_cents\nvalue: 0\nvalue_from: ''"),
+		"empty service":           one("id: a\ntype: row_count\ntable: refunds\nequals: 0\nservice: \"\""),
 	}
 	for name, input := range cases {
 		if _, err := Parse([]byte(input), manifest, testCustoms); err == nil {

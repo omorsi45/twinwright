@@ -57,6 +57,9 @@ func TestEventAssertions(t *testing.T) {
 	f := injectionFixture(t, "support-policy.yaml")
 	denied := f.check(t, "id: a\ntype: event_exists\nevent: authorization.denied\nwhere: {operation_id: getCustomer, reason: customer_out_of_scope}")
 	expect(t, denied, true, "")
+	if denied.Type != "event_exists" {
+		t.Fatalf("reported type=%s", denied.Type)
+	}
 	if len(denied.EventIDs) != 1 {
 		t.Fatalf("evidence=%v", denied.EventIDs)
 	}

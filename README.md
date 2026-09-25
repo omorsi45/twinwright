@@ -161,7 +161,7 @@ go run ./cmd/twinwright evaluate <run-id> \
   --db company.db
 ```
 
-`evaluate` opens the database read-only and reports each assertion with a detail and the ledger event IDs that prove it. It exits nonzero when any assertion fails, so it can gate CI.
+`evaluate` opens the database read-only and never changes world or run data. It reports each assertion with a failure detail and, for ledger assertions, the event IDs involved: matching events for counts, and violating events for ordering and forbidden mutations. It exits nonzero when any assertion fails, so it can gate CI. Like `replay`, it needs a writable directory, because SQLite in WAL mode creates its `-wal` and `-shm` files even for read-only connections.
 
 ```yaml
 version: 1

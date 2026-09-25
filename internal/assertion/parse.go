@@ -23,16 +23,18 @@ type Custom func(ctx context.Context, s *store.Store, run store.Run) (passed boo
 // Customs maps registered custom evaluator names to their code.
 type Customs map[string]Custom
 
-// Set is a validated assertion file bound to the manifest it was checked against.
+// Set is a validated assertion file bound to the manifest it was checked
+// against. Only Parse can populate it, so Check never sees unvalidated SQL
+// identifiers.
 type Set struct {
-	Version    int         `json:"version"`
-	Assertions []Assertion `json:"assertions"`
+	assertions []Assertion
 	manifest   compiler.Manifest
 	customs    Customs
 }
 
 // Assertion is the canonical form of one validated assertion.
 type Assertion struct {
+	declared   string
 	ID         string               `json:"id"`
 	Type       string               `json:"type"`
 	Table      string               `json:"table,omitempty"`
@@ -152,7 +154,7 @@ func Parse(raw []byte, manifest compiler.Manifest, customs Customs) (Set, error)
 	for _, op := range manifest.Operations {
 		services[strings.SplitN(op.Behavior, ".", 2)[0]] = true
 	}
-	set := Set{Version: 1, manifest: manifest, customs: customs}
+	set := Set{manifest: manifest, customs: customs}
 	seen := map[string]bool{}
 	for _, in := range input.Assertions {
 		if !idPattern.MatchString(in.ID) || seen[in.ID] {
@@ -163,7 +165,7 @@ func Parse(raw []byte, manifest compiler.Manifest, customs Customs) (Set, error)
 		if err != nil {
 			return Set{}, fmt.Errorf("assertion %s: %w", in.ID, err)
 		}
-		set.Assertions = append(set.Assertions, a)
+		set.assertions = append(set.assertions, a)
 	}
 	return set, nil
 }
@@ -198,7 +200,7 @@ func normalize(in rawAssertion, manifest compiler.Manifest, services map[string]
 			return Assertion{}, fmt.Errorf("type %s does not accept %s", in.Type, field)
 		}
 	}
-	a := Assertion{ID: in.ID, Type: in.Type}
+	a := Assertion{declared: in.Type, ID: in.ID, Type: in.Type}
 	var err error
 	switch in.Type {
 	case "row_count":
@@ -392,7 +394,7 @@ func eventMatch(in rawMatch) (*EventMatch, error) {
 func rejectNulls(n *yaml.Node, path string) error {
 	switch n.Kind {
 	case yaml.ScalarNode:
-		if n.Tag == "!!null" {
+		if n.Tag == "!!null" || n.Tag == "!!str" && n.Value == "" {
 			return fmt.Errorf("%s must not contain empty or null values", path)
 		}
 	case yaml.MappingNode:
@@ -420,9 +422,13 @@ func contains(list []string, value string) bool {
 	return false
 }
 
-// Digest identifies the canonical assertion set.
+// Digest identifies the canonical assertion set and the manifest that gives
+// its services and operations their meaning.
 func (s Set) Digest() string {
-	encoded, err := json.Marshal(s.Assertions)
+	encoded, err := json.Marshal(struct {
+		Manifest   string      `json:"manifest"`
+		Assertions []Assertion `json:"assertions"`
+	}{s.manifest.Digest, s.assertions})
 	if err != nil {
 		return ""
 	}
