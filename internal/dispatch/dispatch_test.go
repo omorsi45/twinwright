@@ -2,12 +2,14 @@ package dispatch
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
 	"testing"
 
+	"twinwright/internal/behavior"
 	"twinwright/internal/compiler"
 	"twinwright/internal/store"
 )
@@ -42,6 +44,35 @@ func setup(t *testing.T, fault string) (*Dispatcher, *store.Store, store.Run) {
 		t.Fatal(err)
 	}
 	return &Dispatcher{Store: s, Manifest: manifest}, s, run
+}
+
+func TestDispatcherUsesRegisteredBehavior(t *testing.T) {
+	d, s, run := setup(t, "")
+	r := behavior.NewRegistry()
+	if err := r.Register("example.read", func(ctx context.Context, tx *sql.Tx, worldID, _, _, _ string, _ map[string]any) (int, any, any, error) {
+		var name string
+		err := tx.QueryRowContext(ctx, "SELECT name FROM customers WHERE world_id=? AND id='C-104'", worldID).Scan(&name)
+		return 200, map[string]string{"name": name}, nil, err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	d.Registry = r
+	d.Manifest.Operations = append(d.Manifest.Operations, compiler.Operation{ID: "exampleRead", Behavior: "example.read", Required: []string{}, Properties: map[string]string{}})
+	result, err := d.Invoke(context.Background(), run.ID, "registered-1", "exampleRead", map[string]any{})
+	if err != nil || result.Status != 200 || string(result.Body) != `{"name":"Morgan Vale"}` {
+		t.Fatalf("registered result=%+v err=%v", result, err)
+	}
+	var mutations int
+	if err := s.DB.QueryRow("SELECT count(*) FROM events WHERE run_id=? AND type='state.mutation'", run.ID).Scan(&mutations); err != nil {
+		t.Fatal(err)
+	}
+	if mutations != 0 {
+		t.Fatalf("read produced %d mutations", mutations)
+	}
+	d.Manifest.Operations = append(d.Manifest.Operations, compiler.Operation{ID: "unknownRead", Behavior: "missing.read", Properties: map[string]string{}})
+	if _, err := d.Invoke(context.Background(), run.ID, "registered-2", "unknownRead", map[string]any{}); err == nil {
+		t.Fatal("unregistered behavior accepted")
+	}
 }
 
 func TestRefundMutatesStateAndRepeatedCallIsSafe(t *testing.T) {

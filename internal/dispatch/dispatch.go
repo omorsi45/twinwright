@@ -7,14 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"strings"
 
-	"twinwright/internal/billing"
+	"twinwright/internal/behavior"
 	"twinwright/internal/compiler"
-	"twinwright/internal/crm"
-	"twinwright/internal/messaging"
 	"twinwright/internal/store"
-	"twinwright/internal/ticketing"
 )
 
 type Result struct {
@@ -24,6 +20,7 @@ type Result struct {
 type Dispatcher struct {
 	Store    *store.Store
 	Manifest compiler.Manifest
+	Registry *behavior.Registry
 }
 
 func (d *Dispatcher) Invoke(ctx context.Context, runID, callID, operationID string, args map[string]any) (Result, error) {
@@ -84,22 +81,15 @@ func (d *Dispatcher) Invoke(ctx context.Context, runID, callID, operationID stri
 					}
 				}
 			}
-			switch {
-			case strings.HasPrefix(op.Behavior, "billing."):
-				var billingMutation *billing.Mutation
-				status, response, billingMutation, err = billing.Handle(ctx, tx, worldID, runID, callID, op.Behavior, args)
-				if billingMutation != nil {
-					mutation = billingMutation
-				}
-			case strings.HasPrefix(op.Behavior, "crm."):
-				status, response, mutation, err = crm.Handle(ctx, tx, worldID, runID, callID, op.Behavior, args)
-			case strings.HasPrefix(op.Behavior, "messaging."):
-				status, response, mutation, err = messaging.Handle(ctx, tx, worldID, runID, callID, op.Behavior, args)
-			case strings.HasPrefix(op.Behavior, "ticket."):
-				status, response, mutation, err = ticketing.Handle(ctx, tx, worldID, runID, callID, op.Behavior, args)
-			default:
+			registry := d.Registry
+			if registry == nil {
+				registry = behavior.Builtin()
+			}
+			handler, ok := registry.Lookup(op.Behavior)
+			if !ok {
 				return Result{}, fmt.Errorf("unsupported behavior %q", op.Behavior)
 			}
+			status, response, mutation, err = handler(ctx, tx, worldID, runID, callID, op.Behavior, args)
 			if err != nil {
 				return Result{}, err
 			}
