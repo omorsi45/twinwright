@@ -112,6 +112,50 @@ func TestMalformedFunctionArgumentsRemainInRunLedger(t *testing.T) {
 	}
 }
 
+func TestOpenAIErrorsAreRedacted(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"error":{"message":"Incorrect API key provided: sk-live-secret-value-123. Header was Bearer sk-live-secret-value-123"}}`))
+	}))
+	defer server.Close()
+	p := OpenAIProvider{APIKey: "sk-live-secret-value-123", Model: "test-model", URL: server.URL, Client: server.Client()}
+	message, err := p.Next(context.Background(), "task", nil, nil)
+	if err == nil {
+		t.Fatal("401 accepted")
+	}
+	for _, text := range []string{err.Error(), message.RawBody} {
+		if strings.Contains(text, "secret-value") || !strings.Contains(text, "[REDACTED]") {
+			t.Fatalf("unredacted provider error: %q", text)
+		}
+	}
+}
+
+func TestOpenAIRecordsTokenUsage(t *testing.T) {
+	replies := []string{
+		`{"output":[{"type":"message","content":[{"type":"output_text","text":"Done"}]}],"usage":{"input_tokens":120,"output_tokens":8,"total_tokens":128}}`,
+		`{"output":[{"type":"message","content":[{"type":"output_text","text":"Done"}]}]}`,
+	}
+	for i, reply := range replies {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(reply)) }))
+		p := OpenAIProvider{APIKey: "test-key", Model: "test-model", URL: server.URL, Client: server.Client()}
+		message, err := p.Next(context.Background(), "task", nil, nil)
+		server.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		encoded, err := json.Marshal(message)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 && (message.Usage == nil || *message.Usage != (Usage{InputTokens: 120, OutputTokens: 8, TotalTokens: 128}) || !strings.Contains(string(encoded), `"usage":{"input_tokens":120,"output_tokens":8,"total_tokens":128}`)) {
+			t.Fatalf("usage=%+v encoded=%s", message.Usage, encoded)
+		}
+		if i == 1 && (message.Usage != nil || strings.Contains(string(encoded), "usage")) {
+			t.Fatalf("absent usage recorded: %s", encoded)
+		}
+	}
+}
+
 func TestOpenAIInvalidJSONErrorIncludesResponseExcerpt(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("not-json-response")) }))
 	defer server.Close()

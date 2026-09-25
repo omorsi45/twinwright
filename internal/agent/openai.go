@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"twinwright/internal/compiler"
+	"twinwright/internal/redact"
 )
 
 type OpenAIProvider struct {
@@ -91,15 +92,18 @@ func (p OpenAIProvider) Next(ctx context.Context, task string, history []Message
 		return Message{}, err
 	}
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return Message{RawBody: string(body)}, fmt.Errorf("OpenAI response HTTP %d: %s", res.StatusCode, string(body))
+		text := redact.String(string(body), p.APIKey)
+		return Message{RawBody: text}, fmt.Errorf("OpenAI response HTTP %d: %s", res.StatusCode, text)
 	}
 	var wire struct {
 		Output []json.RawMessage `json:"output"`
+		Usage  *Usage            `json:"usage"`
 	}
 	if err = json.Unmarshal(body, &wire); err != nil {
-		return Message{RawBody: string(body)}, fmt.Errorf("decode OpenAI response: %w; body=%q", err, string(body[:min(len(body), 1024)]))
+		text := redact.String(string(body), p.APIKey)
+		return Message{RawBody: text}, fmt.Errorf("decode OpenAI response: %w; body=%q", err, text[:min(len(text), 1024)])
 	}
-	message := Message{Role: "assistant", RawOutput: wire.Output}
+	message := Message{Role: "assistant", RawOutput: wire.Output, Usage: wire.Usage}
 	var texts []string
 	for _, raw := range wire.Output {
 		var item struct {
