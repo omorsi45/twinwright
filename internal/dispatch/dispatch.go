@@ -7,10 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 
 	"twinwright/internal/billing"
 	"twinwright/internal/compiler"
+	"twinwright/internal/crm"
+	"twinwright/internal/messaging"
 	"twinwright/internal/store"
+	"twinwright/internal/ticketing"
 )
 
 type Result struct {
@@ -57,7 +61,7 @@ func (d *Dispatcher) Invoke(ctx context.Context, runID, callID, operationID stri
 		return Result{}, err
 	}
 	var response any
-	var mutation *billing.Mutation
+	var mutation any
 	if status, response = validate(*op, args); status == 0 {
 		if fault == operationID && consumed == 0 {
 			status = 503
@@ -80,7 +84,22 @@ func (d *Dispatcher) Invoke(ctx context.Context, runID, callID, operationID stri
 					}
 				}
 			}
-			status, response, mutation, err = billing.Handle(ctx, tx, worldID, runID, callID, op.Behavior, args)
+			switch {
+			case strings.HasPrefix(op.Behavior, "billing."):
+				var billingMutation *billing.Mutation
+				status, response, billingMutation, err = billing.Handle(ctx, tx, worldID, runID, callID, op.Behavior, args)
+				if billingMutation != nil {
+					mutation = billingMutation
+				}
+			case strings.HasPrefix(op.Behavior, "crm."):
+				status, response, mutation, err = crm.Handle(ctx, tx, worldID, runID, callID, op.Behavior, args)
+			case strings.HasPrefix(op.Behavior, "messaging."):
+				status, response, mutation, err = messaging.Handle(ctx, tx, worldID, runID, callID, op.Behavior, args)
+			case strings.HasPrefix(op.Behavior, "ticket."):
+				status, response, mutation, err = ticketing.Handle(ctx, tx, worldID, runID, callID, op.Behavior, args)
+			default:
+				return Result{}, fmt.Errorf("unsupported behavior %q", op.Behavior)
+			}
 			if err != nil {
 				return Result{}, err
 			}
