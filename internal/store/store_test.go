@@ -2,7 +2,10 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"testing"
+
+	_ "modernc.org/sqlite"
 )
 
 func TestSeedReproducesInitialWorld(t *testing.T) {
@@ -28,6 +31,42 @@ func TestSeedReproducesInitialWorld(t *testing.T) {
 	}
 	if snapshot(42) == snapshot(43) {
 		t.Fatal("different seeds produced identical state")
+	}
+}
+
+func TestOpenMigratesPriorDevelopmentRunTable(t *testing.T) {
+	path := t.TempDir() + "/world.db"
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = raw.Exec(`CREATE TABLE runs (id TEXT PRIMARY KEY, world_id TEXT NOT NULL, scenario TEXT NOT NULL, provider TEXT NOT NULL, task TEXT NOT NULL, status TEXT NOT NULL, step INTEGER NOT NULL DEFAULT 0, transcript TEXT NOT NULL DEFAULT '[]', fault_operation TEXT NOT NULL DEFAULT '', fault_consumed INTEGER NOT NULL DEFAULT 0)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	world, err := s.Seed(ctx, 42, "digest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := s.CreateRun(ctx, world.ID, "duplicate-charge", "openai", "test-model", "task", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved, err := s.Run(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Model != "test-model" {
+		t.Fatalf("model=%q", saved.Model)
 	}
 }
 

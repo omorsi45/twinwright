@@ -80,13 +80,13 @@ func (p OpenAIProvider) Next(ctx context.Context, task string, history []Message
 		return Message{}, err
 	}
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return Message{}, fmt.Errorf("OpenAI response HTTP %d: %s", res.StatusCode, string(body))
+		return Message{RawBody: string(body)}, fmt.Errorf("OpenAI response HTTP %d: %s", res.StatusCode, string(body))
 	}
 	var wire struct {
 		Output []json.RawMessage `json:"output"`
 	}
 	if err = json.Unmarshal(body, &wire); err != nil {
-		return Message{}, fmt.Errorf("decode OpenAI response: %w; body=%q", err, string(body[:min(len(body), 1024)]))
+		return Message{RawBody: string(body)}, fmt.Errorf("decode OpenAI response: %w; body=%q", err, string(body[:min(len(body), 1024)]))
 	}
 	message := Message{Role: "assistant", RawOutput: wire.Output}
 	var texts []string
@@ -102,7 +102,7 @@ func (p OpenAIProvider) Next(ctx context.Context, task string, history []Message
 			} `json:"content"`
 		}
 		if err = json.Unmarshal(raw, &item); err != nil {
-			return Message{}, err
+			return message, err
 		}
 		switch item.Type {
 		case "function_call":
@@ -110,7 +110,7 @@ func (p OpenAIProvider) Next(ctx context.Context, task string, history []Message
 			decoder := json.NewDecoder(strings.NewReader(item.Arguments))
 			decoder.UseNumber()
 			if err = decoder.Decode(&args); err != nil {
-				return Message{}, fmt.Errorf("invalid arguments for %s: %w", item.Name, err)
+				return message, fmt.Errorf("invalid arguments for %s: %w", item.Name, err)
 			}
 			message.ToolCalls = append(message.ToolCalls, ToolCall{ID: item.CallID, OperationID: item.Name, Arguments: args})
 		case "message":
@@ -123,7 +123,7 @@ func (p OpenAIProvider) Next(ctx context.Context, task string, history []Message
 	}
 	message.Content = strings.Join(texts, "\n")
 	if len(message.ToolCalls) == 0 && message.Content == "" {
-		return Message{}, fmt.Errorf("OpenAI response contained no text or tool calls")
+		return message, fmt.Errorf("OpenAI response contained no text or tool calls")
 	}
 	return message, nil
 }

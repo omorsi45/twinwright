@@ -8,6 +8,9 @@ import (
 	"strings"
 	"testing"
 
+	"twinwright/internal/dispatch"
+	"twinwright/internal/store"
+
 	"twinwright/internal/compiler"
 )
 
@@ -59,6 +62,53 @@ func TestOpenAIResponsesFunctionLoop(t *testing.T) {
 	}
 	if second.Content != "Done" || requests != 2 {
 		t.Fatalf("second=%+v requests=%d", second, requests)
+	}
+}
+
+func TestMalformedFunctionArgumentsRemainInRunLedger(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"output":[{"type":"function_call","call_id":"bad-call-42","name":"getCharge","arguments":"{bad"}]}`))
+	}))
+	defer server.Close()
+	ctx := context.Background()
+	s, err := store.Open(t.TempDir() + "/world.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	world, err := s.Seed(ctx, 42, "digest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := s.CreateRun(ctx, world.ID, "duplicate-charge", "openai", "test-model", "task", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := compiler.Manifest{Operations: []compiler.Operation{{ID: "getCharge", Required: []string{"id"}, Properties: map[string]string{"id": "string"}}}}
+	provider := OpenAIProvider{APIKey: "test-key", Model: "test-model", URL: server.URL, Client: server.Client()}
+	runner := Runner{Store: s, Dispatch: &dispatch.Dispatcher{Store: s, Manifest: manifest}, Manifest: manifest, Provider: provider}
+	if _, err = runner.Execute(ctx, run.ID, 1); err == nil {
+		t.Fatal("expected malformed function arguments to fail")
+	}
+	saved, err := s.Run(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Status != "failed" {
+		t.Fatalf("status=%s", saved.Status)
+	}
+	events, err := s.Events(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, e := range events {
+		if e.Type == "model.response" && strings.Contains(string(e.Payload), "bad-call-42") && strings.Contains(string(e.Payload), "{bad") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("raw malformed call missing from ledger: %+v", events)
 	}
 }
 

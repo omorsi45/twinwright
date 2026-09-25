@@ -23,6 +23,7 @@ type Message struct {
 	OperationID string            `json:"operation_id,omitempty"`
 	Status      int               `json:"status,omitempty"`
 	RawOutput   []json.RawMessage `json:"raw_output,omitempty"`
+	RawBody     string            `json:"raw_body,omitempty"`
 }
 type Provider interface {
 	Next(context.Context, string, []Message, []compiler.Operation) (Message, error)
@@ -82,7 +83,7 @@ func (r Runner) Execute(ctx context.Context, runID string, maxSteps int) (store.
 		}
 		next, err := r.Provider.Next(ctx, run.Task, history, r.Manifest.Operations)
 		if err != nil {
-			if saveErr := r.Store.FailModelTurn(ctx, runID, map[string]any{"error": err.Error()}, err.Error()); saveErr != nil {
+			if saveErr := r.Store.FailModelTurn(ctx, runID, next, err.Error()); saveErr != nil {
 				return store.Run{}, fmt.Errorf("provider error: %v; recording error: %w", err, saveErr)
 			}
 			return store.Run{}, err

@@ -70,7 +70,42 @@ func Open(path string) (*Store, error) {
 			return nil, fmt.Errorf("schema: %w", err)
 		}
 	}
+	if err = ensureModelColumn(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("schema migration: %w", err)
+	}
 	return &Store{DB: db}, nil
+}
+func ensureModelColumn(db *sql.DB) error {
+	rows, err := db.Query("PRAGMA table_info(runs)")
+	if err != nil {
+		return err
+	}
+	hasModel := false
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, typ string
+		var defaultValue sql.NullString
+		if err = rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		if name == "model" {
+			hasModel = true
+		}
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err = rows.Close(); err != nil {
+		return err
+	}
+	if hasModel {
+		return nil
+	}
+	_, err = db.Exec("ALTER TABLE runs ADD COLUMN model TEXT NOT NULL DEFAULT ''")
+	return err
 }
 func (s *Store) Close() error { return s.DB.Close() }
 
