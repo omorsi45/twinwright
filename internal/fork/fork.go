@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 
+	"twinwright/internal/agent"
 	"twinwright/internal/authz"
 	"twinwright/internal/chaos"
 	"twinwright/internal/checkpoint"
@@ -53,7 +54,7 @@ func ValidateOptions(parent store.Run, manifest compiler.Manifest, options Optio
 			return err
 		}
 	}
-	if options.Provider != "" && options.Provider != "scripted" && options.Provider != "openai" {
+	if options.Provider != "" && !agent.KnownProvider(options.Provider) {
 		return fmt.Errorf("unsupported fork provider %q", options.Provider)
 	}
 	if options.Provider != "" && options.Provider != parent.Provider && options.Model == "" {

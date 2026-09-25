@@ -368,6 +368,15 @@ func TestCreateForkCopiesEveryCompanyServiceTable(t *testing.T) {
 	}
 }
 
+func TestValidateOptionsAcceptsAdditionalProviders(t *testing.T) {
+	_, _, parent, manifest := completedBilling(t)
+	for _, name := range []string{"scripted", "openai", "openai-compatible", "anthropic"} {
+		if err := ValidateOptions(parent, manifest, Options{Provider: name, Model: "replacement-model"}); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+}
+
 func TestCreateForkRejectsUnknownProviderBeforeWriting(t *testing.T) {
 	source, destination, parent, manifest := completedBilling(t)
 	ctx := context.Background()
