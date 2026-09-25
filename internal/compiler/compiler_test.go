@@ -18,7 +18,7 @@ func example(t *testing.T) ([]byte, []byte) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return spec, bindings
+	return []byte(strings.ReplaceAll(string(spec), "\r\n", "\n")), bindings
 }
 
 func TestCompileExampleAndStableDigest(t *testing.T) {
