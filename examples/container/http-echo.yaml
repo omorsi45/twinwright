@@ -1,0 +1,6 @@
+version: 1
+name: twinwright-http-echo
+runtime: docker
+image: hashicorp/http-echo:1.0
+publish: ["18080:5678"]
+label: experimental

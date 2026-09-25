@@ -19,6 +19,7 @@ import (
 	"twinwright/internal/chaos"
 	"twinwright/internal/checkpoint"
 	"twinwright/internal/compiler"
+	"twinwright/internal/container"
 	"twinwright/internal/counterfactual"
 	"twinwright/internal/dispatch"
 	"twinwright/internal/eval"
@@ -38,7 +39,7 @@ func main() {
 
 func runCLI(args []string, out io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: twinwright build|build-world|run|resume|inspect|trace|replay|checkpoints|fork|compare|evaluate|counterfactual|bench|shadow ...")
+		return fmt.Errorf("usage: twinwright build|build-world|run|resume|inspect|trace|replay|checkpoints|fork|compare|evaluate|counterfactual|bench|shadow|container ...")
 	}
 	ctx := context.Background()
 	switch args[0] {
@@ -733,6 +734,53 @@ func runCLI(args []string, out io.Writer) error {
 			"observed":      observed,
 			"comparison":    comparison,
 		})
+	case "container":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: twinwright container start|stop|status --config path")
+		}
+		action := args[1]
+		fs := flag.NewFlagSet("container", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		configPath := fs.String("config", "", "experimental container sidecar YAML")
+		if err := fs.Parse(args[2:]); err != nil {
+			return err
+		}
+		if *configPath == "" {
+			return fmt.Errorf("container requires --config")
+		}
+		raw, err := os.ReadFile(*configPath)
+		if err != nil {
+			return err
+		}
+		cfg, err := container.Parse(raw)
+		if err != nil {
+			return err
+		}
+		ex, err := container.Select(cfg.Runtime, nil)
+		if err != nil {
+			return err
+		}
+		switch action {
+		case "start":
+			handle, err := ex.Start(ctx, cfg)
+			if err != nil {
+				return err
+			}
+			return emit(out, map[string]any{"experimental": true, "action": "start", "handle": handle})
+		case "stop":
+			if err := ex.Stop(ctx, cfg.Name); err != nil {
+				return err
+			}
+			return emit(out, map[string]any{"experimental": true, "action": "stop", "name": cfg.Name})
+		case "status":
+			handle, err := ex.Status(ctx, cfg.Name)
+			if err != nil {
+				return err
+			}
+			return emit(out, map[string]any{"experimental": true, "action": "status", "handle": handle})
+		default:
+			return fmt.Errorf("unknown container action %q", action)
+		}
 	case "trace":
 		if len(args) < 2 {
 			return fmt.Errorf("usage: twinwright trace <run-id> [--format json|text|otlp] [--db path]")

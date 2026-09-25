@@ -1,0 +1,4 @@
+version: 1
+name: twinwright-local-sidecar
+runtime: local
+label: experimental
