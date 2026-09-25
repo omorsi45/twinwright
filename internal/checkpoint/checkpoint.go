@@ -55,7 +55,7 @@ func List(ctx context.Context, s *store.Store, runID string, manifest compiler.M
 		return nil, fmt.Errorf("run %s has no events", runID)
 	}
 	h := sha256.New()
-	io.WriteString(h, fmt.Sprintf("twinwright-checkpoint:%d:%s:%s\n", FormatVersion, runID, manifest.Digest))
+	writeHashHeader(h, runID, manifest.Digest)
 	var points []Checkpoint
 	var modelOpen, toolOpen bool
 	var toolCallID, toolOperation string
@@ -67,16 +67,9 @@ func List(ctx context.Context, s *store.Store, runID string, manifest compiler.M
 		if event.RunID != runID || event.Seq != i+1 || event.ID != fmt.Sprintf("%s/%d", runID, i+1) {
 			return nil, fmt.Errorf("ledger sequence or ID differs at position %d", i+1)
 		}
-		canonical, err := canonicalJSON(event.Payload)
-		if err != nil {
+		if err := writeHashEvent(h, event); err != nil {
 			return nil, fmt.Errorf("event %d payload: %w", event.Seq, err)
 		}
-		entry, err := json.Marshal([]any{event.Seq, event.Type, event.RecordedAt, event.WorldAt, json.RawMessage(canonical)})
-		if err != nil {
-			return nil, err
-		}
-		h.Write(entry)
-		h.Write([]byte{'\n'})
 		boundary := false
 		switch event.Type {
 		case "execution.started":
@@ -178,6 +171,41 @@ func List(ctx context.Context, s *store.Store, runID string, manifest compiler.M
 		return nil, fmt.Errorf("completed run lacks terminal completion event")
 	}
 	return points, nil
+}
+
+// PrefixDigest hashes a previously validated event prefix, including event metadata.
+func PrefixDigest(runID, manifestDigest string, events []store.Event) (string, error) {
+	h := sha256.New()
+	writeHashHeader(h, runID, manifestDigest)
+	for i, event := range events {
+		if event.RunID != runID || event.Seq != i+1 || event.ID != fmt.Sprintf("%s/%d", runID, i+1) {
+			return "", fmt.Errorf("ledger sequence or ID differs at position %d", i+1)
+		}
+		if err := writeHashEvent(h, event); err != nil {
+			return "", err
+		}
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func writeHashHeader(h io.Writer, runID, manifestDigest string) {
+	io.WriteString(h, fmt.Sprintf("twinwright-checkpoint:%d:%s:%s\n", FormatVersion, runID, manifestDigest))
+}
+
+func writeHashEvent(h io.Writer, event store.Event) error {
+	canonical, err := canonicalJSON(event.Payload)
+	if err != nil {
+		return err
+	}
+	entry, err := json.Marshal([]any{event.Seq, event.Type, event.RecordedAt, event.WorldAt, json.RawMessage(canonical)})
+	if err != nil {
+		return err
+	}
+	if _, err := h.Write(entry); err != nil {
+		return err
+	}
+	_, err = h.Write([]byte{'\n'})
+	return err
 }
 
 func Select(points []Checkpoint, eventSeq int) (Checkpoint, error) {

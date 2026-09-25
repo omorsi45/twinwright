@@ -70,6 +70,15 @@ func TestOpenMigratesPriorDevelopmentRunTable(t *testing.T) {
 	if saved.Model != "test-model" {
 		t.Fatalf("model=%q", saved.Model)
 	}
+	for _, table := range []string{"checkpoints", "fork_lineage"} {
+		var count int
+		if err := s.DB.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 1 {
+			t.Fatalf("migration did not create %s", table)
+		}
+	}
 }
 
 func TestLedgerOrderAndStableIDs(t *testing.T) {
