@@ -18,6 +18,7 @@ import (
 	"twinwright/internal/chaos"
 	"twinwright/internal/checkpoint"
 	"twinwright/internal/compiler"
+	"twinwright/internal/counterfactual"
 	"twinwright/internal/dispatch"
 	"twinwright/internal/eval"
 	"twinwright/internal/fork"
@@ -34,7 +35,7 @@ func main() {
 
 func runCLI(args []string, out io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: twinwright build|build-world|run|resume|inspect|replay|checkpoints|fork|compare ...")
+		return fmt.Errorf("usage: twinwright build|build-world|run|resume|inspect|replay|checkpoints|fork|compare|evaluate|counterfactual ...")
 	}
 	ctx := context.Background()
 	switch args[0] {
@@ -497,6 +498,67 @@ func runCLI(args []string, out io.Writer) error {
 			return fmt.Errorf("assertions failed for run %s", run.ID)
 		}
 		return nil
+	case "counterfactual":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: twinwright counterfactual <run-id> --interventions path [--assertions path] [--trials n] [--steps n] [--manifest path] [--db path]")
+		}
+		fs := flag.NewFlagSet("counterfactual", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		manifestPath := fs.String("manifest", "twinwright.manifest.json", "compiled manifest")
+		dbPath := fs.String("db", "twinwright.db", "SQLite world database")
+		interventionsPath := fs.String("interventions", "", "intervention YAML file")
+		assertionsPath := fs.String("assertions", "", "assertion YAML file defining success; defaults to the scenario evaluation")
+		trials := fs.Int("trials", 1, "forks per candidate and intervention")
+		steps := fs.Int("steps", 20, "maximum model turns per fork")
+		if err := fs.Parse(args[2:]); err != nil {
+			return err
+		}
+		if *interventionsPath == "" {
+			return fmt.Errorf("counterfactual requires --interventions")
+		}
+		manifest, err := readManifest(*manifestPath)
+		if err != nil {
+			return err
+		}
+		raw, err := os.ReadFile(*interventionsPath)
+		if err != nil {
+			return err
+		}
+		set, err := counterfactual.Parse(raw, manifest)
+		if err != nil {
+			return err
+		}
+		judge := counterfactual.ScenarioJudge()
+		if *assertionsPath != "" {
+			raw, err := os.ReadFile(*assertionsPath)
+			if err != nil {
+				return err
+			}
+			assertions, err := assertion.Parse(raw, manifest, assertion.Builtins())
+			if err != nil {
+				return err
+			}
+			judge = counterfactual.AssertionJudge(assertions)
+		}
+		source, err := store.OpenReadOnly(*dbPath)
+		if err != nil {
+			return err
+		}
+		defer source.Close()
+		analysis, err := counterfactual.Prepare(ctx, source, args[1], manifest, set, judge, counterfactual.Options{Trials: *trials, Steps: *steps, ProviderFor: selectProvider})
+		if err != nil {
+			return err
+		}
+		destination, err := store.Open(*dbPath)
+		if err != nil {
+			return err
+		}
+		defer destination.Close()
+		report, err := analysis.Run(ctx, source, destination)
+		if err != nil {
+			return err
+		}
+		return emit(out, report)
 	case "inspect":
 		if len(args) < 2 {
 			return fmt.Errorf("usage: twinwright inspect <run-id> [--db path] [--manifest path]")

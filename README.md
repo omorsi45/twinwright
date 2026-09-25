@@ -51,6 +51,7 @@ A run can:
 - restore valid execution checkpoints
 - fork a run and change future model or fault conditions
 - compare parent and forked trajectories
+- fork a failed run at candidate events, change one variable per fork, and rank which events the failure was sensitive to
 
 The project includes a minimal billing world and a multi-service company world spanning billing, CRM, ticketing, and messaging.
 
@@ -308,6 +309,54 @@ The `prompt-injection-ticket` scenario seeds a ticket comment that tells the age
 
 See `examples/security/` and `docs/adr/0009-principal-authorization.md`.
 
+## Counterfactual analysis
+
+A failed run shows what happened. `counterfactual` asks which earlier events the failure depended on. It forks a completed, failed run at candidate events, changes exactly one controlled variable in each fork, executes the child with the run's provider, and judges it with the same success definition as the parent.
+
+```bash
+go run ./cmd/twinwright build examples/billing/openapi.yaml
+
+go run ./cmd/twinwright run ambiguous-commit \
+  --agent scripted \
+  --recovery unsafe \
+  --chaos examples/chaos/ambiguous-commit.yaml
+
+go run ./cmd/twinwright counterfactual <run-id> \
+  --interventions examples/counterfactual/ambiguous-commit.yaml \
+  --trials 3
+```
+
+The JSON report ranks candidates by how many forks changed the outcome. Each candidate has a one-line summary:
+
+```text
+#4 createRefund dispatch [latency-instead-of-lost-response]: corrected the final outcome in 3/3 forks
+#7 createRefund observation [refund-delivered]: corrected the final outcome in 3/3 forks
+#9 model decision after createRefund [safe-recovery]: corrected the final outcome in 3/3 forks
+#4 createRefund dispatch [extra-latency]: no material effect (0/3 forks corrected the outcome)
+#10 createRefund dispatch [latency-instead-of-lost-response]: no material effect (0/3 forks corrected the outcome)
+#14 model decision after createRefund [safe-recovery]: no material effect (0/3 forks corrected the outcome); 3 errored, 0 did not complete
+```
+
+Removing the lost response at the first refund, showing the agent a delivered response, or switching to the safe fixture after the timeout all prevent the duplicate refund. The same change at the retry comes too late. Every candidate lists its forks as evidence: run IDs with status and failed checks. Each fork is a normal child run that `replay`, `compare`, `inspect`, and `evaluate` accept.
+
+| Kind | Changes | Fork point |
+| --- | --- | --- |
+| `chaos_policy` | Replaces the chaos policy | Before the targeted call is dispatched |
+| `auth_policy` | Replaces the principal policy | Before the targeted call is dispatched |
+| `fault` | Sets or clears the legacy one-time 503, on runs without a chaos policy | Before the targeted call is dispatched |
+| `model` | Switches the provider or model for the next decision | After the targeted call's response |
+| `tool_response` | Substitutes what the agent saw as one call's response | At that response |
+
+`calls` limits an intervention to named call IDs; without it, every eligible call is a candidate. Everything is validated before the first fork is created. An intervention that would change nothing, such as the run's own model or fault, or two things at once, such as a chaos policy on a run with a legacy fault, is rejected. `--assertions` defines success; without it the scenario evaluation is used. The definition matters: `examples/assertions/ambiguous-commit.yaml` requires that the lost response was observed, so a fork that removes the fault fails it even though its refund is correct.
+
+A `tool_response` fork changes only what the child saw: its transcript and saved result for that call. World state stays as it was. The substitution is recorded in `fork_observations` and as an `observation.overridden` event, so replay applies the same change and detects tampering with either. Assertions on such a fork still see the parent's original response in the inherited history; an `event_absent` assertion on `observation.overridden` excludes these forks from a success definition.
+
+`examples/counterfactual/prompt-injection-ticket.yaml` does the same for the overprivileged prompt-injection run: the support policy corrects the outcome when applied at the ticket read or the foreign customer lookup, and has no effect once the lookup has already succeeded.
+
+This is intervention analysis. The counts describe the forks that ran; they are not probabilities or proof of cause. Scripted fixtures make every trial identical. A live model can differ between trials, which is what `--trials` is for, but no live model run has been verified. Only root runs can be analyzed, because forks of forks are unsupported, and the first model decision has no checkpoint before it. Direct world-state edits, memory, and execution strategy are not intervention kinds yet. Forks are written to the same database, and an analysis that aborts partway leaves the forks it already created.
+
+See `examples/counterfactual/` and `docs/adr/0011-counterfactual-analysis.md`.
+
 ## Live model execution
 
 Twinwright includes an OpenAI Responses API provider with function tools.
@@ -443,6 +492,8 @@ error
 retry
 execution.paused
 execution.completed
+execution.forked
+observation.overridden
 ```
 
 Stable event ordering and persisted tool results provide the foundation for recovery, replay, checkpoint reconstruction, forking, chaos analysis, and trajectory comparison.
@@ -469,6 +520,7 @@ internal/
   replay/             verification replay
   checkpoint/         checkpoint discovery and reconstruction
   fork/               fork execution and trajectory comparison
+  counterfactual/     intervention analysis over forks
 
 examples/
   billing/            minimal stateful reference world
@@ -476,6 +528,7 @@ examples/
   chaos/              deterministic failure policies
   security/           principal policies for the prompt-injection scenario
   assertions/         declarative assertions for the example scenarios
+  counterfactual/     intervention files for the example failures
 
 docs/adr/             architecture decision records
 ```
@@ -557,6 +610,7 @@ Major runtime contracts are documented as ADRs under `docs/adr/`, including:
 - deterministic chaos policies and ambiguous-commit recovery
 - runtime principal authorization
 - declarative run assertions
+- counterfactual intervention analysis and observation overrides
 
 The ADRs document not only what Twinwright does, but why the implementation makes those tradeoffs.
 

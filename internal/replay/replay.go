@@ -248,6 +248,10 @@ func recordedMessages(run store.Run, events []store.Event, forked bool) ([]agent
 			if !forked || i != 0 {
 				return nil, fmt.Errorf("unexpected fork event at sequence %d", event.Seq)
 			}
+		case "observation.overridden":
+			if !forked || i != 1 {
+				return nil, fmt.Errorf("unexpected observation override at sequence %d", event.Seq)
+			}
 		case "execution.started":
 			if forked || i != 0 {
 				return nil, fmt.Errorf("unexpected start event at sequence %d", event.Seq)
@@ -298,7 +302,7 @@ func recordedMessages(run store.Run, events []store.Event, forked bool) ([]agent
 
 func semantic(typ string) bool {
 	switch typ {
-	case "model.request", "model.response", "tool.request", "tool.response", "state.mutation", "error", "retry", "chaos.injected", "chaos.actor_mutation", "authorization.allowed", "authorization.denied":
+	case "model.request", "model.response", "tool.request", "tool.response", "state.mutation", "error", "retry", "chaos.injected", "chaos.actor_mutation", "authorization.allowed", "authorization.denied", "observation.overridden":
 		return true
 	}
 	return false

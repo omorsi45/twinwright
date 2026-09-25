@@ -2,6 +2,7 @@ package fork
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"strings"
 
@@ -69,6 +70,24 @@ func ReconstructForReplay(ctx context.Context, source *store.Store, child store.
 	if child.FaultOperation != parent.FaultOperation {
 		consumed = 0
 	}
+	transcript := rebuilt.Transcript
+	observation, observationErr := source.ObservationOverride(ctx, child.ID)
+	if observationErr != nil && observationErr != sql.ErrNoRows {
+		return nil, observationErr
+	}
+	var observationEvent map[string]any
+	if observationErr == nil {
+		parentEvents, err := source.Events(ctx, parent.ID)
+		if err != nil {
+			return nil, err
+		}
+		if observation, observationEvent, err = prepareObservation(parentEvents, selected, observation); err != nil {
+			return nil, fmt.Errorf("fork observation override: %w", err)
+		}
+		if transcript, err = applyObservation(transcript, observation); err != nil {
+			return nil, fmt.Errorf("fork observation override: %w", err)
+		}
+	}
 	tx, err := target.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -85,11 +104,16 @@ func ReconstructForReplay(ctx context.Context, source *store.Store, child store.
 		}
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO runs(id,world_id,scenario,provider,model,task,status,step,transcript,fault_operation,fault_consumed,principal_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
-		child.ID, child.WorldID, child.Scenario, child.Provider, child.Model, child.Task, "paused", rebuilt.Step, rebuilt.Transcript, child.FaultOperation, consumed, child.PrincipalID); err != nil {
+		child.ID, child.WorldID, child.Scenario, child.Provider, child.Model, child.Task, "paused", rebuilt.Step, transcript, child.FaultOperation, consumed, child.PrincipalID); err != nil {
 		return nil, err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO tool_results(run_id,call_id,operation_id,arguments,status,body) SELECT ?,call_id,operation_id,arguments,status,body FROM tool_results WHERE run_id=?`, child.ID, parent.ID); err != nil {
 		return nil, err
+	}
+	if observationEvent != nil {
+		if err := overrideToolResult(ctx, tx, child.ID, observation); err != nil {
+			return nil, err
+		}
 	}
 	if lineage.ChaosReplaced {
 		encoded, digest, err := source.ChaosPolicy(ctx, child.ID)
@@ -124,6 +148,11 @@ func ReconstructForReplay(ctx context.Context, source *store.Store, child store.
 		"parent_run_id": parent.ID, "fork_event_seq": selected.EventSeq, "checkpoint_id": selected.ID, "manifest_digest": manifest.Digest,
 	}); err != nil {
 		return nil, err
+	}
+	if observationEvent != nil {
+		if err := store.AppendEventTx(ctx, tx, child.ID, "observation.overridden", observationEvent); err != nil {
+			return nil, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
