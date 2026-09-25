@@ -89,6 +89,10 @@ func Open(path string) (*Store, error) {
 		`CREATE TABLE IF NOT EXISTS tool_results (run_id TEXT NOT NULL, call_id TEXT NOT NULL, operation_id TEXT NOT NULL, arguments TEXT NOT NULL, status INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY(run_id,call_id))`,
 		`CREATE TABLE IF NOT EXISTS checkpoints (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, event_seq INTEGER NOT NULL, format_version INTEGER NOT NULL, manifest_digest TEXT NOT NULL, prefix_digest TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS fork_lineage (child_run_id TEXT PRIMARY KEY, parent_run_id TEXT NOT NULL, fork_event_seq INTEGER NOT NULL, checkpoint_id TEXT NOT NULL, format_version INTEGER NOT NULL, manifest_digest TEXT NOT NULL, prefix_digest TEXT NOT NULL, parent_provider TEXT NOT NULL, parent_model TEXT NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS run_chaos (run_id TEXT PRIMARY KEY, policy_json TEXT NOT NULL, digest TEXT NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS chaos_rule_state (run_id TEXT NOT NULL, rule_id TEXT NOT NULL, matching_calls INTEGER NOT NULL DEFAULT 0, injections INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(run_id,rule_id))`,
+		`CREATE TABLE IF NOT EXISTS chaos_snapshots (run_id TEXT NOT NULL, rule_id TEXT NOT NULL, arguments_digest TEXT NOT NULL, status INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY(run_id,rule_id,arguments_digest))`,
+		`CREATE TABLE IF NOT EXISTS chaos_hidden_outcomes (run_id TEXT NOT NULL, call_id TEXT NOT NULL, rule_id TEXT NOT NULL, status INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY(run_id,call_id))`,
 	}
 	for _, stmt := range schema {
 		if _, err = db.Exec(stmt); err != nil {
@@ -256,6 +260,25 @@ func (s *Store) Snapshot(ctx context.Context, worldID string) (string, error) {
 }
 
 func (s *Store) CreateRun(ctx context.Context, worldID, scenario, provider, model, task, faultOperation string) (Run, error) {
+	return s.createRun(ctx, worldID, scenario, provider, model, task, faultOperation, nil, "")
+}
+
+// CreateRunWithChaos persists a validated policy in the same transaction as the run.
+func (s *Store) CreateRunWithChaos(ctx context.Context, worldID, scenario, provider, model, task, faultOperation string, policyJSON []byte, digest string) (Run, error) {
+	if faultOperation != "" {
+		return Run{}, fmt.Errorf("legacy fault and chaos policy cannot be combined")
+	}
+	if !json.Valid(policyJSON) {
+		return Run{}, fmt.Errorf("invalid chaos policy JSON")
+	}
+	hash := sha256.Sum256(policyJSON)
+	if hex.EncodeToString(hash[:]) != digest {
+		return Run{}, fmt.Errorf("chaos policy digest mismatch")
+	}
+	return s.createRun(ctx, worldID, scenario, provider, model, task, faultOperation, policyJSON, digest)
+}
+
+func (s *Store) createRun(ctx context.Context, worldID, scenario, provider, model, task, faultOperation string, policyJSON []byte, digest string) (Run, error) {
 	var random [12]byte
 	if _, err := crand.Read(random[:]); err != nil {
 		return Run{}, err
@@ -269,6 +292,11 @@ func (s *Store) CreateRun(ctx context.Context, worldID, scenario, provider, mode
 	if _, err = tx.ExecContext(ctx, "INSERT INTO runs(id,world_id,scenario,provider,model,task,status,transcript,fault_operation) VALUES(?,?,?,?,?,?,?,?,?)", r.ID, r.WorldID, r.Scenario, r.Provider, r.Model, r.Task, r.Status, r.Transcript, r.FaultOperation); err != nil {
 		return Run{}, err
 	}
+	if len(policyJSON) > 0 {
+		if _, err = tx.ExecContext(ctx, "INSERT INTO run_chaos(run_id,policy_json,digest) VALUES(?,?,?)", r.ID, string(policyJSON), digest); err != nil {
+			return Run{}, err
+		}
+	}
 	if err = AppendEventTx(ctx, tx, r.ID, "execution.started", map[string]any{"scenario": scenario, "provider": provider, "model": model, "world_id": worldID}); err != nil {
 		return Run{}, err
 	}
@@ -276,6 +304,22 @@ func (s *Store) CreateRun(ctx context.Context, worldID, scenario, provider, mode
 		return Run{}, err
 	}
 	return r, nil
+}
+
+// ChaosPolicy returns sql.ErrNoRows for old databases or runs without a policy.
+func (s *Store) ChaosPolicy(ctx context.Context, runID string) ([]byte, string, error) {
+	var exists int
+	if err := s.DB.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='run_chaos'").Scan(&exists); err != nil {
+		return nil, "", err
+	}
+	if exists == 0 {
+		return nil, "", sql.ErrNoRows
+	}
+	var encoded, digest string
+	if err := s.DB.QueryRowContext(ctx, "SELECT policy_json,digest FROM run_chaos WHERE run_id=?", runID).Scan(&encoded, &digest); err != nil {
+		return nil, "", err
+	}
+	return []byte(encoded), digest, nil
 }
 
 func (s *Store) Run(ctx context.Context, id string) (Run, error) {

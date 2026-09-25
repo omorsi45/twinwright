@@ -2,13 +2,69 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"os"
 	"strings"
 	"testing"
 
 	_ "modernc.org/sqlite"
 )
+
+func TestCreateRunWithChaosStoresPolicyAtomically(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(t.TempDir() + "/chaos.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	w, err := s.Seed(ctx, 42, "digest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := []byte(`{"version":1,"rules":[{"id":"once","type":"timeout","operations":["getCharge"],"times":1}]}`)
+	hash := sha256.Sum256(policy)
+	digest := hex.EncodeToString(hash[:])
+	run, err := s.CreateRunWithChaos(ctx, w.ID, "duplicate-charge", "scripted", "fixture-v1", "task", "", policy, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, gotDigest, err := s.ChaosPolicy(ctx, run.ID)
+	if err != nil || string(got) != string(policy) || gotDigest != digest {
+		t.Fatalf("stored policy=%s digest=%s err=%v", got, gotDigest, err)
+	}
+	if _, err := s.CreateRunWithChaos(ctx, w.ID, "duplicate-charge", "scripted", "fixture-v1", "task", "", policy, "wrong"); err == nil {
+		t.Fatal("invalid digest accepted")
+	}
+	var count int
+	if err := s.DB.QueryRowContext(ctx, "SELECT count(*) FROM runs").Scan(&count); err != nil || count != 1 {
+		t.Fatalf("runs=%d err=%v", count, err)
+	}
+}
+
+func TestReadOnlyLegacyDatabaseHasNoChaosPolicy(t *testing.T) {
+	ctx := context.Background()
+	path := t.TempDir() + "/legacy.db"
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec("CREATE TABLE runs(id TEXT PRIMARY KEY)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err := OpenReadOnly(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, _, err := s.ChaosPolicy(ctx, "old"); err != sql.ErrNoRows {
+		t.Fatalf("legacy policy error=%v", err)
+	}
+}
 
 func TestSeedReproducesInitialWorld(t *testing.T) {
 	snapshot := func(seed int64) string {
