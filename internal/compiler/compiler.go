@@ -49,7 +49,7 @@ type apiOperation struct {
 			Type string `yaml:"type"`
 		} `yaml:"schema"`
 	} `yaml:"parameters"`
-	RequestBody struct {
+	RequestBody *struct {
 		Required bool `yaml:"required"`
 		Content  map[string]struct {
 			Schema struct {
@@ -125,10 +125,13 @@ func Compile(specBytes, bindingBytes []byte) (Manifest, error) {
 			if !ok || behavior == "" {
 				return Manifest{}, fmt.Errorf("unbound operation %s", def.ID)
 			}
-			if behavior != "billing."+def.ID {
+			if behavior != route.behavior {
 				return Manifest{}, fmt.Errorf("unsupported binding %s for %s", behavior, def.ID)
 			}
 			op := Operation{ID: def.ID, Method: strings.ToUpper(method), Path: path, Behavior: behavior, Properties: map[string]string{}}
+			if method == "get" && def.RequestBody != nil {
+				return Manifest{}, fmt.Errorf("unsupported request body in %s", def.ID)
+			}
 			for _, p := range def.Parameters {
 				if p.In != "path" || !p.Required || p.Schema.Type != "string" {
 					return Manifest{}, fmt.Errorf("unsupported parameter in %s", def.ID)
@@ -137,6 +140,9 @@ func Compile(specBytes, bindingBytes []byte) (Manifest, error) {
 				op.Properties[p.Name] = "string"
 			}
 			if method == "post" {
+				if def.RequestBody == nil || len(def.RequestBody.Content) != 1 {
+					return Manifest{}, fmt.Errorf("unsupported request body in %s", def.ID)
+				}
 				body, ok := def.RequestBody.Content["application/json"]
 				if !ok || !def.RequestBody.Required || body.Schema.Type != "object" {
 					return Manifest{}, fmt.Errorf("unsupported request body in %s", def.ID)
@@ -183,23 +189,38 @@ func hasRef(node *yaml.Node) bool {
 	return false
 }
 
-var routes = map[string]struct{ method, path string }{
-	"getCustomer":  {"get", "/customers/{id}"},
-	"listInvoices": {"get", "/customers/{id}/invoices"},
-	"listCharges":  {"get", "/invoices/{id}/charges"},
-	"getCharge":    {"get", "/charges/{id}"},
-	"createRefund": {"post", "/refunds"},
+type contract struct {
+	method, path, behavior string
+	properties             map[string]string
+}
+
+var routes = map[string]contract{
+	"getCustomer":            {"get", "/customers/{id}", "billing.getCustomer", map[string]string{"id": "string"}},
+	"listInvoices":           {"get", "/customers/{id}/invoices", "billing.listInvoices", map[string]string{"id": "string"}},
+	"listCharges":            {"get", "/invoices/{id}/charges", "billing.listCharges", map[string]string{"id": "string"}},
+	"getCharge":              {"get", "/charges/{id}", "billing.getCharge", map[string]string{"id": "string"}},
+	"createRefund":           {"post", "/refunds", "billing.createRefund", map[string]string{"charge_id": "string", "amount_cents": "integer", "reason": "string"}},
+	"getSubscription":        {"get", "/subscriptions/{id}", "billing.getSubscription", map[string]string{"id": "string"}},
+	"crmGetAccount":          {"get", "/crm/accounts/{id}", "crm.getAccount", map[string]string{"id": "string"}},
+	"crmSearchAccounts":      {"post", "/crm/accounts/search", "crm.searchAccounts", map[string]string{"query": "string"}},
+	"crmAddAccountNote":      {"post", "/crm/notes", "crm.addAccountNote", map[string]string{"account_id": "string", "body": "string"}},
+	"crmUpdateAccountStatus": {"post", "/crm/accounts/status", "crm.updateAccountStatus", map[string]string{"account_id": "string", "status": "string"}},
+	"ticketCreateIssue":      {"post", "/tickets/issues", "ticket.createIssue", map[string]string{"project_id": "string", "account_id": "string", "title": "string", "priority": "string"}},
+	"ticketGetIssue":         {"get", "/tickets/issues/{id}", "ticket.getIssue", map[string]string{"id": "string"}},
+	"ticketSearchIssues":     {"post", "/tickets/issues/search", "ticket.searchIssues", map[string]string{"query": "string"}},
+	"ticketAddComment":       {"post", "/tickets/comments", "ticket.addComment", map[string]string{"issue_id": "string", "body": "string"}},
+	"ticketTransitionIssue":  {"post", "/tickets/issues/transition", "ticket.transitionIssue", map[string]string{"issue_id": "string", "status": "string"}},
+	"messageListChannels":    {"get", "/messages/workspaces/{id}/channels", "messaging.listChannels", map[string]string{"id": "string"}},
+	"messageReadChannel":     {"get", "/messages/channels/{id}", "messaging.readChannel", map[string]string{"id": "string"}},
+	"messagePostMessage":     {"post", "/messages/messages", "messaging.postMessage", map[string]string{"channel_id": "string", "body": "string"}},
 }
 
 func validateContract(op Operation) error {
 	route, ok := routes[op.ID]
-	if !ok || op.Method != strings.ToUpper(route.method) || op.Path != route.path || op.Behavior != "billing."+op.ID {
+	if !ok || op.Method != strings.ToUpper(route.method) || op.Path != route.path || op.Behavior != route.behavior {
 		return fmt.Errorf("unsupported path or binding for %s", op.ID)
 	}
-	expected := map[string]string{"id": "string"}
-	if op.ID == "createRefund" {
-		expected = map[string]string{"charge_id": "string", "amount_cents": "integer", "reason": "string"}
-	}
+	expected := route.properties
 	if len(op.Properties) != len(expected) || len(op.Required) != len(expected) {
 		return fmt.Errorf("unsupported schema for %s", op.ID)
 	}

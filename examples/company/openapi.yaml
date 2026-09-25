@@ -1,0 +1,21 @@
+openapi: 3.1.0
+info: {title: Fictional company support, version: 1.0.0}
+paths:
+  /customers/{id}: {get: {operationId: getCustomer, parameters: [{name: id, in: path, required: true, schema: {type: string}}]}}
+  /customers/{id}/invoices: {get: {operationId: listInvoices, parameters: [{name: id, in: path, required: true, schema: {type: string}}]}}
+  /invoices/{id}/charges: {get: {operationId: listCharges, parameters: [{name: id, in: path, required: true, schema: {type: string}}]}}
+  /charges/{id}: {get: {operationId: getCharge, parameters: [{name: id, in: path, required: true, schema: {type: string}}]}}
+  /refunds: {post: {operationId: createRefund, requestBody: {required: true, content: {application/json: {schema: {type: object, required: [charge_id, amount_cents, reason], properties: {charge_id: {type: string}, amount_cents: {type: integer}, reason: {type: string}}}}}}}}
+  /subscriptions/{id}: {get: {operationId: getSubscription, parameters: [{name: id, in: path, required: true, schema: {type: string}}]}}
+  /crm/accounts/{id}: {get: {operationId: crmGetAccount, parameters: [{name: id, in: path, required: true, schema: {type: string}}]}}
+  /crm/accounts/search: {post: {operationId: crmSearchAccounts, requestBody: {required: true, content: {application/json: {schema: {type: object, required: [query], properties: {query: {type: string}}}}}}}}
+  /crm/notes: {post: {operationId: crmAddAccountNote, requestBody: {required: true, content: {application/json: {schema: {type: object, required: [account_id, body], properties: {account_id: {type: string}, body: {type: string}}}}}}}}
+  /crm/accounts/status: {post: {operationId: crmUpdateAccountStatus, requestBody: {required: true, content: {application/json: {schema: {type: object, required: [account_id, status], properties: {account_id: {type: string}, status: {type: string}}}}}}}}
+  /tickets/issues: {post: {operationId: ticketCreateIssue, requestBody: {required: true, content: {application/json: {schema: {type: object, required: [project_id, account_id, title, priority], properties: {project_id: {type: string}, account_id: {type: string}, title: {type: string}, priority: {type: string}}}}}}}}
+  /tickets/issues/{id}: {get: {operationId: ticketGetIssue, parameters: [{name: id, in: path, required: true, schema: {type: string}}]}}
+  /tickets/issues/search: {post: {operationId: ticketSearchIssues, requestBody: {required: true, content: {application/json: {schema: {type: object, required: [query], properties: {query: {type: string}}}}}}}}
+  /tickets/comments: {post: {operationId: ticketAddComment, requestBody: {required: true, content: {application/json: {schema: {type: object, required: [issue_id, body], properties: {issue_id: {type: string}, body: {type: string}}}}}}}}
+  /tickets/issues/transition: {post: {operationId: ticketTransitionIssue, requestBody: {required: true, content: {application/json: {schema: {type: object, required: [issue_id, status], properties: {issue_id: {type: string}, status: {type: string}}}}}}}}
+  /messages/workspaces/{id}/channels: {get: {operationId: messageListChannels, parameters: [{name: id, in: path, required: true, schema: {type: string}}]}}
+  /messages/channels/{id}: {get: {operationId: messageReadChannel, parameters: [{name: id, in: path, required: true, schema: {type: string}}]}}
+  /messages/messages: {post: {operationId: messagePostMessage, requestBody: {required: true, content: {application/json: {schema: {type: object, required: [channel_id, body], properties: {channel_id: {type: string}, body: {type: string}}}}}}}}

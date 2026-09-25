@@ -1,0 +1,19 @@
+operations:
+  getCustomer: billing.getCustomer
+  listInvoices: billing.listInvoices
+  listCharges: billing.listCharges
+  getCharge: billing.getCharge
+  createRefund: billing.createRefund
+  getSubscription: billing.getSubscription
+  crmGetAccount: crm.getAccount
+  crmSearchAccounts: crm.searchAccounts
+  crmAddAccountNote: crm.addAccountNote
+  crmUpdateAccountStatus: crm.updateAccountStatus
+  ticketCreateIssue: ticket.createIssue
+  ticketGetIssue: ticket.getIssue
+  ticketSearchIssues: ticket.searchIssues
+  ticketAddComment: ticket.addComment
+  ticketTransitionIssue: ticket.transitionIssue
+  messageListChannels: messaging.listChannels
+  messageReadChannel: messaging.readChannel
+  messagePostMessage: messaging.postMessage
