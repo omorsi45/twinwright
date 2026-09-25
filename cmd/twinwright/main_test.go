@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -1417,6 +1418,31 @@ func TestContainerCLILocal(t *testing.T) {
 	}
 	out.Reset()
 	if err := runCLI([]string{"container", "stop", "--config", cfgPath}, &out); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLeaseCLIAcquireRelease(t *testing.T) {
+	dir := t.TempDir()
+	db := filepath.Join(dir, "leases.db")
+	var out bytes.Buffer
+	if err := runCLI([]string{"lease", "acquire", "--name", "run/R-1", "--owner", "worker-a", "--db", db, "--ttl", "1m"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), `"experimental":true`) || !strings.Contains(out.String(), `"delivery":"at_least_once"`) || !strings.Contains(out.String(), `"token":1`) {
+		t.Fatalf("%s", out.String())
+	}
+	var acquired struct {
+		Lease struct {
+			Token int64 `json:"token"`
+		} `json:"lease"`
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &acquired); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := runCLI([]string{"lease", "release", "--name", "run/R-1", "--owner", "worker-a", "--token", fmt.Sprintf("%d", acquired.Lease.Token), "--db", db}, &out); err != nil {
 		t.Fatal(err)
 	}
 }

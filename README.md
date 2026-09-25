@@ -415,7 +415,18 @@ go run ./cmd/twinwright container stop --config examples/container/local.yaml
 
 `runtime: local` is a no-op handle for in-process work. `runtime: docker` shells to the docker CLI and requires a running daemon. Secrets belong in a relative `--env-file`, never on the command line. Kubernetes is not supported. See `docs/adr/0016-optional-containers.md`. A live docker start has not been verified on this host when the daemon was stopped.
 
-Distributed multi-node execution is intentionally deferred; see `docs/adr/0017-distributed-runtime-deferred.md`.
+## Lease ownership
+
+**Experimental.** Twinwright does not claim a multi-node cluster yet. It does ship a SQLite lease store with fencing tokens so a future worker can own a named resource without exactly-once delivery myths.
+
+```bash
+go run ./cmd/twinwright lease acquire --name run/R-1 --owner worker-a --ttl 1m
+go run ./cmd/twinwright lease renew --name run/R-1 --owner worker-a --token 1 --ttl 1m
+go run ./cmd/twinwright lease status --name run/R-1
+go run ./cmd/twinwright lease release --name run/R-1 --owner worker-a --token 1
+```
+
+JSON responses set `experimental: true` and `delivery: at_least_once`. Renew and release require the current fencing token. Expired leases can be reclaimed. The lease database defaults to `twinwright.leases.db` and is separate from the world store. See `docs/adr/0018-lease-fencing.md`. Full Postgres world storage and multi-worker orchestration remain deferred; see `docs/adr/0017-distributed-runtime-deferred.md`.
 
 ## Experimental shadow mode
 
@@ -642,6 +653,7 @@ internal/
   counterfactual/     intervention analysis over forks
   shadow/             experimental observe-only shadow simulation
   container/          optional local or Docker sidecar executor
+  lease/              time-bounded ownership with fencing tokens
   redact/             secret redaction before storage or display
   trace/              ledger traces, text trees, and OTLP export
 
@@ -743,6 +755,7 @@ Major runtime contracts are documented as ADRs under `docs/adr/`, including:
 - experimental observe-only shadow mode
 - optional local or Docker sidecars
 - distributed runtime deferred with single-node guarantees frozen
+- lease ownership with fencing tokens (at-least-once foundation)
 
 The ADRs document not only what Twinwright does, but why the implementation makes those tradeoffs.
 
