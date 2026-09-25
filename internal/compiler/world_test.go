@@ -69,6 +69,7 @@ func TestWorldDefinitionRejectsInvalidMetadata(t *testing.T) {
 		name, old, replacement, want string
 	}{
 		{"version", "version: 1", "version: 2", "version"},
+		{"fractional version", "version: 1", "version: 1.5", "version"},
 		{"name", "name: support", `name: "  "`, "name"},
 		{"seed profile", "seed_profile: company-v1", "seed_profile: unknown-v1", "seed profile"},
 		{"empty services", "services:\n  - name: ticketing\n    module: ticket\n    openapi: ticketing.yaml\n    bindings: ticketing.bindings.yaml\n  - name: crm\n    module: crm\n    openapi: crm.yaml\n    bindings: crm.bindings.yaml\n  - name: billing\n    module: billing\n    openapi: billing.yaml\n    bindings: billing.bindings.yaml", "services: []", "service"},

@@ -41,6 +41,18 @@ type RelationshipSpec struct {
 
 // ParseWorldDefinition validates version 1 metadata and returns canonical set order.
 func ParseWorldDefinition(data []byte) (WorldDefinition, error) {
+	var node yaml.Node
+	if err := yaml.Unmarshal(data, &node); err != nil {
+		return WorldDefinition{}, fmt.Errorf("world definition YAML: %w", err)
+	}
+	if len(node.Content) != 1 || node.Content[0].Kind != yaml.MappingNode {
+		return WorldDefinition{}, fmt.Errorf("world definition must be a mapping")
+	}
+	for i := 0; i < len(node.Content[0].Content); i += 2 {
+		if node.Content[0].Content[i].Value == "version" && node.Content[0].Content[i+1].Tag != "!!int" {
+			return WorldDefinition{}, fmt.Errorf("world version must be an integer")
+		}
+	}
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	decoder.KnownFields(true)
 	var def WorldDefinition
