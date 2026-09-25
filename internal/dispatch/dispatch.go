@@ -9,6 +9,7 @@ import (
 	"sort"
 
 	"twinwright/internal/behavior"
+	"twinwright/internal/chaos"
 	"twinwright/internal/compiler"
 	"twinwright/internal/store"
 )
@@ -59,7 +60,42 @@ func (d *Dispatcher) Invoke(ctx context.Context, runID, callID, operationID stri
 	}
 	var response any
 	var mutation any
-	if status, response = validate(*op, args); status == 0 {
+	status, response = validate(*op, args)
+	skipHandler := status != 0
+	if !skipHandler {
+		decision, decideErr := chaos.Decide(ctx, tx, runID, operationID)
+		if decideErr != nil {
+			return Result{}, decideErr
+		}
+		if decision.RuleID != "" {
+			payload := map[string]any{"rule_id": decision.RuleID, "type": decision.Rule.Type, "call_id": callID,
+				"operation_id": operationID, "matching_call": decision.MatchNumber}
+			switch decision.Rule.Type {
+			case "http_error":
+				status, response, skipHandler = decision.Rule.Status, map[string]string{"error": "simulated HTTP failure"}, true
+				payload["status"] = status
+			case "timeout":
+				status, response, skipHandler = 0, map[string]string{"error": "simulated transport timeout"}, true
+			case "rate_limit":
+				status, response, skipHandler = 429, map[string]string{"error": "simulated rate limit"}, true
+				payload["status"] = status
+			case "permission_revocation":
+				status, response, skipHandler = 403, map[string]string{"error": "simulated permission revocation"}, true
+				payload["status"] = status
+			case "partial_service_outage":
+				status, response, skipHandler = 503, map[string]string{"error": "simulated service outage"}, true
+				payload["status"] = status
+			case "latency":
+				payload["duration_ms"] = decision.Rule.DurationMS
+			default:
+				return Result{}, fmt.Errorf("chaos effect %s is not implemented", decision.Rule.Type)
+			}
+			if err = store.AppendEventTx(ctx, tx, runID, "chaos.injected", payload); err != nil {
+				return Result{}, err
+			}
+		}
+	}
+	if !skipHandler {
 		if fault == operationID && consumed == 0 {
 			status = 503
 			response = map[string]string{"error": "injected temporary unavailability"}
