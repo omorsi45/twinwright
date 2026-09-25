@@ -83,8 +83,8 @@ func ReconstructForReplay(ctx context.Context, source *store.Store, child store.
 			return nil, fmt.Errorf("copy %s: %w", table.name, err)
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO runs(id,world_id,scenario,provider,model,task,status,step,transcript,fault_operation,fault_consumed) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
-		child.ID, child.WorldID, child.Scenario, child.Provider, child.Model, child.Task, "paused", rebuilt.Step, rebuilt.Transcript, child.FaultOperation, consumed); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO runs(id,world_id,scenario,provider,model,task,status,step,transcript,fault_operation,fault_consumed,principal_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+		child.ID, child.WorldID, child.Scenario, child.Provider, child.Model, child.Task, "paused", rebuilt.Step, rebuilt.Transcript, child.FaultOperation, consumed, child.PrincipalID); err != nil {
 		return nil, err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO tool_results(run_id,call_id,operation_id,arguments,status,body) SELECT ?,call_id,operation_id,arguments,status,body FROM tool_results WHERE run_id=?`, child.ID, parent.ID); err != nil {

@@ -43,6 +43,125 @@ func TestCreateRunWithChaosStoresPolicyAtomically(t *testing.T) {
 	}
 }
 
+func TestCreateRunConfiguredStoresPrincipalAndPolicy(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(t.TempDir() + "/auth.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	w, err := s.Seed(ctx, 42, "digest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	digestOf := func(b []byte) string { h := sha256.Sum256(b); return hex.EncodeToString(h[:]) }
+	auth := []byte(`{"version":1,"principal":{"id":"support-agent-1"},"permissions":{"allow":["charges.read"]},"resources":{},"constraints":{}}`)
+	chaosPolicy := []byte(`{"version":1,"rules":[{"id":"once","type":"timeout","operations":["getCharge"],"times":1}]}`)
+	run, err := s.CreateRunConfigured(ctx, w.ID, "duplicate-charge", "scripted", "fixture-v1", "task", RunOptions{AuthJSON: auth, AuthDigest: digestOf(auth), ChaosJSON: chaosPolicy, ChaosDigest: digestOf(chaosPolicy)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.PrincipalID != "support-agent-1" {
+		t.Fatalf("principal=%q", run.PrincipalID)
+	}
+	saved, err := s.Run(ctx, run.ID)
+	if err != nil || saved.PrincipalID != "support-agent-1" {
+		t.Fatalf("saved=%+v err=%v", saved, err)
+	}
+	got, gotDigest, err := s.AuthPolicy(ctx, run.ID)
+	if err != nil || string(got) != string(auth) || gotDigest != digestOf(auth) {
+		t.Fatalf("auth=%s digest=%s err=%v", got, gotDigest, err)
+	}
+	if _, _, err := s.ChaosPolicy(ctx, run.ID); err != nil {
+		t.Fatalf("chaos policy lost: %v", err)
+	}
+
+	for name, opts := range map[string]RunOptions{
+		"wrong digest":       {AuthJSON: auth, AuthDigest: "wrong"},
+		"invalid JSON":       {AuthJSON: []byte("{"), AuthDigest: digestOf([]byte("{"))},
+		"missing principal":  {AuthJSON: []byte(`{"version":1}`), AuthDigest: digestOf([]byte(`{"version":1}`))},
+		"fault with chaos":   {FaultOperation: "listCharges", ChaosJSON: chaosPolicy, ChaosDigest: digestOf(chaosPolicy)},
+		"wrong chaos digest": {ChaosJSON: chaosPolicy, ChaosDigest: "wrong"},
+	} {
+		if _, err := s.CreateRunConfigured(ctx, w.ID, "duplicate-charge", "scripted", "fixture-v1", "task", opts); err == nil {
+			t.Errorf("%s accepted", name)
+		}
+	}
+	var count int
+	if err := s.DB.QueryRowContext(ctx, "SELECT count(*) FROM runs").Scan(&count); err != nil || count != 1 {
+		t.Fatalf("rejected creations left runs=%d err=%v", count, err)
+	}
+
+	plain, err := s.CreateRun(ctx, w.ID, "duplicate-charge", "scripted", "fixture-v1", "task", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved, err := s.Run(ctx, plain.ID); err != nil || saved.PrincipalID != UnrestrictedPrincipal {
+		t.Fatalf("plain run principal=%q err=%v", saved.PrincipalID, err)
+	}
+	if _, _, err := s.AuthPolicy(ctx, plain.ID); err != sql.ErrNoRows {
+		t.Fatalf("plain run auth err=%v", err)
+	}
+}
+
+func TestOpenMigratesMissingPrincipalToLegacyLocal(t *testing.T) {
+	ctx := context.Background()
+	path := t.TempDir() + "/pre-m6.db"
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE runs (id TEXT PRIMARY KEY, world_id TEXT NOT NULL, scenario TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, task TEXT NOT NULL, status TEXT NOT NULL, step INTEGER NOT NULL DEFAULT 0, transcript TEXT NOT NULL DEFAULT '[]', fault_operation TEXT NOT NULL DEFAULT '', fault_consumed INTEGER NOT NULL DEFAULT 0)`,
+		`INSERT INTO runs(id,world_id,scenario,provider,model,task,status) VALUES('R-old','W-old','duplicate-charge','scripted','fixture-v1','task','completed')`,
+	} {
+		if _, err = raw.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err = raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	readOnly, err := OpenReadOnly(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, err := readOnly.Run(ctx, "R-old")
+	if err != nil || old.PrincipalID != LegacyPrincipal {
+		t.Fatalf("read-only legacy run=%+v err=%v", old, err)
+	}
+	if _, _, err := readOnly.AuthPolicy(ctx, "R-old"); err != sql.ErrNoRows {
+		t.Fatalf("read-only legacy auth err=%v", err)
+	}
+	var columns int
+	if err = readOnly.DB.QueryRow("SELECT count(*) FROM pragma_table_info('runs') WHERE name='principal_id'").Scan(&columns); err != nil || columns != 0 {
+		t.Fatalf("read-only open migrated principal column: %d %v", columns, err)
+	}
+	readOnly.Close()
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	migrated, err := s.Run(ctx, "R-old")
+	if err != nil || migrated.PrincipalID != LegacyPrincipal {
+		t.Fatalf("migrated run=%+v err=%v", migrated, err)
+	}
+	w, err := s.Seed(ctx, 42, "digest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := s.CreateRun(ctx, w.ID, "duplicate-charge", "scripted", "fixture-v1", "task", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved, err := s.Run(ctx, fresh.ID); err != nil || saved.PrincipalID != UnrestrictedPrincipal {
+		t.Fatalf("new run after migration principal=%q err=%v", saved.PrincipalID, err)
+	}
+}
+
 func TestReadOnlyLegacyDatabaseHasNoChaosPolicy(t *testing.T) {
 	ctx := context.Background()
 	path := t.TempDir() + "/legacy.db"

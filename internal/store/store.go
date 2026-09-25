@@ -33,7 +33,16 @@ type Run struct {
 	Step           int    `json:"step"`
 	Transcript     string `json:"transcript"`
 	FaultOperation string `json:"fault_operation"`
+	PrincipalID    string `json:"principal_id"`
 }
+
+// Runs without an authorization policy are unrestricted. Runs created before
+// principals existed read as LegacyPrincipal.
+const (
+	UnrestrictedPrincipal = "local-unrestricted"
+	LegacyPrincipal       = "legacy-local"
+)
+
 type Event struct {
 	ID         string          `json:"id"`
 	RunID      string          `json:"run_id"`
@@ -94,6 +103,8 @@ func Open(path string) (*Store, error) {
 		`CREATE TABLE IF NOT EXISTS chaos_rule_state (run_id TEXT NOT NULL, rule_id TEXT NOT NULL, matching_calls INTEGER NOT NULL DEFAULT 0, injections INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(run_id,rule_id))`,
 		`CREATE TABLE IF NOT EXISTS chaos_snapshots (run_id TEXT NOT NULL, rule_id TEXT NOT NULL, arguments_digest TEXT NOT NULL, status INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY(run_id,rule_id,arguments_digest))`,
 		`CREATE TABLE IF NOT EXISTS chaos_hidden_outcomes (run_id TEXT NOT NULL, call_id TEXT NOT NULL, rule_id TEXT NOT NULL, status INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY(run_id,call_id))`,
+		`CREATE TABLE IF NOT EXISTS run_auth (run_id TEXT PRIMARY KEY, policy_json TEXT NOT NULL, digest TEXT NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS auth_state (run_id TEXT PRIMARY KEY, call_index INTEGER NOT NULL DEFAULT 0)`,
 	}
 	for _, stmt := range schema {
 		if _, err = db.Exec(stmt); err != nil {
@@ -109,7 +120,19 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("schema migration: %w", err)
 	}
+	if !hasColumn(db, "runs", "principal_id") {
+		if _, err = db.Exec("ALTER TABLE runs ADD COLUMN principal_id TEXT NOT NULL DEFAULT '" + LegacyPrincipal + "'"); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("schema migration: %w", err)
+		}
+	}
 	return &Store{DB: db}, nil
+}
+
+func hasColumn(db *sql.DB, table, column string) bool {
+	var count int
+	err := db.QueryRow("SELECT count(*) FROM pragma_table_info(?) WHERE name=?", table, column).Scan(&count)
+	return err == nil && count > 0
 }
 func ensureForkChaosColumn(db *sql.DB) error {
 	rows, err := db.Query("PRAGMA table_info(fork_lineage)")
@@ -296,40 +319,89 @@ func (s *Store) Snapshot(ctx context.Context, worldID string) (string, error) {
 }
 
 func (s *Store) CreateRun(ctx context.Context, worldID, scenario, provider, model, task, faultOperation string) (Run, error) {
-	return s.createRun(ctx, worldID, scenario, provider, model, task, faultOperation, nil, "")
+	return s.CreateRunConfigured(ctx, worldID, scenario, provider, model, task, RunOptions{FaultOperation: faultOperation})
 }
 
 // CreateRunWithChaos persists a validated policy in the same transaction as the run.
 func (s *Store) CreateRunWithChaos(ctx context.Context, worldID, scenario, provider, model, task, faultOperation string, policyJSON []byte, digest string) (Run, error) {
-	if faultOperation != "" {
-		return Run{}, fmt.Errorf("legacy fault and chaos policy cannot be combined")
-	}
-	if !json.Valid(policyJSON) {
-		return Run{}, fmt.Errorf("invalid chaos policy JSON")
-	}
-	hash := sha256.Sum256(policyJSON)
-	if hex.EncodeToString(hash[:]) != digest {
-		return Run{}, fmt.Errorf("chaos policy digest mismatch")
-	}
-	return s.createRun(ctx, worldID, scenario, provider, model, task, faultOperation, policyJSON, digest)
+	return s.CreateRunConfigured(ctx, worldID, scenario, provider, model, task, RunOptions{FaultOperation: faultOperation, ChaosJSON: policyJSON, ChaosDigest: digest})
 }
 
-func (s *Store) createRun(ctx context.Context, worldID, scenario, provider, model, task, faultOperation string, policyJSON []byte, digest string) (Run, error) {
+// RunOptions holds canonical, already validated policies. The run principal is
+// read from the authorization policy; without one the run is unrestricted.
+type RunOptions struct {
+	FaultOperation string
+	ChaosJSON      []byte
+	ChaosDigest    string
+	AuthJSON       []byte
+	AuthDigest     string
+}
+
+func checkDigest(kind string, encoded []byte, digest string) error {
+	if !json.Valid(encoded) {
+		return fmt.Errorf("invalid %s policy JSON", kind)
+	}
+	hash := sha256.Sum256(encoded)
+	if hex.EncodeToString(hash[:]) != digest {
+		return fmt.Errorf("%s policy digest mismatch", kind)
+	}
+	return nil
+}
+
+func authPrincipal(encoded []byte, digest string) (string, error) {
+	if err := checkDigest("authorization", encoded, digest); err != nil {
+		return "", err
+	}
+	var policy struct {
+		Principal struct {
+			ID string `json:"id"`
+		} `json:"principal"`
+	}
+	if err := json.Unmarshal(encoded, &policy); err != nil {
+		return "", err
+	}
+	if policy.Principal.ID == "" || policy.Principal.ID == UnrestrictedPrincipal || policy.Principal.ID == LegacyPrincipal {
+		return "", fmt.Errorf("authorization policy requires a principal ID")
+	}
+	return policy.Principal.ID, nil
+}
+
+func (s *Store) CreateRunConfigured(ctx context.Context, worldID, scenario, provider, model, task string, opts RunOptions) (Run, error) {
+	if len(opts.ChaosJSON) > 0 {
+		if opts.FaultOperation != "" {
+			return Run{}, fmt.Errorf("legacy fault and chaos policy cannot be combined")
+		}
+		if err := checkDigest("chaos", opts.ChaosJSON, opts.ChaosDigest); err != nil {
+			return Run{}, err
+		}
+	}
+	principal := UnrestrictedPrincipal
+	if len(opts.AuthJSON) > 0 {
+		var err error
+		if principal, err = authPrincipal(opts.AuthJSON, opts.AuthDigest); err != nil {
+			return Run{}, err
+		}
+	}
 	var random [12]byte
 	if _, err := crand.Read(random[:]); err != nil {
 		return Run{}, err
 	}
-	r := Run{ID: "R-" + hex.EncodeToString(random[:]), WorldID: worldID, Scenario: scenario, Provider: provider, Model: model, Task: task, Status: "running", Transcript: "[]", FaultOperation: faultOperation}
+	r := Run{ID: "R-" + hex.EncodeToString(random[:]), WorldID: worldID, Scenario: scenario, Provider: provider, Model: model, Task: task, Status: "running", Transcript: "[]", FaultOperation: opts.FaultOperation, PrincipalID: principal}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return Run{}, err
 	}
 	defer tx.Rollback()
-	if _, err = tx.ExecContext(ctx, "INSERT INTO runs(id,world_id,scenario,provider,model,task,status,transcript,fault_operation) VALUES(?,?,?,?,?,?,?,?,?)", r.ID, r.WorldID, r.Scenario, r.Provider, r.Model, r.Task, r.Status, r.Transcript, r.FaultOperation); err != nil {
+	if _, err = tx.ExecContext(ctx, "INSERT INTO runs(id,world_id,scenario,provider,model,task,status,transcript,fault_operation,principal_id) VALUES(?,?,?,?,?,?,?,?,?,?)", r.ID, r.WorldID, r.Scenario, r.Provider, r.Model, r.Task, r.Status, r.Transcript, r.FaultOperation, r.PrincipalID); err != nil {
 		return Run{}, err
 	}
-	if len(policyJSON) > 0 {
-		if _, err = tx.ExecContext(ctx, "INSERT INTO run_chaos(run_id,policy_json,digest) VALUES(?,?,?)", r.ID, string(policyJSON), digest); err != nil {
+	if len(opts.ChaosJSON) > 0 {
+		if _, err = tx.ExecContext(ctx, "INSERT INTO run_chaos(run_id,policy_json,digest) VALUES(?,?,?)", r.ID, string(opts.ChaosJSON), opts.ChaosDigest); err != nil {
+			return Run{}, err
+		}
+	}
+	if len(opts.AuthJSON) > 0 {
+		if _, err = tx.ExecContext(ctx, "INSERT INTO run_auth(run_id,policy_json,digest) VALUES(?,?,?)", r.ID, string(opts.AuthJSON), opts.AuthDigest); err != nil {
 			return Run{}, err
 		}
 	}
@@ -358,6 +430,22 @@ func (s *Store) ChaosPolicy(ctx context.Context, runID string) ([]byte, string, 
 	return []byte(encoded), digest, nil
 }
 
+// AuthPolicy returns sql.ErrNoRows for old databases or unrestricted runs.
+func (s *Store) AuthPolicy(ctx context.Context, runID string) ([]byte, string, error) {
+	var exists int
+	if err := s.DB.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='run_auth'").Scan(&exists); err != nil {
+		return nil, "", err
+	}
+	if exists == 0 {
+		return nil, "", sql.ErrNoRows
+	}
+	var encoded, digest string
+	if err := s.DB.QueryRowContext(ctx, "SELECT policy_json,digest FROM run_auth WHERE run_id=?", runID).Scan(&encoded, &digest); err != nil {
+		return nil, "", err
+	}
+	return []byte(encoded), digest, nil
+}
+
 // AttachChaos initializes policy for a replay run before tool execution.
 func (s *Store) AttachChaos(ctx context.Context, runID string, policyJSON []byte, digest string) error {
 	if !json.Valid(policyJSON) {
@@ -373,7 +461,11 @@ func (s *Store) AttachChaos(ctx context.Context, runID string, policyJSON []byte
 
 func (s *Store) Run(ctx context.Context, id string) (Run, error) {
 	var r Run
-	err := s.DB.QueryRowContext(ctx, "SELECT id,world_id,scenario,provider,model,task,status,step,transcript,fault_operation FROM runs WHERE id=?", id).Scan(&r.ID, &r.WorldID, &r.Scenario, &r.Provider, &r.Model, &r.Task, &r.Status, &r.Step, &r.Transcript, &r.FaultOperation)
+	principal := "principal_id"
+	if !hasColumn(s.DB, "runs", "principal_id") {
+		principal = "'" + LegacyPrincipal + "'"
+	}
+	err := s.DB.QueryRowContext(ctx, "SELECT id,world_id,scenario,provider,model,task,status,step,transcript,fault_operation,"+principal+" FROM runs WHERE id=?", id).Scan(&r.ID, &r.WorldID, &r.Scenario, &r.Provider, &r.Model, &r.Task, &r.Status, &r.Step, &r.Transcript, &r.FaultOperation, &r.PrincipalID)
 	return r, err
 }
 
@@ -508,14 +600,17 @@ func (s *Store) CreateReplayRun(ctx context.Context, original Run, worldID strin
 	r := Run{
 		ID: original.ID, WorldID: worldID, Scenario: original.Scenario,
 		Provider: original.Provider, Model: original.Model, Task: original.Task,
-		Status: "running", Transcript: "[]", FaultOperation: original.FaultOperation,
+		Status: "running", Transcript: "[]", FaultOperation: original.FaultOperation, PrincipalID: original.PrincipalID,
+	}
+	if r.PrincipalID == "" {
+		r.PrincipalID = LegacyPrincipal
 	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return Run{}, err
 	}
 	defer tx.Rollback()
-	if _, err = tx.ExecContext(ctx, "INSERT INTO runs(id,world_id,scenario,provider,model,task,status,transcript,fault_operation) VALUES(?,?,?,?,?,?,?,?,?)", r.ID, r.WorldID, r.Scenario, r.Provider, r.Model, r.Task, r.Status, r.Transcript, r.FaultOperation); err != nil {
+	if _, err = tx.ExecContext(ctx, "INSERT INTO runs(id,world_id,scenario,provider,model,task,status,transcript,fault_operation,principal_id) VALUES(?,?,?,?,?,?,?,?,?,?)", r.ID, r.WorldID, r.Scenario, r.Provider, r.Model, r.Task, r.Status, r.Transcript, r.FaultOperation, r.PrincipalID); err != nil {
 		return Run{}, err
 	}
 	if err = AppendEventTx(ctx, tx, r.ID, "execution.started", map[string]any{"scenario": r.Scenario, "provider": r.Provider, "model": r.Model, "world_id": worldID}); err != nil {

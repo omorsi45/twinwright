@@ -137,9 +137,9 @@ func Create(ctx context.Context, sourceReadOnly, destination *store.Store, selec
 		}
 	}
 	child := store.Run{ID: runID, WorldID: worldID, Scenario: parent.Scenario, Provider: provider, Model: model, Task: parent.Task,
-		Status: "paused", Step: rebuilt.Step, Transcript: rebuilt.Transcript, FaultOperation: fault}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO runs(id,world_id,scenario,provider,model,task,status,step,transcript,fault_operation,fault_consumed) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
-		child.ID, child.WorldID, child.Scenario, child.Provider, child.Model, child.Task, child.Status, child.Step, child.Transcript, child.FaultOperation, consumed); err != nil {
+		Status: "paused", Step: rebuilt.Step, Transcript: rebuilt.Transcript, FaultOperation: fault, PrincipalID: parent.PrincipalID}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO runs(id,world_id,scenario,provider,model,task,status,step,transcript,fault_operation,fault_consumed,principal_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+		child.ID, child.WorldID, child.Scenario, child.Provider, child.Model, child.Task, child.Status, child.Step, child.Transcript, child.FaultOperation, consumed, child.PrincipalID); err != nil {
 		return Result{}, err
 	}
 	if err := copyToolResults(ctx, rebuiltStore.DB, tx, parent.ID, child.ID); err != nil {
