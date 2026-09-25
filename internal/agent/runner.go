@@ -56,6 +56,10 @@ func (r Runner) Execute(ctx context.Context, runID string, maxSteps int) (store.
 		}
 		if call, ok := pending(history); ok {
 			if _, err = r.Dispatch.Invoke(ctx, runID, call.ID, call.OperationID, call.Arguments); err != nil {
+				payload := map[string]any{"kind": "dispatch", "call_id": call.ID, "operation_id": call.OperationID, "message": err.Error()}
+				if saveErr := r.Store.SaveStatus(ctx, runID, "failed", "error", payload); saveErr != nil {
+					return store.Run{}, fmt.Errorf("dispatch error: %v; recording error: %w", err, saveErr)
+				}
 				return store.Run{}, err
 			}
 			continue
@@ -72,27 +76,40 @@ func (r Runner) Execute(ctx context.Context, runID string, maxSteps int) (store.
 			}
 			return r.Store.Run(ctx, runID)
 		}
-		request := map[string]any{"task": run.Task, "history": history, "operations": r.Manifest.Operations}
+		request := map[string]any{"task": run.Task, "provider": run.Provider, "model": run.Model, "history": history, "operations": r.Manifest.Operations}
+		if err = r.Store.StartModelCall(ctx, runID, request); err != nil {
+			return store.Run{}, err
+		}
 		next, err := r.Provider.Next(ctx, run.Task, history, r.Manifest.Operations)
 		if err != nil {
-			_ = r.Store.Append(ctx, runID, "model.request", request)
-			_ = r.Store.SaveStatus(ctx, runID, "failed", "error", map[string]any{"kind": "provider", "message": err.Error()})
+			if saveErr := r.Store.FailModelTurn(ctx, runID, map[string]any{"error": err.Error()}, err.Error()); saveErr != nil {
+				return store.Run{}, fmt.Errorf("provider error: %v; recording error: %w", err, saveErr)
+			}
 			return store.Run{}, err
 		}
 		if next.Role != "assistant" {
-			return store.Run{}, fmt.Errorf("provider returned role %q", next.Role)
+			err = fmt.Errorf("provider returned role %q", next.Role)
 		}
-		for _, call := range next.ToolCalls {
-			if call.ID == "" || r.Manifest.Operation(call.OperationID) == nil {
-				return store.Run{}, fmt.Errorf("provider returned invalid tool call")
+		if err == nil {
+			for _, call := range next.ToolCalls {
+				if call.ID == "" || r.Manifest.Operation(call.OperationID) == nil {
+					err = fmt.Errorf("provider returned invalid tool call")
+					break
+				}
 			}
+		}
+		if err != nil {
+			if saveErr := r.Store.FailModelTurn(ctx, runID, next, err.Error()); saveErr != nil {
+				return store.Run{}, fmt.Errorf("validation error: %v; recording error: %w", err, saveErr)
+			}
+			return store.Run{}, err
 		}
 		history = append(history, next)
 		transcript, err := json.Marshal(history)
 		if err != nil {
 			return store.Run{}, err
 		}
-		if err = r.Store.SaveTurn(ctx, runID, run.Step+1, string(transcript), request, next); err != nil {
+		if err = r.Store.SaveTurn(ctx, runID, run.Step+1, string(transcript), next); err != nil {
 			return store.Run{}, err
 		}
 		used++

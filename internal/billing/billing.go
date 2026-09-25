@@ -71,9 +71,12 @@ func Handle(ctx context.Context, tx *sql.Tx, worldID, runID, callID, behavior st
 		}
 		return 200, charge, nil, nil
 	case "billing.createRefund":
-		chargeID := args["charge_id"].(string)
+		chargeID, chargeOK := args["charge_id"].(string)
 		amount := integer(args["amount_cents"])
-		reason := args["reason"].(string)
+		reason, reasonOK := args["reason"].(string)
+		if !chargeOK || chargeID == "" || !reasonOK || reason == "" {
+			return 400, map[string]string{"error": "invalid refund arguments"}, nil, nil
+		}
 		if amount <= 0 {
 			return 400, map[string]string{"error": "amount must be positive"}, nil, nil
 		}

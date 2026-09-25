@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -82,6 +81,12 @@ func runCLI(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
+		if *fault != "" && manifest.Operation(*fault) == nil {
+			return fmt.Errorf("unknown fault operation %q", *fault)
+		}
+		if *providerName == "scripted" && *model == "" {
+			*model = "fixture-v1"
+		}
 		provider, err := selectProvider(*providerName, *model)
 		if err != nil {
 			return err
@@ -96,14 +101,14 @@ func runCLI(args []string, out io.Writer) error {
 			return err
 		}
 		task := "Customer C-104 says they were charged twice. Investigate the account and refund only the duplicate charge if appropriate."
-		run, err := s.CreateRun(ctx, world.ID, "duplicate-charge", *providerName, task, *fault)
+		run, err := s.CreateRun(ctx, world.ID, "duplicate-charge", *providerName, *model, task, *fault)
 		if err != nil {
 			return err
 		}
 		runner := agent.Runner{Store: s, Dispatch: &dispatch.Dispatcher{Store: s, Manifest: manifest}, Manifest: manifest, Provider: provider}
 		result, err := runner.Execute(ctx, run.ID, *steps)
 		if err != nil {
-			return err
+			return fmt.Errorf("run %s failed: %w", run.ID, err)
 		}
 		return emitResult(ctx, out, s, result)
 	case "resume":
@@ -116,7 +121,7 @@ func runCLI(args []string, out io.Writer) error {
 		manifestPath := fs.String("manifest", "twinwright.manifest.json", "compiled manifest")
 		dbPath := fs.String("db", "twinwright.db", "SQLite world database")
 		providerName := fs.String("agent", "", "run's provider")
-		model := fs.String("model", os.Getenv("OPENAI_MODEL"), "OpenAI model")
+		model := fs.String("model", "", "use the model saved with the run")
 		steps := fs.Int("steps", 20, "maximum model turns in this invocation")
 		if err := fs.Parse(args[2:]); err != nil {
 			return err
@@ -134,17 +139,27 @@ func runCLI(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
+		var worldDigest string
+		if err = s.DB.QueryRowContext(ctx, "SELECT digest FROM worlds WHERE id=?", run.WorldID).Scan(&worldDigest); err != nil {
+			return err
+		}
+		if manifest.Digest != worldDigest {
+			return fmt.Errorf("manifest mismatch for run %s", runID)
+		}
 		if *providerName != "" && *providerName != run.Provider {
 			return fmt.Errorf("provider mismatch: run uses %s", run.Provider)
 		}
-		provider, err := selectProvider(run.Provider, *model)
+		if *model != "" && *model != run.Model {
+			return fmt.Errorf("model mismatch: run uses %s", run.Model)
+		}
+		provider, err := selectProvider(run.Provider, run.Model)
 		if err != nil {
 			return err
 		}
 		runner := agent.Runner{Store: s, Dispatch: &dispatch.Dispatcher{Store: s, Manifest: manifest}, Manifest: manifest, Provider: provider}
 		result, err := runner.Execute(ctx, runID, *steps)
 		if err != nil {
-			return err
+			return fmt.Errorf("run %s failed: %w", runID, err)
 		}
 		return emitResult(ctx, out, s, result)
 	case "inspect":
@@ -189,8 +204,8 @@ func readManifest(path string) (compiler.Manifest, error) {
 	if err = json.Unmarshal(data, &m); err != nil {
 		return m, err
 	}
-	if m.Digest == "" || len(m.Operations) == 0 {
-		return m, errors.New("invalid manifest")
+	if err = compiler.ValidateManifest(m); err != nil {
+		return m, err
 	}
 	return m, nil
 }

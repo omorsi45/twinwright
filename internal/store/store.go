@@ -25,6 +25,7 @@ type Run struct {
 	WorldID        string `json:"world_id"`
 	Scenario       string `json:"scenario"`
 	Provider       string `json:"provider"`
+	Model          string `json:"model"`
 	Task           string `json:"task"`
 	Status         string `json:"status"`
 	Step           int    `json:"step"`
@@ -59,7 +60,7 @@ func Open(path string) (*Store, error) {
 		`CREATE TABLE IF NOT EXISTS invoices (world_id TEXT NOT NULL, id TEXT NOT NULL, customer_id TEXT NOT NULL, amount_cents INTEGER NOT NULL, subscription_id TEXT NOT NULL, PRIMARY KEY(world_id,id))`,
 		`CREATE TABLE IF NOT EXISTS charges (world_id TEXT NOT NULL, id TEXT NOT NULL, invoice_id TEXT NOT NULL, amount_cents INTEGER NOT NULL, refunded_cents INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, PRIMARY KEY(world_id,id))`,
 		`CREATE TABLE IF NOT EXISTS refunds (world_id TEXT NOT NULL, id TEXT NOT NULL, charge_id TEXT NOT NULL, amount_cents INTEGER NOT NULL, reason TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(world_id,id))`,
-		`CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, world_id TEXT NOT NULL, scenario TEXT NOT NULL, provider TEXT NOT NULL, task TEXT NOT NULL, status TEXT NOT NULL, step INTEGER NOT NULL DEFAULT 0, transcript TEXT NOT NULL DEFAULT '[]', fault_operation TEXT NOT NULL DEFAULT '', fault_consumed INTEGER NOT NULL DEFAULT 0)`,
+		`CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, world_id TEXT NOT NULL, scenario TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, task TEXT NOT NULL, status TEXT NOT NULL, step INTEGER NOT NULL DEFAULT 0, transcript TEXT NOT NULL DEFAULT '[]', fault_operation TEXT NOT NULL DEFAULT '', fault_consumed INTEGER NOT NULL DEFAULT 0)`,
 		`CREATE TABLE IF NOT EXISTS events (run_id TEXT NOT NULL, seq INTEGER NOT NULL, id TEXT NOT NULL UNIQUE, recorded_at TEXT NOT NULL, world_at TEXT NOT NULL, type TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(run_id,seq))`,
 		`CREATE TABLE IF NOT EXISTS tool_results (run_id TEXT NOT NULL, call_id TEXT NOT NULL, operation_id TEXT NOT NULL, arguments TEXT NOT NULL, status INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY(run_id,call_id))`,
 	}
@@ -141,21 +142,21 @@ func (s *Store) Snapshot(ctx context.Context, worldID string) (string, error) {
 	return string(b), err
 }
 
-func (s *Store) CreateRun(ctx context.Context, worldID, scenario, provider, task, faultOperation string) (Run, error) {
+func (s *Store) CreateRun(ctx context.Context, worldID, scenario, provider, model, task, faultOperation string) (Run, error) {
 	var random [12]byte
 	if _, err := crand.Read(random[:]); err != nil {
 		return Run{}, err
 	}
-	r := Run{ID: "R-" + hex.EncodeToString(random[:]), WorldID: worldID, Scenario: scenario, Provider: provider, Task: task, Status: "running", Transcript: "[]", FaultOperation: faultOperation}
+	r := Run{ID: "R-" + hex.EncodeToString(random[:]), WorldID: worldID, Scenario: scenario, Provider: provider, Model: model, Task: task, Status: "running", Transcript: "[]", FaultOperation: faultOperation}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return Run{}, err
 	}
 	defer tx.Rollback()
-	if _, err = tx.ExecContext(ctx, "INSERT INTO runs(id,world_id,scenario,provider,task,status,transcript,fault_operation) VALUES(?,?,?,?,?,?,?,?)", r.ID, r.WorldID, r.Scenario, r.Provider, r.Task, r.Status, r.Transcript, r.FaultOperation); err != nil {
+	if _, err = tx.ExecContext(ctx, "INSERT INTO runs(id,world_id,scenario,provider,model,task,status,transcript,fault_operation) VALUES(?,?,?,?,?,?,?,?,?)", r.ID, r.WorldID, r.Scenario, r.Provider, r.Model, r.Task, r.Status, r.Transcript, r.FaultOperation); err != nil {
 		return Run{}, err
 	}
-	if err = AppendEventTx(ctx, tx, r.ID, "execution.started", map[string]any{"scenario": scenario, "provider": provider, "world_id": worldID}); err != nil {
+	if err = AppendEventTx(ctx, tx, r.ID, "execution.started", map[string]any{"scenario": scenario, "provider": provider, "model": model, "world_id": worldID}); err != nil {
 		return Run{}, err
 	}
 	if err = tx.Commit(); err != nil {
@@ -166,7 +167,7 @@ func (s *Store) CreateRun(ctx context.Context, worldID, scenario, provider, task
 
 func (s *Store) Run(ctx context.Context, id string) (Run, error) {
 	var r Run
-	err := s.DB.QueryRowContext(ctx, "SELECT id,world_id,scenario,provider,task,status,step,transcript,fault_operation FROM runs WHERE id=?", id).Scan(&r.ID, &r.WorldID, &r.Scenario, &r.Provider, &r.Task, &r.Status, &r.Step, &r.Transcript, &r.FaultOperation)
+	err := s.DB.QueryRowContext(ctx, "SELECT id,world_id,scenario,provider,model,task,status,step,transcript,fault_operation FROM runs WHERE id=?", id).Scan(&r.ID, &r.WorldID, &r.Scenario, &r.Provider, &r.Model, &r.Task, &r.Status, &r.Step, &r.Transcript, &r.FaultOperation)
 	return r, err
 }
 
@@ -220,19 +221,38 @@ func (s *Store) Events(ctx context.Context, runID string) ([]Event, error) {
 	return out, rows.Err()
 }
 
-func (s *Store) SaveTurn(ctx context.Context, runID string, step int, transcript string, request, response any) error {
+func (s *Store) StartModelCall(ctx context.Context, runID string, request any) error {
+	return s.Append(ctx, runID, "model.request", request)
+}
+
+func (s *Store) SaveTurn(ctx context.Context, runID string, step int, transcript string, response any) error {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if err = AppendEventTx(ctx, tx, runID, "model.request", request); err != nil {
-		return err
-	}
 	if err = AppendEventTx(ctx, tx, runID, "model.response", response); err != nil {
 		return err
 	}
 	if _, err = tx.ExecContext(ctx, "UPDATE runs SET step=?,transcript=?,status='running' WHERE id=?", step, transcript, runID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) FailModelTurn(ctx context.Context, runID string, response any, message string) error {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err = AppendEventTx(ctx, tx, runID, "model.response", response); err != nil {
+		return err
+	}
+	if err = AppendEventTx(ctx, tx, runID, "error", map[string]any{"kind": "provider", "message": message}); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, "UPDATE runs SET status='failed' WHERE id=?", runID); err != nil {
 		return err
 	}
 	return tx.Commit()

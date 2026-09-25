@@ -42,7 +42,7 @@ func TestLedgerOrderAndStableIDs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	run, err := s.CreateRun(ctx, w.ID, "duplicate-charge", "scripted", "task", "")
+	run, err := s.CreateRun(ctx, w.ID, "duplicate-charge", "scripted", "fixture-v1", "task", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,5 +99,29 @@ func TestSameSeedCreatesIndependentWorldInstances(t *testing.T) {
 	}
 	if afterB != beforeB {
 		t.Fatal("mutation leaked across worlds")
+	}
+}
+
+func TestRunPersistsProviderModel(t *testing.T) {
+	s, err := Open(t.TempDir() + "/world.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	w, err := s.Seed(ctx, 42, "digest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := s.CreateRun(ctx, w.ID, "duplicate-charge", "openai", "test-model", "task", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := s.Run(ctx, r.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Model != "test-model" {
+		t.Fatalf("model=%q", loaded.Model)
 	}
 }

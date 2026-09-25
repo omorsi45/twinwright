@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"twinwright/internal/compiler"
@@ -58,5 +59,15 @@ func TestOpenAIResponsesFunctionLoop(t *testing.T) {
 	}
 	if second.Content != "Done" || requests != 2 {
 		t.Fatalf("second=%+v requests=%d", second, requests)
+	}
+}
+
+func TestOpenAIInvalidJSONErrorIncludesResponseExcerpt(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("not-json-response")) }))
+	defer server.Close()
+	p := OpenAIProvider{APIKey: "test-key", Model: "test-model", URL: server.URL, Client: server.Client()}
+	_, err := p.Next(context.Background(), "task", nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "not-json-response") {
+		t.Fatalf("error=%v", err)
 	}
 }

@@ -50,7 +50,8 @@ type apiOperation struct {
 		} `yaml:"schema"`
 	} `yaml:"parameters"`
 	RequestBody struct {
-		Content map[string]struct {
+		Required bool `yaml:"required"`
+		Content  map[string]struct {
 			Schema struct {
 				Type       string   `yaml:"type"`
 				Required   []string `yaml:"required"`
@@ -69,6 +70,9 @@ func Compile(specBytes, bindingBytes []byte) (Manifest, error) {
 	}
 	if hasRef(&node) {
 		return Manifest{}, fmt.Errorf("external or local reference is unsupported")
+	}
+	if err := checkSchemas(&node); err != nil {
+		return Manifest{}, err
 	}
 	var spec apiSpec
 	if err := node.Decode(&spec); err != nil {
@@ -113,14 +117,7 @@ func Compile(specBytes, bindingBytes []byte) (Manifest, error) {
 				return Manifest{}, fmt.Errorf("duplicate operationId %s", def.ID)
 			}
 			seen[def.ID] = true
-			expected := map[string]struct{ method, path string }{
-				"getCustomer":  {"get", "/customers/{id}"},
-				"listInvoices": {"get", "/customers/{id}/invoices"},
-				"listCharges":  {"get", "/invoices/{id}/charges"},
-				"getCharge":    {"get", "/charges/{id}"},
-				"createRefund": {"post", "/refunds"},
-			}
-			route, known := expected[def.ID]
+			route, known := routes[def.ID]
 			if !known || route.method != method || route.path != path {
 				return Manifest{}, fmt.Errorf("unsupported path or method for %s", def.ID)
 			}
@@ -141,7 +138,7 @@ func Compile(specBytes, bindingBytes []byte) (Manifest, error) {
 			}
 			if method == "post" {
 				body, ok := def.RequestBody.Content["application/json"]
-				if !ok || body.Schema.Type != "object" {
+				if !ok || !def.RequestBody.Required || body.Schema.Type != "object" {
 					return Manifest{}, fmt.Errorf("unsupported request body in %s", def.ID)
 				}
 				for name, p := range body.Schema.Properties {
@@ -158,6 +155,9 @@ func Compile(specBytes, bindingBytes []byte) (Manifest, error) {
 				}
 			}
 			sort.Strings(op.Required)
+			if err := validateContract(op); err != nil {
+				return Manifest{}, err
+			}
 			m.Operations = append(m.Operations, op)
 		}
 	}
@@ -167,12 +167,7 @@ func Compile(specBytes, bindingBytes []byte) (Manifest, error) {
 		}
 	}
 	sort.Slice(m.Operations, func(i, j int) bool { return m.Operations[i].ID < m.Operations[j].ID })
-	raw, err := json.Marshal(m.Operations)
-	if err != nil {
-		return Manifest{}, err
-	}
-	digest := sha256.Sum256(raw)
-	m.Digest = hex.EncodeToString(digest[:])
+	m.Digest, _ = digestOperations(m.Operations)
 	return m, nil
 }
 
@@ -186,4 +181,122 @@ func hasRef(node *yaml.Node) bool {
 		}
 	}
 	return false
+}
+
+var routes = map[string]struct{ method, path string }{
+	"getCustomer":  {"get", "/customers/{id}"},
+	"listInvoices": {"get", "/customers/{id}/invoices"},
+	"listCharges":  {"get", "/invoices/{id}/charges"},
+	"getCharge":    {"get", "/charges/{id}"},
+	"createRefund": {"post", "/refunds"},
+}
+
+func validateContract(op Operation) error {
+	route, ok := routes[op.ID]
+	if !ok || op.Method != strings.ToUpper(route.method) || op.Path != route.path || op.Behavior != "billing."+op.ID {
+		return fmt.Errorf("unsupported path or binding for %s", op.ID)
+	}
+	expected := map[string]string{"id": "string"}
+	if op.ID == "createRefund" {
+		expected = map[string]string{"charge_id": "string", "amount_cents": "integer", "reason": "string"}
+	}
+	if len(op.Properties) != len(expected) || len(op.Required) != len(expected) {
+		return fmt.Errorf("unsupported schema for %s", op.ID)
+	}
+	required := map[string]bool{}
+	for _, name := range op.Required {
+		required[name] = true
+	}
+	for name, typ := range expected {
+		if op.Properties[name] != typ || !required[name] {
+			return fmt.Errorf("unsupported schema for %s", op.ID)
+		}
+	}
+	return nil
+}
+
+func digestOperations(ops []Operation) (string, error) {
+	raw, err := json.Marshal(ops)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(raw)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+// ValidateManifest rejects edited or incompatible build artifacts before execution.
+func ValidateManifest(m Manifest) error {
+	if len(m.Operations) == 0 {
+		return fmt.Errorf("empty manifest")
+	}
+	last := ""
+	for _, op := range m.Operations {
+		if op.ID <= last {
+			return fmt.Errorf("manifest operations are unsorted or duplicated")
+		}
+		if err := validateContract(op); err != nil {
+			return err
+		}
+		last = op.ID
+	}
+	digest, err := digestOperations(m.Operations)
+	if err != nil {
+		return err
+	}
+	if digest != m.Digest {
+		return fmt.Errorf("manifest digest mismatch")
+	}
+	return nil
+}
+
+func checkSchemas(node *yaml.Node) error {
+	if node.Kind == yaml.MappingNode {
+		for i := 0; i < len(node.Content); i += 2 {
+			key, value := node.Content[i].Value, node.Content[i+1]
+			if key == "schema" {
+				if err := checkSchema(value); err != nil {
+					return err
+				}
+			} else if err := checkSchemas(value); err != nil {
+				return err
+			}
+		}
+	} else {
+		for _, child := range node.Content {
+			if err := checkSchemas(child); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+func checkSchema(node *yaml.Node) error {
+	if node.Kind != yaml.MappingNode {
+		return fmt.Errorf("unsupported schema shape")
+	}
+	for i := 0; i < len(node.Content); i += 2 {
+		key, value := node.Content[i].Value, node.Content[i+1]
+		switch key {
+		case "type":
+			if value.Kind != yaml.ScalarNode {
+				return fmt.Errorf("unsupported schema type")
+			}
+		case "required":
+			if value.Kind != yaml.SequenceNode {
+				return fmt.Errorf("unsupported schema required")
+			}
+		case "properties":
+			if value.Kind != yaml.MappingNode {
+				return fmt.Errorf("unsupported schema properties")
+			}
+			for j := 1; j < len(value.Content); j += 2 {
+				if err := checkSchema(value.Content[j]); err != nil {
+					return err
+				}
+			}
+		default:
+			return fmt.Errorf("unsupported schema keyword %s", key)
+		}
+	}
+	return nil
 }

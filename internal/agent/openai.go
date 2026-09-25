@@ -86,7 +86,7 @@ func (p OpenAIProvider) Next(ctx context.Context, task string, history []Message
 		Output []json.RawMessage `json:"output"`
 	}
 	if err = json.Unmarshal(body, &wire); err != nil {
-		return Message{}, fmt.Errorf("decode OpenAI response: %w", err)
+		return Message{}, fmt.Errorf("decode OpenAI response: %w; body=%q", err, string(body[:min(len(body), 1024)]))
 	}
 	message := Message{Role: "assistant", RawOutput: wire.Output}
 	var texts []string

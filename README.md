@@ -28,6 +28,8 @@ go run ./cmd/twinwright inspect <run-id>
 
 The default database is `twinwright.db`; it is ignored by Git. Each `run` creates a new isolated world instance, even when the same seed is used. `inspect` shows ledger events and four deterministic state checks.
 
+Keep the compiled manifest for resume: its digest must match the world used by the run. A run also saves its provider model and uses that model on resume. If execution fails after a run starts, the error includes the run ID so it can be inspected or resumed.
+
 For a live agent, set `OPENAI_API_KEY` and choose a model:
 
 ```powershell
