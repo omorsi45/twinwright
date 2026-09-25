@@ -1,0 +1,5 @@
+operations:
+  crmGetAccount: crm.getAccount
+  crmSearchAccounts: crm.searchAccounts
+  crmAddAccountNote: crm.addAccountNote
+  crmUpdateAccountStatus: crm.updateAccountStatus

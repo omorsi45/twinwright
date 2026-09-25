@@ -1,0 +1,8 @@
+openapi: 3.1.0
+info: {title: Fictional ticketing, version: 1.0.0}
+paths:
+  /tickets/issues: {post: {operationId: ticketCreateIssue, requestBody: {required: true, content: {application/json: {schema: {type: object, required: [project_id, account_id, title, priority], properties: {project_id: {type: string}, account_id: {type: string}, title: {type: string}, priority: {type: string}}}}}}}}
+  /tickets/issues/{id}: {get: {operationId: ticketGetIssue, parameters: [{name: id, in: path, required: true, schema: {type: string}}]}}
+  /tickets/issues/search: {post: {operationId: ticketSearchIssues, requestBody: {required: true, content: {application/json: {schema: {type: object, required: [query], properties: {query: {type: string}}}}}}}}
+  /tickets/comments: {post: {operationId: ticketAddComment, requestBody: {required: true, content: {application/json: {schema: {type: object, required: [issue_id, body], properties: {issue_id: {type: string}, body: {type: string}}}}}}}}
+  /tickets/issues/transition: {post: {operationId: ticketTransitionIssue, requestBody: {required: true, content: {application/json: {schema: {type: object, required: [issue_id, status], properties: {issue_id: {type: string}, status: {type: string}}}}}}}}

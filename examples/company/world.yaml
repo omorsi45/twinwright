@@ -1,0 +1,18 @@
+version: 1
+name: support-company
+seed_profile: company-v1
+services:
+  - {name: billing, module: billing, openapi: services/billing.openapi.yaml, bindings: services/billing.bindings.yaml}
+  - {name: crm, module: crm, openapi: services/crm.openapi.yaml, bindings: services/crm.bindings.yaml}
+  - {name: ticketing, module: ticket, openapi: services/ticketing.openapi.yaml, bindings: services/ticketing.bindings.yaml}
+  - {name: messaging, module: messaging, openapi: services/messaging.openapi.yaml, bindings: services/messaging.bindings.yaml}
+entities:
+  - {service: billing, name: customers, primary_key: id, fields: [id, name]}
+  - {service: billing, name: invoices, primary_key: id, fields: [id, customer_id, subscription_id, amount_cents]}
+  - {service: crm, name: accounts, primary_key: id, fields: [id, customer_id, status, representative_id]}
+  - {service: ticketing, name: issues, primary_key: id, fields: [id, project_id, account_id, title, status, priority]}
+  - {service: messaging, name: channels, primary_key: id, fields: [id, workspace_id, name]}
+relationships:
+  - {from: crm.accounts.customer_id, to: billing.customers.id}
+  - {from: billing.invoices.customer_id, to: billing.customers.id}
+  - {from: ticketing.issues.account_id, to: crm.accounts.id}

@@ -1,0 +1,7 @@
+openapi: 3.1.0
+info: {title: Fictional crm, version: 1.0.0}
+paths:
+  /crm/accounts/{id}: {get: {operationId: crmGetAccount, parameters: [{name: id, in: path, required: true, schema: {type: string}}]}}
+  /crm/accounts/search: {post: {operationId: crmSearchAccounts, requestBody: {required: true, content: {application/json: {schema: {type: object, required: [query], properties: {query: {type: string}}}}}}}}
+  /crm/notes: {post: {operationId: crmAddAccountNote, requestBody: {required: true, content: {application/json: {schema: {type: object, required: [account_id, body], properties: {account_id: {type: string}, body: {type: string}}}}}}}}
+  /crm/accounts/status: {post: {operationId: crmUpdateAccountStatus, requestBody: {required: true, content: {application/json: {schema: {type: object, required: [account_id, status], properties: {account_id: {type: string}, status: {type: string}}}}}}}}

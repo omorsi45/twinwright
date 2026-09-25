@@ -293,3 +293,56 @@ func TestCompanyScenariosFromCLI(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildWorldRunAndReplay(t *testing.T) {
+	root := filepath.Join("..", "..", "examples", "company")
+	dir := t.TempDir()
+	manifest := filepath.Join(dir, "company.world.manifest.json")
+	db := filepath.Join(dir, "company.db")
+	invoke := func(args ...string) map[string]any {
+		t.Helper()
+		var output bytes.Buffer
+		if err := runCLI(args, &output); err != nil {
+			t.Fatal(err)
+		}
+		var value map[string]any
+		if err := json.Unmarshal(output.Bytes(), &value); err != nil {
+			t.Fatal(err)
+		}
+		return value
+	}
+	built := invoke("build-world", filepath.Join(root, "world.yaml"), "--out", manifest)
+	if built["digest"] == "" || built["services"] != float64(4) || built["operations"] != float64(18) {
+		t.Fatalf("build=%v", built)
+	}
+	if err := runCLI([]string{"run", "duplicate-charge", "--agent", "scripted", "--manifest", manifest, "--db", db}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "incompatible") {
+		t.Fatalf("incompatible scenario error=%v", err)
+	}
+	paused := invoke("run", "company-incident", "--agent", "scripted", "--manifest", manifest, "--db", db, "--fault", "messagePostMessage", "--steps", "4")
+	run := paused["run"].(map[string]any)
+	if run["status"] != "paused" {
+		t.Fatalf("run=%v", run)
+	}
+	id := run["id"].(string)
+	completed := invoke("resume", id, "--agent", "scripted", "--manifest", manifest, "--db", db, "--steps", "30")
+	if completed["run"].(map[string]any)["status"] != "completed" || completed["evaluation"].(map[string]any)["passed"] != true {
+		t.Fatalf("completed=%v", completed)
+	}
+	verification := invoke("replay", id, "--manifest", manifest, "--db", db)
+	if verification["verified"] != true {
+		t.Fatalf("replay=%v", verification)
+	}
+}
+
+func TestBuildWorldRejectsParentPath(t *testing.T) {
+	dir := t.TempDir()
+	definition := filepath.Join(dir, "world.yaml")
+	content := "version: 1\nname: sample\nseed_profile: company-v1\nservices:\n  - {name: billing, module: billing, openapi: ../billing.yaml, bindings: billing-bindings.yaml}\n"
+	if err := os.WriteFile(definition, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	err := runCLI([]string{"build-world", definition, "--out", filepath.Join(dir, "manifest.json")}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "path") {
+		t.Fatalf("parent traversal error=%v", err)
+	}
+}

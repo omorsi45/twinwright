@@ -1,0 +1,6 @@
+openapi: 3.1.0
+info: {title: Fictional messaging, version: 1.0.0}
+paths:
+  /messages/workspaces/{id}/channels: {get: {operationId: messageListChannels, parameters: [{name: id, in: path, required: true, schema: {type: string}}]}}
+  /messages/channels/{id}: {get: {operationId: messageReadChannel, parameters: [{name: id, in: path, required: true, schema: {type: string}}]}}
+  /messages/messages: {post: {operationId: messagePostMessage, requestBody: {required: true, content: {application/json: {schema: {type: object, required: [channel_id, body], properties: {channel_id: {type: string}, body: {type: string}}}}}}}}

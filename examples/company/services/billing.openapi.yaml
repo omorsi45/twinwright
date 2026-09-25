@@ -1,0 +1,9 @@
+openapi: 3.1.0
+info: {title: Fictional billing, version: 1.0.0}
+paths:
+  /customers/{id}: {get: {operationId: getCustomer, parameters: [{name: id, in: path, required: true, schema: {type: string}}]}}
+  /customers/{id}/invoices: {get: {operationId: listInvoices, parameters: [{name: id, in: path, required: true, schema: {type: string}}]}}
+  /invoices/{id}/charges: {get: {operationId: listCharges, parameters: [{name: id, in: path, required: true, schema: {type: string}}]}}
+  /charges/{id}: {get: {operationId: getCharge, parameters: [{name: id, in: path, required: true, schema: {type: string}}]}}
+  /refunds: {post: {operationId: createRefund, requestBody: {required: true, content: {application/json: {schema: {type: object, required: [charge_id, amount_cents, reason], properties: {charge_id: {type: string}, amount_cents: {type: integer}, reason: {type: string}}}}}}}}
+  /subscriptions/{id}: {get: {operationId: getSubscription, parameters: [{name: id, in: path, required: true, schema: {type: string}}]}}
