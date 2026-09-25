@@ -1,0 +1,5 @@
+.worktrees/
+*.db
+*.db-shm
+*.db-wal
+bin/
