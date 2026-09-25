@@ -106,8 +106,11 @@ func TestTextTreeShowsToolOutcome(t *testing.T) {
 	s := newStore(t)
 	run := execute(t, s, billingManifest(t), "duplicate-charge", "fixture-v1", store.RunOptions{FaultOperation: "listCharges"}, agent.ScriptedProvider{})
 	text := Text(build(t, s, run.ID))
+	lines := strings.Split(text, "\n")
+	if len(lines) < 2 || !strings.HasPrefix(lines[0], "run "+run.ID+" completed") || !strings.HasPrefix(lines[1], "  model.invocation") {
+		t.Fatalf("trace does not open with the run and its first model call:\n%s", text)
+	}
 	for _, want := range []string{
-		"run " + run.ID + " completed",
 		"  tool.call listCharges status=503 server_error",
 		"    fault.injected",
 		"  evaluation passed",

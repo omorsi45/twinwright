@@ -147,6 +147,19 @@ func TestBuildLegacyFaultRetryAndPause(t *testing.T) {
 	if sum.RunID != run.ID || sum.Status != "completed" || sum.ToolCalls != 5 || sum.FailedToolCalls != 1 || sum.Retries != 1 || sum.Faults != 1 || sum.StateMutations != 1 || sum.ModelTurns != run.Step || sum.TokenUsage.Recorded || sum.Evaluation == nil || !sum.Evaluation.Passed {
 		t.Fatalf("summary=%+v", sum)
 	}
+	encoded, err := json.Marshal(sum)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "000000") {
+		t.Fatalf("summary times are not rounded to milliseconds: %s", encoded)
+	}
+}
+
+func TestRoundMSRemovesBinaryNoise(t *testing.T) {
+	if got := roundMS(1.0550000000000002); got != 1.055 {
+		t.Fatalf("got %v", got)
+	}
 }
 
 func contains(list []string, value string) bool {

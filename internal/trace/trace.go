@@ -148,7 +148,13 @@ func Build(ctx context.Context, s *store.Store, runID string) (Trace, error) {
 		b.root.Children = append(b.root.Children, evaluation)
 	}
 	b.summary.WallClockMS = b.root.DurationMS
+	b.summary.ModelMS = roundMS(b.summary.ModelMS)
+	b.summary.ToolMS = roundMS(b.summary.ToolMS)
 	return Trace{TraceID: hashID("twinwright-trace:"+run.ID, 32), Summary: b.summary, Root: b.root}, nil
+}
+
+func roundMS(value float64) float64 {
+	return math.Round(value*1000) / 1000
 }
 
 type builder struct {

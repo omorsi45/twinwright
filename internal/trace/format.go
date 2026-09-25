@@ -41,6 +41,10 @@ func writeSpan(b *strings.Builder, span *Span, depth int) {
 	}
 	b.WriteByte('\n')
 	for _, event := range span.Events {
+		switch event.Name {
+		case "execution.started", "execution.paused", "execution.completed":
+			continue
+		}
 		fmt.Fprintf(b, "%s  %s\n", indent, event.Name)
 	}
 	for _, child := range span.Children {
