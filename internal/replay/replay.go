@@ -9,6 +9,7 @@ import (
 	"reflect"
 
 	"twinwright/internal/agent"
+	"twinwright/internal/authz"
 	"twinwright/internal/compiler"
 	"twinwright/internal/dispatch"
 	"twinwright/internal/fork"
@@ -67,6 +68,21 @@ func Verify(ctx context.Context, source *store.Store, runID string, manifest com
 	if policyErr != nil && policyErr != sql.ErrNoRows {
 		return report, policyErr
 	}
+	authJSON, authDigest, authErr := source.AuthPolicy(ctx, runID)
+	if authErr != nil && authErr != sql.ErrNoRows {
+		return report, authErr
+	}
+	if authErr == nil {
+		policy, err := authz.ValidateStored(authJSON, authDigest, manifest)
+		if err != nil {
+			return diverged(report, err.Error()), nil
+		}
+		if policy.Principal.ID != original.PrincipalID {
+			return diverged(report, "run principal differs from its authorization policy"), nil
+		}
+	} else if original.PrincipalID != store.UnrestrictedPrincipal && original.PrincipalID != store.LegacyPrincipal {
+		return diverged(report, "run principal has no authorization policy"), nil
+	}
 	lineage, lineageErr := source.Lineage(ctx, runID)
 	if lineageErr != nil && lineageErr != sql.ErrNoRows {
 		return report, lineageErr
@@ -97,6 +113,9 @@ func Verify(ctx context.Context, source *store.Store, runID string, manifest com
 				_, err = target.CreateReplayRun(ctx, original, world.ID)
 				if err == nil && policyErr == nil {
 					err = target.AttachChaos(ctx, original.ID, policyJSON, policyDigest)
+				}
+				if err == nil && authErr == nil {
+					err = target.AttachAuth(ctx, original.ID, authJSON, authDigest)
 				}
 			}
 		}
@@ -238,7 +257,7 @@ func recordedMessages(run store.Run, events []store.Event, forked bool) ([]agent
 			if i != len(events)-1 {
 				return nil, fmt.Errorf("completion event is not last")
 			}
-		case "execution.paused", "tool.request", "tool.response", "state.mutation", "retry", "chaos.injected", "chaos.actor_mutation":
+		case "execution.paused", "tool.request", "tool.response", "state.mutation", "retry", "chaos.injected", "chaos.actor_mutation", "authorization.allowed", "authorization.denied":
 		case "model.request":
 			requests++
 		case "model.response":
@@ -272,7 +291,7 @@ func recordedMessages(run store.Run, events []store.Event, forked bool) ([]agent
 
 func semantic(typ string) bool {
 	switch typ {
-	case "model.request", "model.response", "tool.request", "tool.response", "state.mutation", "error", "retry", "chaos.injected", "chaos.actor_mutation":
+	case "model.request", "model.response", "tool.request", "tool.response", "state.mutation", "error", "retry", "chaos.injected", "chaos.actor_mutation", "authorization.allowed", "authorization.denied":
 		return true
 	}
 	return false
@@ -368,6 +387,8 @@ func compareChaosState(ctx context.Context, source, target *sql.DB, runID string
 		{"chaos_rule_state", "rule_id,matching_calls,injections", "rule_id"},
 		{"chaos_snapshots", "rule_id,arguments_digest,status,body", "rule_id,arguments_digest"},
 		{"chaos_hidden_outcomes", "call_id,rule_id,status,body", "call_id"},
+		{"run_auth", "policy_json,digest", "run_id"},
+		{"auth_state", "call_index", "run_id"},
 	}
 	for _, table := range tables {
 		var left [][]string
@@ -395,7 +416,8 @@ func compareChaosState(ctx context.Context, source, target *sql.DB, runID string
 
 func stateRows(ctx context.Context, db *sql.DB, table, columns, orderBy, worldID string) ([][]string, error) {
 	key := "world_id"
-	if table == "run_chaos" || table == "chaos_rule_state" || table == "chaos_snapshots" || table == "chaos_hidden_outcomes" {
+	switch table {
+	case "run_chaos", "chaos_rule_state", "chaos_snapshots", "chaos_hidden_outcomes", "run_auth", "auth_state":
 		key = "run_id"
 	}
 	query := fmt.Sprintf("SELECT %s FROM %s WHERE %s=? ORDER BY %s", columns, table, key, orderBy)

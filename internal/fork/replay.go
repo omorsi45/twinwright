@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"twinwright/internal/authz"
 	"twinwright/internal/chaos"
 	"twinwright/internal/checkpoint"
 	"twinwright/internal/compiler"
@@ -103,6 +104,20 @@ func ReconstructForReplay(ctx context.Context, source *store.Store, child store.
 			return nil, err
 		}
 	} else if err := chaos.CopyRunInTx(ctx, tx, parent.ID, child.ID); err != nil {
+		return nil, err
+	}
+	if lineage.AuthReplaced {
+		encoded, digest, err := source.AuthPolicy(ctx, child.ID)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := authz.ValidateStored(encoded, digest, manifest); err != nil {
+			return nil, fmt.Errorf("fork replacement authorization policy: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, "INSERT INTO run_auth(run_id,policy_json,digest) VALUES(?,?,?)", child.ID, string(encoded), digest); err != nil {
+			return nil, err
+		}
+	} else if err := authz.CopyRun(ctx, tx, tx, parent.ID, child.ID); err != nil {
 		return nil, err
 	}
 	if err := store.AppendEventTx(ctx, tx, child.ID, "execution.forked", map[string]any{

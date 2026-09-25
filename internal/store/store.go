@@ -63,6 +63,7 @@ type ForkLineage struct {
 	ParentProvider string `json:"parent_provider"`
 	ParentModel    string `json:"parent_model"`
 	ChaosReplaced  bool   `json:"chaos_replaced"`
+	AuthReplaced   bool   `json:"auth_replaced"`
 }
 
 func Open(path string) (*Store, error) {
@@ -120,10 +121,15 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("schema migration: %w", err)
 	}
-	if !hasColumn(db, "runs", "principal_id") {
-		if _, err = db.Exec("ALTER TABLE runs ADD COLUMN principal_id TEXT NOT NULL DEFAULT '" + LegacyPrincipal + "'"); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("schema migration: %w", err)
+	for _, migration := range []struct{ table, column, stmt string }{
+		{"runs", "principal_id", "ALTER TABLE runs ADD COLUMN principal_id TEXT NOT NULL DEFAULT '" + LegacyPrincipal + "'"},
+		{"fork_lineage", "auth_replaced", "ALTER TABLE fork_lineage ADD COLUMN auth_replaced INTEGER NOT NULL DEFAULT 0"},
+	} {
+		if !hasColumn(db, migration.table, migration.column) {
+			if _, err = db.Exec(migration.stmt); err != nil {
+				db.Close()
+				return nil, fmt.Errorf("schema migration: %w", err)
+			}
 		}
 	}
 	return &Store{DB: db}, nil
@@ -489,16 +495,22 @@ func (s *Store) Lineage(ctx context.Context, childRunID string) (ForkLineage, er
 	}
 	var chaosReplaced int
 	column := "chaos_replaced"
-	var hasColumn int
-	if err := s.DB.QueryRowContext(ctx, "SELECT count(*) FROM pragma_table_info('fork_lineage') WHERE name='chaos_replaced'").Scan(&hasColumn); err != nil {
+	var chaosColumns int
+	if err := s.DB.QueryRowContext(ctx, "SELECT count(*) FROM pragma_table_info('fork_lineage') WHERE name='chaos_replaced'").Scan(&chaosColumns); err != nil {
 		return lineage, err
 	}
-	if hasColumn == 0 {
+	if chaosColumns == 0 {
 		column = "0"
 	}
-	err := s.DB.QueryRowContext(ctx, `SELECT child_run_id,parent_run_id,fork_event_seq,checkpoint_id,format_version,manifest_digest,prefix_digest,parent_provider,parent_model,`+column+` FROM fork_lineage WHERE child_run_id=?`, childRunID).Scan(
-		&lineage.ChildRunID, &lineage.ParentRunID, &lineage.ForkEventSeq, &lineage.CheckpointID, &lineage.FormatVersion, &lineage.ManifestDigest, &lineage.PrefixDigest, &lineage.ParentProvider, &lineage.ParentModel, &chaosReplaced)
+	authColumn := "auth_replaced"
+	if !hasColumn(s.DB, "fork_lineage", "auth_replaced") {
+		authColumn = "0"
+	}
+	var authReplaced int
+	err := s.DB.QueryRowContext(ctx, `SELECT child_run_id,parent_run_id,fork_event_seq,checkpoint_id,format_version,manifest_digest,prefix_digest,parent_provider,parent_model,`+column+`,`+authColumn+` FROM fork_lineage WHERE child_run_id=?`, childRunID).Scan(
+		&lineage.ChildRunID, &lineage.ParentRunID, &lineage.ForkEventSeq, &lineage.CheckpointID, &lineage.FormatVersion, &lineage.ManifestDigest, &lineage.PrefixDigest, &lineage.ParentProvider, &lineage.ParentModel, &chaosReplaced, &authReplaced)
 	lineage.ChaosReplaced = chaosReplaced != 0
+	lineage.AuthReplaced = authReplaced != 0
 	return lineage, err
 }
 

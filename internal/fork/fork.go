@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 
+	"twinwright/internal/authz"
 	"twinwright/internal/chaos"
 	"twinwright/internal/checkpoint"
 	"twinwright/internal/compiler"
@@ -20,6 +21,9 @@ type Options struct {
 	Model          string
 	FaultOperation *string
 	ChaosPolicyRaw []byte
+	// AuthPolicyRaw replaces the inherited authorization policy; the child
+	// then starts at call zero.
+	AuthPolicyRaw []byte
 }
 
 type Result struct {
@@ -38,6 +42,11 @@ func ValidateOptions(parent store.Run, manifest compiler.Manifest, options Optio
 			return fmt.Errorf("fork fault and chaos policy cannot be combined")
 		}
 		if _, err := chaos.Parse(options.ChaosPolicyRaw, manifest); err != nil {
+			return err
+		}
+	}
+	if len(options.AuthPolicyRaw) > 0 {
+		if _, err := authz.Parse(options.AuthPolicyRaw, manifest); err != nil {
 			return err
 		}
 	}
@@ -136,8 +145,16 @@ func Create(ctx context.Context, sourceReadOnly, destination *store.Store, selec
 			return Result{}, fmt.Errorf("copy %s: %w", table.name, err)
 		}
 	}
+	principal := parent.PrincipalID
+	var authPolicy authz.Policy
+	if len(options.AuthPolicyRaw) > 0 {
+		if authPolicy, err = authz.Parse(options.AuthPolicyRaw, manifest); err != nil {
+			return Result{}, err
+		}
+		principal = authPolicy.Principal.ID
+	}
 	child := store.Run{ID: runID, WorldID: worldID, Scenario: parent.Scenario, Provider: provider, Model: model, Task: parent.Task,
-		Status: "paused", Step: rebuilt.Step, Transcript: rebuilt.Transcript, FaultOperation: fault, PrincipalID: parent.PrincipalID}
+		Status: "paused", Step: rebuilt.Step, Transcript: rebuilt.Transcript, FaultOperation: fault, PrincipalID: principal}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO runs(id,world_id,scenario,provider,model,task,status,step,transcript,fault_operation,fault_consumed,principal_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
 		child.ID, child.WorldID, child.Scenario, child.Provider, child.Model, child.Task, child.Status, child.Step, child.Transcript, child.FaultOperation, consumed, child.PrincipalID); err != nil {
 		return Result{}, err
@@ -160,12 +177,23 @@ func Create(ctx context.Context, sourceReadOnly, destination *store.Store, selec
 	} else if err := chaos.CopyRun(ctx, rebuiltStore.DB, tx, parent.ID, child.ID); err != nil {
 		return Result{}, err
 	}
+	if len(options.AuthPolicyRaw) > 0 {
+		encoded, err := authPolicy.CanonicalJSON()
+		if err != nil {
+			return Result{}, err
+		}
+		if _, err := tx.ExecContext(ctx, "INSERT INTO run_auth(run_id,policy_json,digest) VALUES(?,?,?)", child.ID, string(encoded), authPolicy.Digest()); err != nil {
+			return Result{}, err
+		}
+	} else if err := authz.CopyRun(ctx, rebuiltStore.DB, tx, parent.ID, child.ID); err != nil {
+		return Result{}, err
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO checkpoints(id,run_id,event_seq,format_version,manifest_digest,prefix_digest) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`,
 		selected.ID, parent.ID, selected.EventSeq, selected.FormatVersion, selected.ManifestDigest, selected.PrefixDigest); err != nil {
 		return Result{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO fork_lineage(child_run_id,parent_run_id,fork_event_seq,checkpoint_id,format_version,manifest_digest,prefix_digest,parent_provider,parent_model,chaos_replaced) VALUES(?,?,?,?,?,?,?,?,?,?)`,
-		child.ID, parent.ID, selected.EventSeq, selected.ID, selected.FormatVersion, selected.ManifestDigest, selected.PrefixDigest, parent.Provider, parent.Model, len(options.ChaosPolicyRaw) > 0); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO fork_lineage(child_run_id,parent_run_id,fork_event_seq,checkpoint_id,format_version,manifest_digest,prefix_digest,parent_provider,parent_model,chaos_replaced,auth_replaced) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+		child.ID, parent.ID, selected.EventSeq, selected.ID, selected.FormatVersion, selected.ManifestDigest, selected.PrefixDigest, parent.Provider, parent.Model, len(options.ChaosPolicyRaw) > 0, len(options.AuthPolicyRaw) > 0); err != nil {
 		return Result{}, err
 	}
 	if err := store.AppendEventTx(ctx, tx, child.ID, "execution.forked", map[string]any{
