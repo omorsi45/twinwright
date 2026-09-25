@@ -8,6 +8,7 @@ import (
 	"fmt"
 
 	"twinwright/internal/agent"
+	"twinwright/internal/authz"
 	"twinwright/internal/compiler"
 	"twinwright/internal/dispatch"
 	"twinwright/internal/store"
@@ -66,6 +67,15 @@ func Reconstruct(ctx context.Context, source *store.Store, runID string, selecte
 			return nil, store.Run{}, err
 		}
 	}
+	authJSON, authDigest, authErr := source.AuthPolicy(ctx, runID)
+	if authErr != nil && authErr != sql.ErrNoRows {
+		return nil, store.Run{}, authErr
+	}
+	if authErr == nil {
+		if err := target.AttachAuth(ctx, runID, authJSON, authDigest); err != nil {
+			return nil, store.Run{}, err
+		}
+	}
 	d := dispatch.Dispatcher{Store: target, Manifest: manifest}
 	var history []agent.Message
 	step := 0
@@ -81,7 +91,11 @@ func Reconstruct(ctx context.Context, source *store.Store, runID string, selecte
 			if err := json.Unmarshal([]byte(current.Transcript), &requestHistory); err != nil {
 				return nil, store.Run{}, err
 			}
-			request := map[string]any{"task": current.Task, "provider": current.Provider, "model": current.Model, "history": requestHistory, "operations": manifest.Operations}
+			operations, err := authz.Exposed(ctx, target.DB, runID, manifest.Operations)
+			if err != nil {
+				return nil, store.Run{}, err
+			}
+			request := map[string]any{"task": current.Task, "provider": current.Provider, "model": current.Model, "history": requestHistory, "operations": operations}
 			encoded, err := json.Marshal(request)
 			if err != nil {
 				return nil, store.Run{}, err

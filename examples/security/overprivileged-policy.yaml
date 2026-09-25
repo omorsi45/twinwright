@@ -1,0 +1,12 @@
+version: 1
+principal:
+  id: overprivileged-agent
+permissions:
+  allow:
+    - customers.read
+    - invoices.read
+    - charges.read
+    - crm.accounts.read
+    - jira.issues.read
+    - jira.comments.write
+    - slack.messages.write

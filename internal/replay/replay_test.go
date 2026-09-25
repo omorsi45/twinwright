@@ -197,10 +197,13 @@ func TestVerifyChaosRejectsTamperedCounter(t *testing.T) {
 func TestVerifyLegacyDatabaseWithoutChaosTablesReadOnly(t *testing.T) {
 	ctx := context.Background()
 	source, run, manifest := completedRun(t)
-	for _, table := range []string{"run_chaos", "chaos_rule_state", "chaos_snapshots", "chaos_hidden_outcomes"} {
+	for _, table := range []string{"run_chaos", "chaos_rule_state", "chaos_snapshots", "chaos_hidden_outcomes", "run_auth", "auth_state"} {
 		if _, err := source.DB.ExecContext(ctx, "DROP TABLE "+table); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if _, err := source.DB.ExecContext(ctx, "ALTER TABLE runs DROP COLUMN principal_id"); err != nil {
+		t.Fatal(err)
 	}
 	var seq int
 	var name, path string

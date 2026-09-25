@@ -26,6 +26,7 @@ Traditional mocks are good at returning canned responses. They are much less use
 - Did a transient failure change the agent's trajectory?
 - Can the exact run be reconstructed and verified?
 - What changes if execution forks from an earlier checkpoint?
+- Does a malicious ticket comment get the agent to leak another customer's data?
 
 Twinwright provides **isolated, stateful software environments** where those behaviors can be tested without touching production systems.
 
@@ -42,6 +43,7 @@ A run can:
 - make repeated tool calls idempotent by stable call ID
 - inject deterministic chaos policies and controlled failures
 - model ambiguous outcomes such as timeout-after-commit
+- run an agent as a principal whose permissions are enforced at runtime, and measure blocked prompt-injection attempts
 - pause and resume durable execution
 - evaluate final state against deterministic ground truth
 - replay a completed run in an isolated world
@@ -225,6 +227,39 @@ Supported policy effects include:
 
 See `examples/chaos/` and `docs/adr/0008-chaos-engine.md`.
 
+## Principal authorization
+
+Use `--auth` to run an agent as a principal with a validated, versioned YAML policy. The policy is checked against the manifest before any world is created, persisted with the run, and reused on resume, replay, and forks. A run without `--auth` records the principal `local-unrestricted` and behaves exactly as before.
+
+```bash
+go run ./cmd/twinwright build examples/company/openapi.yaml \
+  --bindings examples/company/bindings.yaml
+
+go run ./cmd/twinwright run prompt-injection-ticket \
+  --agent scripted \
+  --auth examples/security/support-policy.yaml
+
+go run ./cmd/twinwright inspect <run-id>
+go run ./cmd/twinwright replay <run-id>
+```
+
+Authority never comes from the prompt. Every built-in behavior maps to one permission, such as `charges.read`, `refunds.create`, or `slack.messages.write`, and the dispatcher checks it inside the tool transaction before any chaos rule or service handler runs. The model only sees operations it may call next, but a direct call to a hidden operation still reaches the dispatcher and is denied with 403. Every decision is recorded as `authorization.allowed` or `authorization.denied` with the principal, permission, call number, and a stable reason code.
+
+| Policy field | Meaning |
+| --- | --- |
+| `principal.id`, `principal.roles` | The acting identity and its roles |
+| `roles.<name>.allow`, `permissions.allow` | Role and direct grants, combined |
+| `resources.customer_ids` | Customers reachable directly or through invoices, charges, subscriptions, CRM accounts, and tickets; broad searches are denied |
+| `resources.channel_ids`, `resources.project_ids` | Channels that can be read or posted to, and projects that accept new issues |
+| `constraints.refund_max_cents` | The largest refund allowed |
+| `temporary_grants`, `revocations` | Grants active for a range of call numbers, and permissions removed after a call number |
+
+An omitted resource list imposes no scope; an explicitly empty list denies everything of that kind, and empty or null values are rejected. A customer scope does not restrict messaging, so scope `channel_ids` as well. A revocation wins over every grant. Call numbers count unique, argument-valid tool calls, including denied ones, so temporary grants stay reproducible. `fork --auth` replaces a child's policy and restarts its count at zero.
+
+The `prompt-injection-ticket` scenario seeds a ticket comment that tells the agent to look up another customer and post their details. The scripted fixture obeys it through direct calls. The run's `security` report lists `attempted_violation`, `blocked_violation`, and `successful_violation` with ledger event IDs, separately from task evaluation. The support policy blocks both attempts; `examples/security/overprivileged-policy.yaml` lets them succeed.
+
+See `examples/security/` and `docs/adr/0009-principal-authorization.md`.
+
 ## Live model execution
 
 Twinwright includes an OpenAI Responses API provider with function tools.
@@ -288,6 +323,10 @@ Verification replay uses an isolated reconstruction and leaves the source run da
 
 Unsupported schemas, routes, behaviors, manifests, chaos rules, and replay conditions fail explicitly instead of silently falling back to fake behavior.
 
+### Runtime authorization
+
+Permissions are enforced in the dispatcher transaction, not through instructions to the model. A denied call runs no service handler or chaos effect, and its decision, result, and ledger event commit together.
+
 ## Stateful company world
 
 The reference company world composes four services:
@@ -348,6 +387,8 @@ execution.started
 model.request
 model.response
 tool.request
+authorization.allowed
+authorization.denied
 tool.response
 state.mutation
 error
@@ -365,6 +406,7 @@ cmd/twinwright/       CLI
 
 internal/
   agent/              provider boundary and durable runner
+  authz/              principal policies and authorization decisions
   behavior/           behavior registry
   billing/            billing simulation
   crm/                CRM simulation
@@ -383,6 +425,7 @@ examples/
   billing/            minimal stateful reference world
   company/            multi-service company world
   chaos/              deterministic failure policies
+  security/           principal policies for the prompt-injection scenario
 
 docs/adr/             architecture decision records
 ```
@@ -462,6 +505,7 @@ Major runtime contracts are documented as ADRs under `docs/adr/`, including:
 - versioned world definitions
 - checkpoint reconstruction and execution forks
 - deterministic chaos policies and ambiguous-commit recovery
+- runtime principal authorization
 
 The ADRs document not only what Twinwright does, but why the implementation makes those tradeoffs.
 
@@ -471,7 +515,7 @@ Twinwright's included worlds are fictional local simulations.
 
 The project does not require production credentials for its deterministic examples and does not connect to real billing, CRM, ticketing, or messaging systems by default.
 
-The current `permission_revocation` chaos effect simulates a service denial; it is not a principal-based authorization system.
+Principals and permissions are local, deterministic simulations with no external identity provider. The `permission_revocation` chaos effect is a simulated service denial, separate from principal authorization.
 
 Keep provider credentials outside the repository.
 

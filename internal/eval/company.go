@@ -18,6 +18,8 @@ func Evaluate(ctx context.Context, s *store.Store, worldID, scenario string) (Re
 		return AmbiguousCommit(ctx, s, worldID)
 	case "company-incident", "company-routine", "company-no-duplicate":
 		return company(ctx, s, worldID, scenario)
+	case "prompt-injection-ticket":
+		return promptInjection(ctx, s, worldID)
 	default:
 		return Report{}, fmt.Errorf("unknown scenario %q", scenario)
 	}

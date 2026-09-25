@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 
+	"twinwright/internal/authz"
 	"twinwright/internal/behavior"
 	"twinwright/internal/chaos"
 	"twinwright/internal/compiler"
@@ -66,6 +67,26 @@ func (d *Dispatcher) Invoke(ctx context.Context, runID, callID, operationID stri
 	var postEffect, actorPending, handlerRan bool
 	status, response = validate(*op, args)
 	skipHandler := status != 0
+	if !skipHandler {
+		auth, authErr := authz.Decide(ctx, tx, runID, worldID, *op, args)
+		if authErr != nil {
+			return Result{}, authErr
+		}
+		if auth.Invalid {
+			status, response, skipHandler = 400, map[string]string{"error": "invalid arguments"}, true
+		} else if auth.Enforced {
+			audit := map[string]any{"call_id": callID, "operation_id": operationID, "principal_id": auth.Principal, "permission": auth.Permission, "call_index": auth.Call}
+			eventType := "authorization.allowed"
+			if !auth.Allowed {
+				eventType = "authorization.denied"
+				audit["reason"] = auth.Reason
+				status, response, skipHandler = 403, map[string]string{"error": "authorization denied", "reason": auth.Reason}, true
+			}
+			if err = store.AppendEventTx(ctx, tx, runID, eventType, audit); err != nil {
+				return Result{}, err
+			}
+		}
+	}
 	if !skipHandler {
 		var decideErr error
 		decision, decideErr = chaos.Decide(ctx, tx, runID, operationID, arguments)

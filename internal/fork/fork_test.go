@@ -124,6 +124,9 @@ func TestCreateForkPreservesParentAndPriorResults(t *testing.T) {
 	if lineage.ParentRunID != parent.ID || lineage.ForkEventSeq != selected.EventSeq || lineage.CheckpointID != selected.ID {
 		t.Fatalf("lineage=%+v", lineage)
 	}
+	if savedChild, err := destination.Run(ctx, created.Run.ID); err != nil || savedChild.PrincipalID != store.UnrestrictedPrincipal {
+		t.Fatalf("child principal=%q err=%v", savedChild.PrincipalID, err)
+	}
 	childState, err := destination.Snapshot(ctx, created.Run.WorldID)
 	if err != nil {
 		t.Fatal(err)
