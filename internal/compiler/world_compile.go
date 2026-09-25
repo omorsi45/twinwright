@@ -34,6 +34,7 @@ func CompileWorld(definition []byte, load func(string) ([]byte, error), registry
 	if err != nil {
 		return Manifest{}, err
 	}
+	def = normalizeDefinition(def)
 	m := Manifest{World: &WorldMetadata{Definition: def}}
 	seen := map[string]bool{}
 	for _, service := range def.Services {
@@ -88,11 +89,8 @@ func compileService(service ServiceSpec, specBytes, bindingBytes []byte, registr
 	if len(node.Content) != 1 || node.Content[0].Kind != yaml.MappingNode {
 		return nil, fmt.Errorf("OpenAPI root must be a mapping")
 	}
-	for i := 0; i < len(node.Content[0].Content); i += 2 {
-		key := node.Content[0].Content[i].Value
-		if key != "openapi" && key != "info" && key != "paths" {
-			return nil, fmt.Errorf("unsupported OpenAPI top-level feature %q", key)
-		}
+	if err := checkWorldOpenAPI(&node); err != nil {
+		return nil, err
 	}
 	var spec apiSpec
 	if err := node.Decode(&spec); err != nil {
@@ -112,7 +110,7 @@ func compileService(service ServiceSpec, specBytes, bindingBytes []byte, registr
 	}
 	var ops []Operation
 	seenIDs := map[string]bool{}
-	seenRoutes := map[string]bool{}
+	seenRoutes := map[string][]string{}
 	for path, methods := range spec.Paths {
 		pathArgs, shape, err := worldPath(path)
 		if err != nil {
@@ -122,11 +120,12 @@ func compileService(service ServiceSpec, specBytes, bindingBytes []byte, registr
 			if method != "get" && method != "post" {
 				return nil, fmt.Errorf("unsupported method %s %s", method, path)
 			}
-			route := method + " " + shape
-			if seenRoutes[route] {
-				return nil, fmt.Errorf("ambiguous service route %s", route)
+			for _, previous := range seenRoutes[method] {
+				if routesOverlap(previous, shape) {
+					return nil, fmt.Errorf("ambiguous service route %s %s", method, path)
+				}
 			}
-			seenRoutes[route] = true
+			seenRoutes[method] = append(seenRoutes[method], shape)
 			if def.ID == "" || seenIDs[def.ID] {
 				return nil, fmt.Errorf("missing or duplicate operation ID %q", def.ID)
 			}
@@ -212,6 +211,104 @@ func worldPath(path string) (map[string]bool, string, error) {
 	return args, "/" + strings.Join(shape, "/"), nil
 }
 
+func routesOverlap(left, right string) bool {
+	a := strings.Split(strings.TrimPrefix(left, "/"), "/")
+	b := strings.Split(strings.TrimPrefix(right, "/"), "/")
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] && a[i] != "{}" && b[i] != "{}" {
+			return false
+		}
+	}
+	return true
+}
+
+// checkWorldOpenAPI rejects callable features that the normalized manifest
+// cannot represent. Otherwise a meaningful source edit could keep its digest.
+func checkWorldOpenAPI(document *yaml.Node) error {
+	root := document.Content[0]
+	if err := onlyWorldKeys(root, "openapi", "info", "paths"); err != nil {
+		return err
+	}
+	for i := 0; i < len(root.Content); i += 2 {
+		if root.Content[i].Value != "paths" {
+			continue
+		}
+		paths := root.Content[i+1]
+		if paths.Kind != yaml.MappingNode {
+			return fmt.Errorf("OpenAPI paths must be a mapping")
+		}
+		for j := 0; j < len(paths.Content); j += 2 {
+			methods := paths.Content[j+1]
+			if methods.Kind != yaml.MappingNode {
+				return fmt.Errorf("OpenAPI path methods must be a mapping")
+			}
+			for k := 0; k < len(methods.Content); k += 2 {
+				operation := methods.Content[k+1]
+				if err := onlyWorldKeys(operation, "operationId", "parameters", "requestBody"); err != nil {
+					return err
+				}
+				for n := 0; n < len(operation.Content); n += 2 {
+					switch operation.Content[n].Value {
+					case "parameters":
+						parameters := operation.Content[n+1]
+						if parameters.Kind != yaml.SequenceNode {
+							return fmt.Errorf("OpenAPI parameters must be a sequence")
+						}
+						for _, parameter := range parameters.Content {
+							if err := onlyWorldKeys(parameter, "name", "in", "required", "schema"); err != nil {
+								return err
+							}
+						}
+					case "requestBody":
+						body := operation.Content[n+1]
+						if err := onlyWorldKeys(body, "required", "content"); err != nil {
+							return err
+						}
+						for m := 0; m < len(body.Content); m += 2 {
+							if body.Content[m].Value != "content" {
+								continue
+							}
+							content := body.Content[m+1]
+							if content.Kind != yaml.MappingNode {
+								return fmt.Errorf("OpenAPI content must be a mapping")
+							}
+							for q := 1; q < len(content.Content); q += 2 {
+								if err := onlyWorldKeys(content.Content[q], "schema"); err != nil {
+									return err
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func onlyWorldKeys(node *yaml.Node, allowed ...string) error {
+	if node.Kind != yaml.MappingNode {
+		return fmt.Errorf("unsupported OpenAPI mapping shape")
+	}
+	for i := 0; i < len(node.Content); i += 2 {
+		key := node.Content[i].Value
+		found := false
+		for _, known := range allowed {
+			if key == known {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("unsupported OpenAPI feature %q", key)
+		}
+	}
+	return nil
+}
+
 func digestService(service ServiceManifest) (string, error) {
 	value := struct {
 		Name       string      `json:"name"`
@@ -268,7 +365,13 @@ func ValidateManifestWithRegistry(m Manifest, registry *behavior.Registry) error
 		if err != nil || digest != service.Digest {
 			return fmt.Errorf("service digest mismatch for %s", spec.Name)
 		}
+		previousID := ""
+		routes := map[string][]string{}
 		for _, op := range service.Operations {
+			if op.ID <= previousID || !sort.StringsAreSorted(op.Required) {
+				return fmt.Errorf("noncanonical operation order or arguments in %s", service.Name)
+			}
+			previousID = op.ID
 			if ids[op.ID] || op.Service != service.Name || !strings.HasPrefix(op.Behavior, service.Module+".") {
 				return fmt.Errorf("invalid or duplicate operation %s", op.ID)
 			}
@@ -279,6 +382,13 @@ func ValidateManifestWithRegistry(m Manifest, registry *behavior.Registry) error
 			if err := validateWorldOperation(op); err != nil {
 				return err
 			}
+			_, shape, _ := worldPath(op.Path)
+			for _, previous := range routes[op.Method] {
+				if routesOverlap(previous, shape) {
+					return fmt.Errorf("ambiguous service route %s %s", op.Method, op.Path)
+				}
+			}
+			routes[op.Method] = append(routes[op.Method], shape)
 			flat = append(flat, op)
 		}
 	}

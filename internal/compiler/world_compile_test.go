@@ -67,6 +67,10 @@ services:
 	if len(manifest.Operations) != 1 || len(manifest.Operations[0].Properties) != 0 {
 		t.Fatalf("GET operation=%+v", manifest.Operations)
 	}
+	withEmptyMetadata, err := CompileWorld([]byte(definition+"entities: []\nrelationships: []\n"), func(path string) ([]byte, error) { return files[path], nil }, registry)
+	if err != nil || withEmptyMetadata.Digest != manifest.Digest {
+		t.Fatalf("empty metadata changed digest: %s vs %s, err=%v", withEmptyMetadata.Digest, manifest.Digest, err)
+	}
 }
 
 func compileTestWorld(t *testing.T, definition string, files map[string][]byte) (Manifest, error) {
@@ -139,6 +143,19 @@ func TestCompileWorldRejectsUnsupportedContracts(t *testing.T) {
 		}},
 		{"unsupported schema", func(f map[string][]byte) string {
 			f["crm.yaml"] = []byte(strings.Replace(string(f["crm.yaml"]), "type: string", "type: array", 1))
+			return twoServiceWorld
+		}},
+		{"overlapping route", func(f map[string][]byte) string {
+			f["billing.yaml"] = append(f["billing.yaml"], []byte("  /{entity}/me:\n    get:\n      operationId: getCustomerAlt\n      parameters: [{name: entity, in: path, required: true, schema: {type: string}}]\n")...)
+			f["billing-bindings.yaml"] = append(f["billing-bindings.yaml"], []byte("  getCustomerAlt: billing.getCustomer\n")...)
+			return twoServiceWorld
+		}},
+		{"parameter style", func(f map[string][]byte) string {
+			f["billing.yaml"] = []byte(strings.Replace(string(f["billing.yaml"]), "schema: {type: string}}]", "schema: {type: string}, style: matrix}]", 1))
+			return twoServiceWorld
+		}},
+		{"operation servers", func(f map[string][]byte) string {
+			f["crm.yaml"] = append(f["crm.yaml"], []byte("      servers: [{url: https://example.test}]\n")...)
 			return twoServiceWorld
 		}},
 	}
