@@ -1,0 +1,6 @@
+operations:
+  getCustomer: billing.getCustomer
+  listInvoices: billing.listInvoices
+  listCharges: billing.listCharges
+  getCharge: billing.getCharge
+  createRefund: billing.createRefund
