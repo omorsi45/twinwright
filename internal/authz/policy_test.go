@@ -130,6 +130,11 @@ func TestParseRejectsInvalidPrincipalPolicies(t *testing.T) {
 		"revocation missing call": "version: 1\nprincipal: {id: support}\nrevocations: [{permission: refunds.create}]",
 		"duplicate revocation":    "version: 1\nprincipal: {id: support}\nrevocations: [{permission: refunds.create, after_call: 1}, {permission: refunds.create, after_call: 2}]",
 		"multiple documents":      "version: 1\nprincipal: {id: support}\n---\nversion: 1",
+		"null customer scope":     "version: 1\nprincipal: {id: support}\nresources: {customer_ids: null}",
+		"blank customer scope":    "version: 1\nprincipal: {id: support}\nresources:\n  customer_ids:\n",
+		"tilde channel scope":     "version: 1\nprincipal: {id: support}\nresources: {channel_ids: ~}",
+		"blank resources":         "version: 1\nprincipal: {id: support}\nresources:\n",
+		"null refund cap":         "version: 1\nprincipal: {id: support}\nconstraints: {refund_max_cents: null}",
 		"not a mapping":           "- version: 1",
 	}
 	for name, input := range cases {

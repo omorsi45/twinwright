@@ -148,6 +148,17 @@ func TestVerifyForkWithReplacementAuthorization(t *testing.T) {
 	}
 }
 
+func TestVerifyRejectsLegacyPrincipalOnCurrentRun(t *testing.T) {
+	ctx := context.Background()
+	source, run, manifest := completedRun(t)
+	if _, err := source.DB.ExecContext(ctx, "UPDATE runs SET principal_id=? WHERE id=?", store.LegacyPrincipal, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	if report, err := Verify(ctx, source, run.ID, manifest); err == nil && report.Verified {
+		t.Fatal("legacy principal accepted on a database with authorization tables")
+	}
+}
+
 func TestVerifySecuredRunRejectsTampering(t *testing.T) {
 	for _, update := range []string{
 		"UPDATE run_auth SET policy_json=replace(policy_json,'C-104','C-205') WHERE run_id=?",

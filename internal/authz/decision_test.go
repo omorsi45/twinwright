@@ -179,6 +179,27 @@ func TestDecideCapsRefundAmount(t *testing.T) {
 	})
 }
 
+func TestDecideRejectsHandlerInvalidArgumentsWithoutConsumingCall(t *testing.T) {
+	r := newSecuredRun(t, "version: 1\nprincipal: {id: support}\npermissions: {allow: [crm.accounts.read, crm.accounts.write, jira.issues.create, jira.issues.transition]}\n")
+	for _, c := range []struct {
+		operation string
+		args      map[string]any
+	}{
+		{"crmUpdateAccountStatus", map[string]any{"account_id": "A-104", "status": "bogus"}},
+		{"ticketCreateIssue", map[string]any{"account_id": "A-104", "project_id": "PROJ-ENG", "title": "x", "priority": "urgent"}},
+		{"ticketTransitionIssue", map[string]any{"issue_id": "ISS-104", "status": "closed"}},
+		{"crmGetAccount", id("   ")},
+		{"crmSearchAccounts", map[string]any{"query": " "}},
+	} {
+		if got := r.decide(t, c.operation, c.args); !got.Enforced || !got.Invalid || got.Call != 0 {
+			t.Errorf("%s %v: %+v", c.operation, c.args, got)
+		}
+	}
+	if got := r.decide(t, "crmGetAccount", id("A-104")); !got.Allowed || got.Invalid || got.Call != 1 {
+		t.Fatalf("first valid call=%+v", got)
+	}
+}
+
 func TestDecideWithoutPolicyIsUnenforced(t *testing.T) {
 	r := newSecuredRun(t, "")
 	if got := r.decide(t, "createRefund", map[string]any{"charge_id": "CH-2001", "amount_cents": 100000, "reason": "x"}); got.Enforced {

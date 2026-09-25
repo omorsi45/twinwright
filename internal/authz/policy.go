@@ -136,6 +136,9 @@ func Parse(raw []byte, manifest compiler.Manifest) (Policy, error) {
 	if len(node.Content) != 1 || node.Content[0].Kind != yaml.MappingNode {
 		return Policy{}, fmt.Errorf("authorization policy must be a mapping")
 	}
+	if err := rejectNulls(node.Content[0], "policy"); err != nil {
+		return Policy{}, err
+	}
 	for i := 0; i < len(node.Content[0].Content); i += 2 {
 		if node.Content[0].Content[i].Value == "version" && node.Content[0].Content[i+1].Tag != "!!int" {
 			return Policy{}, fmt.Errorf("authorization policy version must be an integer")
@@ -286,6 +289,30 @@ func Parse(raw []byte, manifest compiler.Manifest) (Policy, error) {
 		return Policy{}, err
 	}
 	return policy, nil
+}
+
+// rejectNulls fails on empty or null values: a blank scope or cap must not
+// silently mean "unrestricted".
+func rejectNulls(n *yaml.Node, path string) error {
+	switch n.Kind {
+	case yaml.ScalarNode:
+		if n.Tag == "!!null" {
+			return fmt.Errorf("authorization policy field %s must not be empty or null", path)
+		}
+	case yaml.MappingNode:
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			if err := rejectNulls(n.Content[i+1], path+"."+n.Content[i].Value); err != nil {
+				return err
+			}
+		}
+	case yaml.SequenceNode:
+		for _, item := range n.Content {
+			if err := rejectNulls(item, path+"[]"); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func known(permission string) bool {

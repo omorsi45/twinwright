@@ -25,9 +25,11 @@ const (
 )
 
 // Decision is Enforced only for runs with a stored policy. Call is the
-// run-local call number the decision consumed.
+// run-local call number the decision consumed. Invalid means the handler
+// would reject the arguments; no call number is consumed.
 type Decision struct {
 	Enforced   bool
+	Invalid    bool
 	Allowed    bool
 	Principal  string
 	Permission string
@@ -134,6 +136,9 @@ func Decide(ctx context.Context, tx *sql.Tx, runID, worldID string, op compiler.
 	policy, enforced, err := load(ctx, tx, runID)
 	if err != nil || !enforced {
 		return Decision{}, err
+	}
+	if !handlerValid(op.Behavior, args) {
+		return Decision{Enforced: true, Invalid: true, Principal: policy.Principal.ID}, nil
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO auth_state(run_id,call_index) VALUES(?,1) ON CONFLICT(run_id) DO UPDATE SET call_index=call_index+1`, runID); err != nil {
 		return Decision{}, err

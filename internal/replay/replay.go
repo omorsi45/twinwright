@@ -80,8 +80,15 @@ func Verify(ctx context.Context, source *store.Store, runID string, manifest com
 		if policy.Principal.ID != original.PrincipalID {
 			return diverged(report, "run principal differs from its authorization policy"), nil
 		}
-	} else if original.PrincipalID != store.UnrestrictedPrincipal && original.PrincipalID != store.LegacyPrincipal {
-		return diverged(report, "run principal has no authorization policy"), nil
+	} else {
+		var authTables int
+		if err := source.DB.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='run_auth'").Scan(&authTables); err != nil {
+			return report, err
+		}
+		allowed := original.PrincipalID == store.UnrestrictedPrincipal || authTables == 0 && original.PrincipalID == store.LegacyPrincipal
+		if !allowed {
+			return diverged(report, "run principal has no authorization policy"), nil
+		}
 	}
 	lineage, lineageErr := source.Lineage(ctx, runID)
 	if lineageErr != nil && lineageErr != sql.ErrNoRows {

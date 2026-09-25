@@ -72,7 +72,9 @@ func (d *Dispatcher) Invoke(ctx context.Context, runID, callID, operationID stri
 		if authErr != nil {
 			return Result{}, authErr
 		}
-		if auth.Enforced {
+		if auth.Invalid {
+			status, response, skipHandler = 400, map[string]string{"error": "invalid arguments"}, true
+		} else if auth.Enforced {
 			audit := map[string]any{"call_id": callID, "operation_id": operationID, "principal_id": auth.Principal, "permission": auth.Permission, "call_index": auth.Call}
 			eventType := "authorization.allowed"
 			if !auth.Allowed {

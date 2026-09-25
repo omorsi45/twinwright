@@ -168,6 +168,36 @@ func TestInvalidArgumentsDoNotConsumeAuthorizationCall(t *testing.T) {
 	}
 }
 
+func TestHandlerInvalidArgumentsDoNotConsumeAuthorizationCall(t *testing.T) {
+	d, s, run := securedRun(t, "version: 1\nprincipal: {id: support}\npermissions: {allow: [refunds.create, customers.read]}\n", "")
+	ctx := context.Background()
+	for i, args := range []map[string]any{
+		{"charge_id": "CH-1002", "amount_cents": json.Number("1.5"), "reason": "duplicate"},
+		{"charge_id": "CH-1002", "amount_cents": 1.5, "reason": "duplicate"},
+		{"charge_id": "CH-1002", "amount_cents": 0, "reason": "duplicate"},
+		{"charge_id": "CH-1002", "amount_cents": json.Number("1e3"), "reason": "duplicate"},
+	} {
+		result, err := d.Invoke(ctx, run.ID, "bad-"+string(rune('a'+i)), "createRefund", args)
+		if err != nil || result.Status != 400 {
+			t.Fatalf("case %d result=%d %s err=%v", i, result.Status, result.Body, err)
+		}
+	}
+	if n := count(t, s, "SELECT count(*) FROM auth_state"); n != 0 {
+		t.Fatalf("handler-invalid calls consumed a call number")
+	}
+	if _, err := d.Invoke(ctx, run.ID, "good", "getCustomer", map[string]any{"id": "C-104"}); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(t, s, "SELECT call_index FROM auth_state WHERE run_id=?", run.ID); n != 1 {
+		t.Fatalf("first valid call index=%d", n)
+	}
+	for _, typ := range eventTypes(t, s, run.ID) {
+		if typ == "authorization.denied" {
+			t.Fatal("invalid call was audited as denied")
+		}
+	}
+}
+
 func TestUnrestrictedRunHasNoAuthorizationEvents(t *testing.T) {
 	d, s, run := setup(t, "")
 	if _, err := d.Invoke(context.Background(), run.ID, "read", "getCharge", map[string]any{"id": "CH-1002"}); err != nil {
