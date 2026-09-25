@@ -56,6 +56,7 @@ A run can:
 - drive a run with OpenAI Responses, an OpenAI-compatible chat endpoint, Anthropic Messages, or a scripted fixture
 - run Twinwright Bench, a curated suite with deterministic ground truth and JSON reports
 - experimentally observe recorded actions, simulate proposed local tool calls, and compare them without production writes
+- optionally start experimental local or Docker sidecars when a scenario needs process isolation
 
 The project includes a minimal billing world and a multi-service company world spanning billing, CRM, ticketing, and messaging.
 
@@ -402,6 +403,20 @@ This is intervention analysis. The counts describe the forks that ran; they are 
 
 See `examples/counterfactual/` and `docs/adr/0011-counterfactual-analysis.md`.
 
+## Optional containers
+
+**Experimental.** Default worlds stay in-process. When a scenario needs an isolated sidecar, use a version 1 container config:
+
+```bash
+go run ./cmd/twinwright container start --config examples/container/local.yaml
+go run ./cmd/twinwright container status --config examples/container/local.yaml
+go run ./cmd/twinwright container stop --config examples/container/local.yaml
+```
+
+`runtime: local` is a no-op handle for in-process work. `runtime: docker` shells to the docker CLI and requires a running daemon. Secrets belong in a relative `--env-file`, never on the command line. Kubernetes is not supported. See `docs/adr/0016-optional-containers.md`. A live docker start has not been verified on this host when the daemon was stopped.
+
+Distributed multi-node execution is intentionally deferred; see `docs/adr/0017-distributed-runtime-deferred.md`.
+
 ## Experimental shadow mode
 
 **Experimental.** Shadow mode does not connect to production systems. It reads an observe-only config, loads a JSONL observation log, simulates what an agent would do in a local Twinwright world, and compares proposed tool calls to observed human actions. Write mode and production adapters are rejected.
@@ -626,6 +641,7 @@ internal/
   fork/               fork execution and trajectory comparison
   counterfactual/     intervention analysis over forks
   shadow/             experimental observe-only shadow simulation
+  container/          optional local or Docker sidecar executor
   redact/             secret redaction before storage or display
   trace/              ledger traces, text trees, and OTLP export
 
@@ -638,6 +654,7 @@ examples/
   counterfactual/     intervention files for the example failures
   bench/              Twinwright Bench suite definitions
   shadow/             experimental observe-only configs and sample observations
+  container/          experimental sidecar configs
 
 docs/adr/             architecture decision records
 ```
@@ -724,6 +741,8 @@ Major runtime contracts are documented as ADRs under `docs/adr/`, including:
 - multiple agent providers behind one internal message shape
 - Twinwright Bench suite runner and report comparison
 - experimental observe-only shadow mode
+- optional local or Docker sidecars
+- distributed runtime deferred with single-node guarantees frozen
 
 The ADRs document not only what Twinwright does, but why the implementation makes those tradeoffs.
 

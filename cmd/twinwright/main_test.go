@@ -1397,3 +1397,26 @@ func TestShadowCLIObserveOnly(t *testing.T) {
 		t.Fatal("missing config accepted")
 	}
 }
+
+func TestContainerCLILocal(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "local.yaml")
+	if err := os.WriteFile(cfgPath, []byte("version: 1\nname: local-sidecar\nruntime: local\nlabel: experimental\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := runCLI([]string{"container", "start", "--config", cfgPath}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), `"experimental":true`) || !strings.Contains(out.String(), `"runtime":"local"`) {
+		t.Fatalf("%s", out.String())
+	}
+	out.Reset()
+	if err := runCLI([]string{"container", "status", "--config", cfgPath}, &out); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := runCLI([]string{"container", "stop", "--config", cfgPath}, &out); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -3,6 +3,7 @@ package container
 import (
 	"context"
 	"fmt"
+	"strings"
 )
 
 // Handle identifies a started sidecar.
@@ -20,42 +21,31 @@ type Executor interface {
 	Status(ctx context.Context, name string) (Handle, error)
 }
 
-// Local keeps worlds in-process. Start records the name only.
-type Local struct {
-	running map[string]Handle
-}
+// Local keeps worlds in-process. There is no external process to track across CLI invocations.
+type Local struct{}
 
 // NewLocal returns an in-process executor.
-func NewLocal() *Local {
-	return &Local{running: map[string]Handle{}}
-}
+func NewLocal() *Local { return &Local{} }
 
 func (l *Local) Start(_ context.Context, cfg Config) (Handle, error) {
 	if cfg.Runtime != "local" {
 		return Handle{}, fmt.Errorf("local executor cannot start runtime %q", cfg.Runtime)
 	}
-	if l.running == nil {
-		l.running = map[string]Handle{}
-	}
-	h := Handle{Name: cfg.Name, Runtime: "local", ID: "local-" + cfg.Name, Addr: "in-process"}
-	l.running[cfg.Name] = h
-	return h, nil
+	return Handle{Name: cfg.Name, Runtime: "local", ID: "local-" + cfg.Name, Addr: "in-process"}, nil
 }
 
 func (l *Local) Stop(_ context.Context, name string) error {
-	if _, ok := l.running[name]; !ok {
-		return fmt.Errorf("container %q is not running", name)
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("container name is required")
 	}
-	delete(l.running, name)
 	return nil
 }
 
 func (l *Local) Status(_ context.Context, name string) (Handle, error) {
-	h, ok := l.running[name]
-	if !ok {
-		return Handle{}, fmt.Errorf("container %q is not running", name)
+	if strings.TrimSpace(name) == "" {
+		return Handle{}, fmt.Errorf("container name is required")
 	}
-	return h, nil
+	return Handle{Name: name, Runtime: "local", ID: "local-" + name, Addr: "in-process"}, nil
 }
 
 // Select returns the executor for a config runtime.
