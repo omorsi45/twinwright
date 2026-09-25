@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"twinwright/internal/eval"
 	"twinwright/internal/store"
 )
 
@@ -32,6 +33,10 @@ func Check(ctx context.Context, s *store.Store, runID string, set Set) (Report, 
 	if err != nil {
 		return Report{}, err
 	}
+	events, err := eval.Ledger(ctx, s, runID)
+	if err != nil {
+		return Report{}, err
+	}
 	report := Report{Passed: true, Digest: set.Digest()}
 	for _, a := range set.Assertions {
 		result := Result{ID: a.ID, Type: a.Type}
@@ -42,6 +47,14 @@ func Check(ctx context.Context, s *store.Store, runID string, set Set) (Report, 
 			err = fieldEquals(ctx, s.DB, run.WorldID, a, &result)
 		case "relationship":
 			err = relationship(ctx, s.DB, run.WorldID, a, &result)
+		case "event_count":
+			err = eventCount(events, a, &result)
+		case "mutation_forbidden":
+			err = mutationForbidden(events, set, a, &result)
+		case "event_order":
+			err = eventOrder(events, a, &result)
+		case "custom":
+			result.Passed, result.Detail, err = set.customs[a.Name](ctx, s, run)
 		default:
 			err = fmt.Errorf("assertion type %s is not implemented", a.Type)
 		}

@@ -22,32 +22,42 @@ type RunAnalysis struct {
 	SimulatedLatencyMS  int     `json:"simulated_latency_ms"`
 }
 
+// Ledger returns a run's events, preceded for a fork by the parent events up
+// to its checkpoint.
+func Ledger(ctx context.Context, s *store.Store, runID string) ([]store.Event, error) {
+	events, err := s.Events(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+	lineage, err := s.Lineage(ctx, runID)
+	if err == sql.ErrNoRows {
+		return events, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	parentEvents, err := s.Events(ctx, lineage.ParentRunID)
+	if err != nil {
+		return nil, err
+	}
+	prefix := make([]store.Event, 0, lineage.ForkEventSeq+len(events))
+	for _, event := range parentEvents {
+		if event.Seq <= lineage.ForkEventSeq {
+			prefix = append(prefix, event)
+		}
+	}
+	return append(prefix, events...), nil
+}
+
 // AnalyzeRun examines the ordered ledger independently from persisted task state.
 func AnalyzeRun(ctx context.Context, s *store.Store, runID string) (RunAnalysis, error) {
 	run, err := s.Run(ctx, runID)
 	if err != nil {
 		return RunAnalysis{}, err
 	}
-	events, err := s.Events(ctx, runID)
+	events, err := Ledger(ctx, s, runID)
 	if err != nil {
 		return RunAnalysis{}, err
-	}
-	lineage, err := s.Lineage(ctx, runID)
-	if err != nil && err != sql.ErrNoRows {
-		return RunAnalysis{}, err
-	}
-	if err == nil {
-		parentEvents, err := s.Events(ctx, lineage.ParentRunID)
-		if err != nil {
-			return RunAnalysis{}, err
-		}
-		prefix := make([]store.Event, 0, lineage.ForkEventSeq+len(events))
-		for _, event := range parentEvents {
-			if event.Seq <= lineage.ForkEventSeq {
-				prefix = append(prefix, event)
-			}
-		}
-		events = append(prefix, events...)
 	}
 	var analysis RunAnalysis
 	var lostCall, lostEvent, reconciledEvent string
