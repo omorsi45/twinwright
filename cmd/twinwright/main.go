@@ -341,8 +341,14 @@ func checkScenarioManifest(manifest compiler.Manifest, scenario string) error {
 			return fmt.Errorf("scenario %q is incompatible with world seed profile %q", scenario, manifest.World.Definition.SeedProfile)
 		}
 	}
-	if scenario != "duplicate-charge" && manifest.Operation("crmGetAccount") == nil {
-		return fmt.Errorf("scenario %q requires company operations", scenario)
+	if scenario != "duplicate-charge" {
+		hasAccountLookup := false
+		for _, operation := range manifest.Operations {
+			hasAccountLookup = hasAccountLookup || operation.Behavior == "crm.getAccount"
+		}
+		if !hasAccountLookup {
+			return fmt.Errorf("scenario %q requires company operations", scenario)
+		}
 	}
 	return nil
 }
@@ -357,6 +363,11 @@ func confinedWorldLoader(directory string) (func(string) ([]byte, error), error)
 		return nil, err
 	}
 	return func(path string) ([]byte, error) {
+		for _, segment := range strings.Split(filepath.ToSlash(path), "/") {
+			if segment == ".." {
+				return nil, fmt.Errorf("world service path %q contains parent traversal", path)
+			}
+		}
 		clean := filepath.Clean(filepath.FromSlash(path))
 		if filepath.IsAbs(clean) || filepath.VolumeName(clean) != "" || clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
 			return nil, fmt.Errorf("world service path %q escapes definition directory", path)

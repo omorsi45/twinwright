@@ -12,7 +12,26 @@ import (
 // CompanyScriptedProvider exercises the company example without a model call.
 type CompanyScriptedProvider struct{ Scenario string }
 
-func (p CompanyScriptedProvider) Next(_ context.Context, _ string, history []Message, _ []compiler.Operation) (Message, error) {
+func (p CompanyScriptedProvider) Next(_ context.Context, _ string, history []Message, ops []compiler.Operation) (Message, error) {
+	behaviorByFixtureID := map[string]string{
+		"getCustomer": "billing.getCustomer", "getSubscription": "billing.getSubscription",
+		"listInvoices": "billing.listInvoices", "listCharges": "billing.listCharges",
+		"createRefund": "billing.createRefund", "crmGetAccount": "crm.getAccount",
+		"crmAddAccountNote": "crm.addAccountNote", "crmUpdateAccountStatus": "crm.updateAccountStatus",
+		"ticketCreateIssue": "ticket.createIssue", "ticketAddComment": "ticket.addComment",
+		"ticketTransitionIssue": "ticket.transitionIssue", "messageListChannels": "messaging.listChannels",
+		"messageReadChannel": "messaging.readChannel", "messagePostMessage": "messaging.postMessage",
+	}
+	operationByBehavior := make(map[string]string, len(ops))
+	for _, op := range ops {
+		operationByBehavior[op.Behavior] = op.ID
+	}
+	fixtureIDByOperation := make(map[string]string, len(behaviorByFixtureID))
+	for fixtureID, behavior := range behaviorByFixtureID {
+		if operationID := operationByBehavior[behavior]; operationID != "" {
+			fixtureIDByOperation[operationID] = fixtureID
+		}
+	}
 	results := map[string]Message{}
 	var tools []Message
 	for _, message := range history {
@@ -21,13 +40,23 @@ func (p CompanyScriptedProvider) Next(_ context.Context, _ string, history []Mes
 		}
 		tools = append(tools, message)
 		if message.Status >= 200 && message.Status < 300 {
-			results[message.OperationID] = message
+			fixtureID := fixtureIDByOperation[message.OperationID]
+			if fixtureID == "" {
+				fixtureID = message.OperationID
+			}
+			results[fixtureID] = message
 		}
 	}
-	call := func(operation string, args map[string]any) (Message, error) {
+	directCall := func(operation string, args map[string]any) (Message, error) {
 		return Message{Role: "assistant", ToolCalls: []ToolCall{{
 			ID: fmt.Sprintf("company-%d", len(tools)+1), OperationID: operation, Arguments: args,
 		}}}, nil
+	}
+	call := func(operation string, args map[string]any) (Message, error) {
+		if bound := operationByBehavior[behaviorByFixtureID[operation]]; bound != "" {
+			operation = bound
+		}
+		return directCall(operation, args)
 	}
 	if len(tools) > 0 {
 		last := tools[len(tools)-1]
@@ -35,7 +64,7 @@ func (p CompanyScriptedProvider) Next(_ context.Context, _ string, history []Mes
 			for i := len(history) - 1; i >= 0; i-- {
 				for _, previous := range history[i].ToolCalls {
 					if previous.ID == last.CallID {
-						return call(previous.OperationID, previous.Arguments)
+						return directCall(previous.OperationID, previous.Arguments)
 					}
 				}
 			}

@@ -117,6 +117,12 @@ func TestCompileWorldCombinesServiceManifests(t *testing.T) {
 	if err != nil || manifest.Digest == other.Digest {
 		t.Fatalf("relationship change digest=%s, original=%s, error=%v", other.Digest, manifest.Digest, err)
 	}
+	files := twoServiceFiles()
+	files["crm-bindings.yaml"] = []byte("operations:\n  crmGetAccount: crm.searchAccounts\n")
+	other, err = compileTestWorld(t, twoServiceWorld, files)
+	if err != nil || manifest.Digest == other.Digest || manifest.World.Services[1].Digest == other.World.Services[1].Digest {
+		t.Fatalf("behavior binding change did not change service and world digests: %s vs %s, err=%v", manifest.Digest, other.Digest, err)
+	}
 }
 
 func TestCompileWorldRejectsUnsupportedContracts(t *testing.T) {
@@ -156,6 +162,14 @@ func TestCompileWorldRejectsUnsupportedContracts(t *testing.T) {
 		}},
 		{"operation servers", func(f map[string][]byte) string {
 			f["crm.yaml"] = append(f["crm.yaml"], []byte("      servers: [{url: https://example.test}]\n")...)
+			return twoServiceWorld
+		}},
+		{"second OpenAPI document", func(f map[string][]byte) string {
+			f["crm.yaml"] = append(f["crm.yaml"], []byte("---\nopenapi: 3.1.0\npaths: {}\n")...)
+			return twoServiceWorld
+		}},
+		{"second bindings document", func(f map[string][]byte) string {
+			f["crm-bindings.yaml"] = append(f["crm-bindings.yaml"], []byte("---\noperations: {}\n")...)
 			return twoServiceWorld
 		}},
 	}

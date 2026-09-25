@@ -1,10 +1,12 @@
 package compiler
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"reflect"
 	"sort"
 	"strings"
@@ -77,8 +79,8 @@ func CompileWorld(definition []byte, load func(string) ([]byte, error), registry
 
 func compileService(service ServiceSpec, specBytes, bindingBytes []byte, registry *behavior.Registry) ([]Operation, error) {
 	var node yaml.Node
-	if err := yaml.Unmarshal(specBytes, &node); err != nil {
-		return nil, fmt.Errorf("OpenAPI YAML: %w", err)
+	if err := decodeSingleYAML(specBytes, &node, "OpenAPI"); err != nil {
+		return nil, err
 	}
 	if hasRef(&node) {
 		return nil, fmt.Errorf("$ref is unsupported")
@@ -102,8 +104,8 @@ func compileService(service ServiceSpec, specBytes, bindingBytes []byte, registr
 	var bindings struct {
 		Operations map[string]string `yaml:"operations"`
 	}
-	if err := yaml.Unmarshal(bindingBytes, &bindings); err != nil {
-		return nil, fmt.Errorf("bindings YAML: %w", err)
+	if err := decodeSingleYAML(bindingBytes, &bindings, "bindings"); err != nil {
+		return nil, err
 	}
 	if len(bindings.Operations) == 0 {
 		return nil, fmt.Errorf("service has no behavior bindings")
@@ -182,6 +184,22 @@ func compileService(service ServiceSpec, specBytes, bindingBytes []byte, registr
 	}
 	sort.Slice(ops, func(i, j int) bool { return ops[i].ID < ops[j].ID })
 	return ops, nil
+}
+
+func decodeSingleYAML(data []byte, value any, label string) error {
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(value); err != nil {
+		return fmt.Errorf("%s YAML: %w", label, err)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err != nil {
+			return fmt.Errorf("%s YAML: %w", label, err)
+		}
+		return fmt.Errorf("%s has multiple YAML documents", label)
+	}
+	return nil
 }
 
 func worldPath(path string) (map[string]bool, string, error) {
