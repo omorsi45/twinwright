@@ -8,8 +8,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"twinwright/internal/agent"
+	"twinwright/internal/behavior"
 	"twinwright/internal/compiler"
 	"twinwright/internal/dispatch"
 	"twinwright/internal/eval"
@@ -26,7 +28,7 @@ func main() {
 
 func runCLI(args []string, out io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: twinwright build|run|resume|inspect|replay ...")
+		return fmt.Errorf("usage: twinwright build|build-world|run|resume|inspect|replay ...")
 	}
 	ctx := context.Background()
 	switch args[0] {
@@ -62,6 +64,37 @@ func runCLI(args []string, out io.Writer) error {
 			return err
 		}
 		return emit(out, map[string]any{"digest": manifest.Digest, "operations": len(manifest.Operations), "manifest_path": *outputPath})
+	case "build-world":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: twinwright build-world <world.yaml> [--out path]")
+		}
+		definitionPath := args[1]
+		fs := flag.NewFlagSet("build-world", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		outputPath := fs.String("out", "twinwright.world.manifest.json", "world manifest output")
+		if err := fs.Parse(args[2:]); err != nil {
+			return err
+		}
+		definition, err := os.ReadFile(definitionPath)
+		if err != nil {
+			return err
+		}
+		loader, err := confinedWorldLoader(filepath.Dir(definitionPath))
+		if err != nil {
+			return err
+		}
+		manifest, err := compiler.CompileWorld(definition, loader, behavior.Builtin())
+		if err != nil {
+			return err
+		}
+		data, err := json.MarshalIndent(manifest, "", "  ")
+		if err != nil {
+			return err
+		}
+		if err = os.WriteFile(*outputPath, append(data, '\n'), 0644); err != nil {
+			return err
+		}
+		return emit(out, map[string]any{"digest": manifest.Digest, "services": len(manifest.World.Services), "operations": len(manifest.Operations), "manifest_path": *outputPath})
 	case "run":
 		if len(args) < 2 {
 			return fmt.Errorf("usage: twinwright run <scenario> [options]")
@@ -85,6 +118,9 @@ func runCLI(args []string, out io.Writer) error {
 		}
 		manifest, err := readManifest(*manifestPath)
 		if err != nil {
+			return err
+		}
+		if err := checkScenarioManifest(manifest, scenario); err != nil {
 			return err
 		}
 		if *fault != "" && manifest.Operation(*fault) == nil {
@@ -297,4 +333,53 @@ func scenarioTask(scenario string) (string, error) {
 	default:
 		return "", fmt.Errorf("unknown scenario %q", scenario)
 	}
+}
+
+func checkScenarioManifest(manifest compiler.Manifest, scenario string) error {
+	if manifest.World != nil {
+		if manifest.World.Definition.SeedProfile != "company-v1" || scenario == "duplicate-charge" {
+			return fmt.Errorf("scenario %q is incompatible with world seed profile %q", scenario, manifest.World.Definition.SeedProfile)
+		}
+	}
+	if scenario != "duplicate-charge" {
+		hasAccountLookup := false
+		for _, operation := range manifest.Operations {
+			hasAccountLookup = hasAccountLookup || operation.Behavior == "crm.getAccount"
+		}
+		if !hasAccountLookup {
+			return fmt.Errorf("scenario %q requires company operations", scenario)
+		}
+	}
+	return nil
+}
+
+func confinedWorldLoader(directory string) (func(string) ([]byte, error), error) {
+	root, err := filepath.Abs(directory)
+	if err != nil {
+		return nil, err
+	}
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		return nil, err
+	}
+	return func(path string) ([]byte, error) {
+		for _, segment := range strings.Split(filepath.ToSlash(path), "/") {
+			if segment == ".." {
+				return nil, fmt.Errorf("world service path %q contains parent traversal", path)
+			}
+		}
+		clean := filepath.Clean(filepath.FromSlash(path))
+		if filepath.IsAbs(clean) || filepath.VolumeName(clean) != "" || clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+			return nil, fmt.Errorf("world service path %q escapes definition directory", path)
+		}
+		resolved, err := filepath.EvalSymlinks(filepath.Join(root, clean))
+		if err != nil {
+			return nil, err
+		}
+		relative, err := filepath.Rel(root, resolved)
+		if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			return nil, fmt.Errorf("world service path %q escapes definition directory", path)
+		}
+		return os.ReadFile(resolved)
+	}, nil
 }

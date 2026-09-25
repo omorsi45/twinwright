@@ -1,0 +1,4 @@
+operations:
+  messageListChannels: messaging.listChannels
+  messageReadChannel: messaging.readChannel
+  messagePostMessage: messaging.postMessage

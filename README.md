@@ -49,6 +49,18 @@ go run ./cmd/twinwright replay <run-id> --manifest company.manifest.json --db co
 
 The incident case refunds the duplicate charge, records a CRM note, opens an engineering issue, and posts to the support channel. `company-routine` has a duplicate charge without incident evidence, so it requires a refund and CRM note without a ticket or post. `company-no-duplicate` requires a CRM note with no refund or escalation. The note must describe the finding: duplicate charge and refund, or one legitimate charge and no refund. CRM status changes are optional. Replace the scenario name in the `run` command to try each variant. Add `--fault createRefund` to inject one temporary 503, or `--steps 4` to pause and resume. The evaluator checks persisted state, including the absence of unrelated account changes.
 
+## Build a versioned world
+
+The [company world definition](examples/company/world.yaml) assembles separate billing, CRM, ticketing, and messaging specifications:
+
+```powershell
+go run ./cmd/twinwright build-world examples/company/world.yaml --out company.world.manifest.json
+go run ./cmd/twinwright run company-incident --agent scripted --manifest company.world.manifest.json --db company.db
+go run ./cmd/twinwright replay <run-id> --manifest company.world.manifest.json --db company.db
+```
+
+The definition declares `version: 1`, a `company-v1` seed profile, service files, entity fields, and relationships such as `crm.accounts.customer_id` to `billing.customers.id`. Referenced files must stay under the definition directory. Each operation needs an explicit behavior binding; the compiler accepts only primitive GET path arguments or required POST JSON object arguments. New business behavior requires a registered Go handler, and relationship metadata does not create database constraints. The original `build` command and manifests remain supported. See [ADR 0006](docs/adr/0006-world-definition.md) for the boundary.
+
 Keep the compiled manifest for resume and replay: its digest must match the world used by the run. A run also saves its provider model and uses that model on resume. If execution fails after a run starts, the error includes the run ID so it can be inspected or resumed. Older development databases without the model column are updated when opened.
 
 For a live agent, set `OPENAI_API_KEY`. The repo defaults to `gpt-6-sol`:
@@ -64,7 +76,7 @@ The OpenAI adapter uses the [Responses API](https://developers.openai.com/api/do
 
 ## Scope
 
-The compiler supports five billing operations in the original example and 18 explicit billing, CRM, ticketing, and messaging operations in the [company example](examples/company/openapi.yaml). It rejects other routes or unbound operations. OpenAPI defines callable shapes; [bindings](examples/company/bindings.yaml) choose explicit stateful behaviors. All services run locally in one process and one SQLite database. The current scope has no production service connections, permissions, generic service generation, or distributed workers. The [ADRs](docs/adr) describe the public architectural decisions and current limits.
+The legacy compiler supports five billing operations in the original example and 18 explicit billing, CRM, ticketing, and messaging operations in the [company example](examples/company/openapi.yaml). The versioned world compiler combines multiple service manifests while requiring registered bindings. OpenAPI defines callable shapes; [bindings](examples/company/bindings.yaml) choose explicit stateful behaviors. All services run locally in one process and one SQLite database. The current scope has no production service connections, permissions, dynamic behavior generation, or distributed workers. The [ADRs](docs/adr) describe the public architectural decisions and current limits.
 
 ## License
 

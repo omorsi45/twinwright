@@ -1,0 +1,6 @@
+operations:
+  ticketCreateIssue: ticket.createIssue
+  ticketGetIssue: ticket.getIssue
+  ticketSearchIssues: ticket.searchIssues
+  ticketAddComment: ticket.addComment
+  ticketTransitionIssue: ticket.transitionIssue

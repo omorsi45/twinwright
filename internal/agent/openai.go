@@ -34,7 +34,7 @@ func (p OpenAIProvider) Next(ctx context.Context, task string, history []Message
 	}
 	guidance := "You are testing a fictional billing service. Use tools to investigate. Refund only a justified duplicate charge. A 503 is temporary; retry if needed. Never claim success without checking tool results."
 	for _, op := range ops {
-		if strings.HasPrefix(op.ID, "crm") {
+		if strings.HasPrefix(op.ID, "crm") || strings.HasPrefix(op.Behavior, "crm.") {
 			guidance = "You are testing fictional billing, CRM, ticketing, and messaging services. Investigate with tool results, refund only a justified duplicate charge, and record a CRM note. Open an engineering issue and notify support only when the account contains incident evidence. A 503 is temporary; retry with a new tool call ID. Check results before claiming success."
 			break
 		}
@@ -64,7 +64,11 @@ func (p OpenAIProvider) Next(ctx context.Context, task string, history []Message
 		for name, typ := range op.Properties {
 			properties[name] = map[string]any{"type": typ}
 		}
-		tools = append(tools, map[string]any{"type": "function", "name": op.ID, "description": description(op.ID), "parameters": map[string]any{"type": "object", "properties": properties, "required": op.Required, "additionalProperties": false}, "strict": len(op.Required) == len(op.Properties)})
+		descriptionKey := op.Behavior
+		if descriptionKey == "" {
+			descriptionKey = op.ID
+		}
+		tools = append(tools, map[string]any{"type": "function", "name": op.ID, "description": description(descriptionKey), "parameters": map[string]any{"type": "object", "properties": properties, "required": op.Required, "additionalProperties": false}, "strict": len(op.Required) == len(op.Properties)})
 	}
 	payload := map[string]any{"model": p.Model, "store": false, "parallel_tool_calls": false, "include": []string{"reasoning.encrypted_content"}, "input": input, "tools": tools}
 	data, err := json.Marshal(payload)
@@ -137,41 +141,41 @@ func (p OpenAIProvider) Next(ctx context.Context, task string, history []Message
 
 func description(id string) string {
 	switch id {
-	case "getCustomer":
+	case "getCustomer", "billing.getCustomer":
 		return "Get a customer by ID."
-	case "listInvoices":
+	case "listInvoices", "billing.listInvoices":
 		return "List invoices for a customer ID."
-	case "listCharges":
+	case "listCharges", "billing.listCharges":
 		return "List charges for an invoice ID, including amounts and refund totals."
-	case "getCharge":
+	case "getCharge", "billing.getCharge":
 		return "Get a charge by ID and its refunded amount."
-	case "createRefund":
+	case "createRefund", "billing.createRefund":
 		return "Create a refund for a charge. Use only after confirming a duplicate; amount_cents must be the intended refund amount."
-	case "getSubscription":
+	case "getSubscription", "billing.getSubscription":
 		return "Get a subscription by ID, including customer ID, plan, and status."
-	case "crmGetAccount":
+	case "crmGetAccount", "crm.getAccount":
 		return "Get a CRM account by ID, including customer linkage, contacts, status, and notes. Incident evidence may be in notes."
-	case "crmSearchAccounts":
+	case "crmSearchAccounts", "crm.searchAccounts":
 		return "Search CRM accounts by ID, customer ID, status, representative, or customer name."
-	case "crmAddAccountNote":
+	case "crmAddAccountNote", "crm.addAccountNote":
 		return "Add a nonempty note to a CRM account documenting the investigation and outcome."
-	case "crmUpdateAccountStatus":
+	case "crmUpdateAccountStatus", "crm.updateAccountStatus":
 		return "Update a CRM account. Valid statuses are active, needs_followup, and resolved. Use needs_followup for an active engineering incident, resolved otherwise."
-	case "ticketCreateIssue":
+	case "ticketCreateIssue", "ticket.createIssue":
 		return "Create an engineering issue in project PROJ-ENG for account A-104 when incident evidence exists. Valid priorities are low, medium, and high."
-	case "ticketGetIssue":
+	case "ticketGetIssue", "ticket.getIssue":
 		return "Get a ticketing issue by ID, including its current status and comments."
-	case "ticketSearchIssues":
+	case "ticketSearchIssues", "ticket.searchIssues":
 		return "Search ticketing issues by ID, project, account, title, status, or priority."
-	case "ticketAddComment":
+	case "ticketAddComment", "ticket.addComment":
 		return "Add a comment to a ticketing issue by issue ID."
-	case "ticketTransitionIssue":
+	case "ticketTransitionIssue", "ticket.transitionIssue":
 		return "Transition an issue from open to in_progress, then from in_progress to resolved."
-	case "messageListChannels":
+	case "messageListChannels", "messaging.listChannels":
 		return "List channels in workspace WS-1 to discover the support channel."
-	case "messageReadChannel":
+	case "messageReadChannel", "messaging.readChannel":
 		return "Read a channel by ID, including its current messages."
-	case "messagePostMessage":
+	case "messagePostMessage", "messaging.postMessage":
 		return "Post a message to the support channel when incident evidence exists. Include the affected account or customer ID."
 	default:
 		return id

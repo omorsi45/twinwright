@@ -10,6 +10,9 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"twinwright/internal/behavior"
+	"twinwright/internal/compiler"
 	"twinwright/internal/store"
 )
 
@@ -291,5 +294,173 @@ func TestCompanyScenariosFromCLI(t *testing.T) {
 				t.Fatalf("inspect=%v", inspected)
 			}
 		})
+	}
+}
+
+func TestBuildWorldRunAndReplay(t *testing.T) {
+	root := filepath.Join("..", "..", "examples", "company")
+	dir := t.TempDir()
+	manifest := filepath.Join(dir, "company.world.manifest.json")
+	db := filepath.Join(dir, "company.db")
+	invoke := func(args ...string) map[string]any {
+		t.Helper()
+		var output bytes.Buffer
+		if err := runCLI(args, &output); err != nil {
+			t.Fatal(err)
+		}
+		var value map[string]any
+		if err := json.Unmarshal(output.Bytes(), &value); err != nil {
+			t.Fatal(err)
+		}
+		return value
+	}
+	built := invoke("build-world", filepath.Join(root, "world.yaml"), "--out", manifest)
+	if built["digest"] == "" || built["services"] != float64(4) || built["operations"] != float64(18) {
+		t.Fatalf("build=%v", built)
+	}
+	if err := runCLI([]string{"run", "duplicate-charge", "--agent", "scripted", "--manifest", manifest, "--db", db}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "incompatible") {
+		t.Fatalf("incompatible scenario error=%v", err)
+	}
+	paused := invoke("run", "company-incident", "--agent", "scripted", "--manifest", manifest, "--db", db, "--fault", "messagePostMessage", "--steps", "4")
+	run := paused["run"].(map[string]any)
+	if run["status"] != "paused" {
+		t.Fatalf("run=%v", run)
+	}
+	id := run["id"].(string)
+	definition, err := os.ReadFile(filepath.Join(root, "world.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := bytes.Replace(definition, []byte("to: billing.customers.id"), []byte("to: crm.accounts.id"), 1)
+	loader, err := confinedWorldLoader(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	different, err := compiler.CompileWorld(changed, loader, behavior.Builtin())
+	if err != nil {
+		t.Fatal(err)
+	}
+	differentPath := filepath.Join(dir, "different.manifest.json")
+	differentData, err := json.Marshal(different)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(differentPath, differentData, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := runCLI([]string{"resume", id, "--agent", "scripted", "--manifest", differentPath, "--db", db}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "manifest mismatch") {
+		t.Fatalf("changed world resume error=%v", err)
+	}
+	completed := invoke("resume", id, "--agent", "scripted", "--manifest", manifest, "--db", db, "--steps", "30")
+	if completed["run"].(map[string]any)["status"] != "completed" || completed["evaluation"].(map[string]any)["passed"] != true {
+		t.Fatalf("completed=%v", completed)
+	}
+	verification := invoke("replay", id, "--manifest", manifest, "--db", db)
+	if verification["verified"] != true {
+		t.Fatalf("replay=%v", verification)
+	}
+	if err := runCLI([]string{"replay", id, "--manifest", differentPath, "--db", db}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "manifest mismatch") {
+		t.Fatalf("changed world replay error=%v", err)
+	}
+}
+
+func TestBuildWorldRunsWithRenamedOperation(t *testing.T) {
+	root := filepath.Join("..", "..", "examples", "company")
+	dir := t.TempDir()
+	definition, err := os.ReadFile(filepath.Join(root, "world.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	loader := func(path string) ([]byte, error) {
+		data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(path)))
+		if err != nil {
+			return nil, err
+		}
+		if path == "services/crm.openapi.yaml" || path == "services/crm.bindings.yaml" {
+			data = bytes.ReplaceAll(data, []byte("crmGetAccount"), []byte("lookupAccount"))
+		}
+		return data, nil
+	}
+	manifest, err := compiler.CompileWorld(definition, loader, behavior.Builtin())
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestPath := filepath.Join(dir, "renamed.manifest.json")
+	data, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifestPath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := runCLI([]string{"run", "company-routine", "--agent", "scripted", "--manifest", manifestPath, "--db", filepath.Join(dir, "company.db"), "--steps", "30"}, &output); err != nil {
+		t.Fatal(err)
+	}
+	var result struct {
+		Run struct {
+			Status string `json:"status"`
+		} `json:"run"`
+		Evaluation struct {
+			Passed bool `json:"passed"`
+		} `json:"evaluation"`
+	}
+	if err := json.Unmarshal(output.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Run.Status != "completed" || !result.Evaluation.Passed {
+		t.Fatalf("renamed operation run=%s", output.String())
+	}
+}
+
+func TestBuildWorldRejectsParentPath(t *testing.T) {
+	dir := t.TempDir()
+	definition := filepath.Join(dir, "world.yaml")
+	content := "version: 1\nname: sample\nseed_profile: company-v1\nservices:\n  - {name: billing, module: billing, openapi: ../billing.yaml, bindings: billing-bindings.yaml}\n"
+	if err := os.WriteFile(definition, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	err := runCLI([]string{"build-world", definition, "--out", filepath.Join(dir, "manifest.json")}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "path") {
+		t.Fatalf("parent traversal error=%v", err)
+	}
+}
+
+func TestConfinedWorldLoaderRejectsNormalizedParentPath(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "services"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "services", "crm.yaml"), []byte("valid"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	load, err := confinedWorldLoader(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := load("services/../services/crm.yaml"); err == nil {
+		t.Fatal("parent segment accepted after path normalization")
+	}
+	if _, err := load(filepath.Join(dir, "services", "crm.yaml")); err == nil {
+		t.Fatal("absolute path accepted")
+	}
+	outside := filepath.Join(t.TempDir(), "outside.yaml")
+	if err := os.WriteFile(outside, []byte("outside"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "services", "escape.yaml")); err == nil {
+		if _, err := load("services/escape.yaml"); err == nil {
+			t.Fatal("symlink outside definition directory accepted")
+		}
+	}
+}
+
+func TestCompanyScenarioAcceptsRenamedBoundOperation(t *testing.T) {
+	manifest := compiler.Manifest{
+		World:      &compiler.WorldMetadata{Definition: compiler.WorldDefinition{SeedProfile: "company-v1"}},
+		Operations: []compiler.Operation{{ID: "lookupAccount", Behavior: "crm.getAccount"}},
+	}
+	if err := checkScenarioManifest(manifest, "company-routine"); err != nil {
+		t.Fatalf("renamed bound operation rejected: %v", err)
 	}
 }

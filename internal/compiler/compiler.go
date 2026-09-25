@@ -9,16 +9,19 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+	"twinwright/internal/behavior"
 )
 
 // Manifest is the executable surface. Behavior is selected by an explicit binding.
 type Manifest struct {
-	Digest     string      `json:"digest"`
-	Operations []Operation `json:"operations"`
+	Digest     string         `json:"digest"`
+	Operations []Operation    `json:"operations"`
+	World      *WorldMetadata `json:"world,omitempty"`
 }
 
 type Operation struct {
 	ID         string            `json:"id"`
+	Service    string            `json:"service,omitempty"`
 	Method     string            `json:"method"`
 	Path       string            `json:"path"`
 	Behavior   string            `json:"behavior"`
@@ -247,6 +250,9 @@ func digestOperations(ops []Operation) (string, error) {
 
 // ValidateManifest rejects edited or incompatible build artifacts before execution.
 func ValidateManifest(m Manifest) error {
+	if m.World != nil {
+		return ValidateManifestWithRegistry(m, behavior.Builtin())
+	}
 	if len(m.Operations) == 0 {
 		return fmt.Errorf("empty manifest")
 	}
