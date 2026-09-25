@@ -120,3 +120,111 @@ func TestPartialServiceOutageSharesCounterAcrossOperations(t *testing.T) {
 		}
 	}
 }
+
+func TestTimeoutAfterCommitHidesSuccessfulRefund(t *testing.T) {
+	d, s, run := chaosRun(t, "type: timeout_after_commit\n    operations: [createRefund]\n    times: 1")
+	ctx := context.Background()
+	args := map[string]any{"charge_id": "CH-1002", "amount_cents": 500, "reason": "partial duplicate refund"}
+	first, err := d.Invoke(ctx, run.ID, "refund-first", "createRefund", args)
+	if err != nil || first.Status != 0 {
+		t.Fatalf("first=%+v err=%v", first, err)
+	}
+	var refunds int
+	if err := s.DB.QueryRowContext(ctx, "SELECT count(*) FROM refunds WHERE world_id=?", run.WorldID).Scan(&refunds); err != nil || refunds != 1 {
+		t.Fatalf("refunds=%d err=%v", refunds, err)
+	}
+	again, err := d.Invoke(ctx, run.ID, "refund-first", "createRefund", args)
+	if err != nil || again.Status != 0 {
+		t.Fatalf("same call=%+v err=%v", again, err)
+	}
+	second, err := d.Invoke(ctx, run.ID, "refund-second", "createRefund", args)
+	if err != nil || second.Status != 201 {
+		t.Fatalf("new call=%+v err=%v", second, err)
+	}
+	if err := s.DB.QueryRowContext(ctx, "SELECT count(*) FROM refunds WHERE world_id=?", run.WorldID).Scan(&refunds); err != nil || refunds != 2 {
+		t.Fatalf("refunds=%d err=%v", refunds, err)
+	}
+	var hiddenStatus int
+	if err := s.DB.QueryRowContext(ctx, "SELECT status FROM chaos_hidden_outcomes WHERE run_id=? AND call_id='refund-first'", run.ID).Scan(&hiddenStatus); err != nil || hiddenStatus != 201 {
+		t.Fatalf("hidden=%d err=%v", hiddenStatus, err)
+	}
+}
+
+func TestTimeoutAfterCommitRollsBackWithAuditFailure(t *testing.T) {
+	d, s, run := chaosRun(t, "type: timeout_after_commit\n    operations: [createRefund]\n    times: 1")
+	ctx := context.Background()
+	if _, err := s.DB.ExecContext(ctx, `CREATE TRIGGER fail_hidden BEFORE INSERT ON chaos_hidden_outcomes BEGIN SELECT RAISE(ABORT, 'audit failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	_, err := d.Invoke(ctx, run.ID, "refund-first", "createRefund", map[string]any{"charge_id": "CH-1002", "amount_cents": 500, "reason": "partial"})
+	if err == nil {
+		t.Fatal("audit failure did not roll back")
+	}
+	var refunds, states int
+	if err := s.DB.QueryRowContext(ctx, "SELECT count(*) FROM refunds WHERE world_id=?", run.WorldID).Scan(&refunds); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB.QueryRowContext(ctx, "SELECT count(*) FROM chaos_rule_state WHERE run_id=?", run.ID).Scan(&states); err != nil {
+		t.Fatal(err)
+	}
+	if refunds != 0 || states != 0 {
+		t.Fatalf("partial commit: refunds=%d states=%d", refunds, states)
+	}
+}
+
+func TestMalformedResponseStoresRealResultButReturnsInvalidShape(t *testing.T) {
+	d, s, run := chaosRun(t, "type: malformed_response\n    operations: [getCharge]\n    body: '{broken'\n    times: 1")
+	result, err := d.Invoke(context.Background(), run.ID, "read", "getCharge", map[string]any{"id": "CH-1002"})
+	if err != nil || result.Status != 200 || string(result.Body) != `"{broken"` {
+		t.Fatalf("visible=%+v err=%v", result, err)
+	}
+	var hidden string
+	if err := s.DB.QueryRow("SELECT body FROM chaos_hidden_outcomes WHERE run_id=? AND call_id='read'", run.ID).Scan(&hidden); err != nil {
+		t.Fatal(err)
+	}
+	if !json.Valid([]byte(hidden)) || hidden == string(result.Body) {
+		t.Fatalf("hidden=%s visible=%s", hidden, result.Body)
+	}
+}
+
+func TestStaleReadIsScopedToArguments(t *testing.T) {
+	d, s, run := chaosRun(t, "type: stale_read\n    operations: [getCharge]\n    after_calls: 1")
+	ctx := context.Background()
+	first, err := d.Invoke(ctx, run.ID, "read-1", "getCharge", map[string]any{"id": "CH-1002"})
+	if err != nil || first.Status != 200 {
+		t.Fatalf("first=%+v err=%v", first, err)
+	}
+	if _, err := d.Invoke(ctx, run.ID, "refund", "createRefund", map[string]any{"charge_id": "CH-1002", "amount_cents": 500, "reason": "partial"}); err != nil {
+		t.Fatal(err)
+	}
+	stale, err := d.Invoke(ctx, run.ID, "read-2", "getCharge", map[string]any{"id": "CH-1002"})
+	if err != nil || string(stale.Body) != string(first.Body) {
+		t.Fatalf("stale=%+v first=%+v err=%v", stale, first, err)
+	}
+	other, err := d.Invoke(ctx, run.ID, "read-3", "getCharge", map[string]any{"id": "CH-1001"})
+	if err != nil || other.Status != 200 || string(other.Body) == string(first.Body) {
+		t.Fatalf("other=%+v err=%v", other, err)
+	}
+	var refunded int
+	if err := s.DB.QueryRowContext(ctx, "SELECT refunded_cents FROM charges WHERE world_id=? AND id='CH-1002'", run.WorldID).Scan(&refunded); err != nil || refunded != 500 {
+		t.Fatalf("refunded=%d err=%v", refunded, err)
+	}
+}
+
+func TestConcurrentActorMutatesBeforeAgentRead(t *testing.T) {
+	d, s, run := chaosRun(t, "type: concurrent_mutation\n    operations: [getCharge]\n    times: 1\n    actor:\n      operation: createRefund\n      arguments: {charge_id: CH-1002, amount_cents: 500, reason: actor}")
+	result, err := d.Invoke(context.Background(), run.ID, "read", "getCharge", map[string]any{"id": "CH-1002"})
+	if err != nil || result.Status != 200 {
+		t.Fatalf("read=%+v err=%v", result, err)
+	}
+	var charge struct {
+		Refunded int `json:"refunded_cents"`
+	}
+	if err := json.Unmarshal(result.Body, &charge); err != nil || charge.Refunded != 500 {
+		t.Fatalf("charge=%+v err=%v", charge, err)
+	}
+	var actorEvents int
+	if err := s.DB.QueryRow("SELECT count(*) FROM events WHERE run_id=? AND type='chaos.actor_mutation'", run.ID).Scan(&actorEvents); err != nil || actorEvents != 1 {
+		t.Fatalf("actor events=%d err=%v", actorEvents, err)
+	}
+}

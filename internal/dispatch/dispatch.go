@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 
 	"twinwright/internal/behavior"
 	"twinwright/internal/chaos"
@@ -60,38 +61,60 @@ func (d *Dispatcher) Invoke(ctx context.Context, runID, callID, operationID stri
 	}
 	var response any
 	var mutation any
+	var decision chaos.Decision
+	var chaosPayload map[string]any
+	var postEffect, actorPending, handlerRan bool
 	status, response = validate(*op, args)
 	skipHandler := status != 0
 	if !skipHandler {
-		decision, decideErr := chaos.Decide(ctx, tx, runID, operationID)
+		var decideErr error
+		decision, decideErr = chaos.Decide(ctx, tx, runID, operationID, arguments)
 		if decideErr != nil {
 			return Result{}, decideErr
 		}
 		if decision.RuleID != "" {
-			payload := map[string]any{"rule_id": decision.RuleID, "type": decision.Rule.Type, "call_id": callID,
+			chaosPayload = map[string]any{"rule_id": decision.RuleID, "type": decision.Rule.Type, "call_id": callID,
 				"operation_id": operationID, "matching_call": decision.MatchNumber}
 			switch decision.Rule.Type {
 			case "http_error":
 				status, response, skipHandler = decision.Rule.Status, map[string]string{"error": "simulated HTTP failure"}, true
-				payload["status"] = status
+				chaosPayload["status"] = status
 			case "timeout":
 				status, response, skipHandler = 0, map[string]string{"error": "simulated transport timeout"}, true
 			case "rate_limit":
 				status, response, skipHandler = 429, map[string]string{"error": "simulated rate limit"}, true
-				payload["status"] = status
+				chaosPayload["status"] = status
 			case "permission_revocation":
 				status, response, skipHandler = 403, map[string]string{"error": "simulated permission revocation"}, true
-				payload["status"] = status
+				chaosPayload["status"] = status
 			case "partial_service_outage":
 				status, response, skipHandler = 503, map[string]string{"error": "simulated service outage"}, true
-				payload["status"] = status
+				chaosPayload["status"] = status
 			case "latency":
-				payload["duration_ms"] = decision.Rule.DurationMS
+				chaosPayload["duration_ms"] = decision.Rule.DurationMS
+			case "stale_read":
+				var staleBody []byte
+				status, staleBody, err = chaos.LoadSnapshot(ctx, tx, runID, decision.RuleID, arguments)
+				if err != nil {
+					return Result{}, err
+				}
+				response, skipHandler = json.RawMessage(staleBody), true
+			case "timeout_after_commit", "malformed_response":
+				postEffect = true
+			case "concurrent_mutation":
+				actorPending = true
 			default:
 				return Result{}, fmt.Errorf("chaos effect %s is not implemented", decision.Rule.Type)
 			}
-			if err = store.AppendEventTx(ctx, tx, runID, "chaos.injected", payload); err != nil {
-				return Result{}, err
+			if !postEffect {
+				if err = store.AppendEventTx(ctx, tx, runID, "chaos.injected", chaosPayload); err != nil {
+					return Result{}, err
+				}
+			}
+			if actorPending {
+				if err := d.invokeActor(ctx, tx, worldID, runID, decision); err != nil {
+					return Result{}, err
+				}
 			}
 		}
 	}
@@ -129,6 +152,38 @@ func (d *Dispatcher) Invoke(ctx context.Context, runID, callID, operationID stri
 			if err != nil {
 				return Result{}, err
 			}
+			handlerRan = true
+		}
+	}
+	if handlerRan && status >= 200 && status < 300 && op.Method == "GET" {
+		actual, marshalErr := json.Marshal(response)
+		if marshalErr != nil {
+			return Result{}, marshalErr
+		}
+		for _, ruleID := range decision.CaptureRules {
+			if err := chaos.SaveSnapshot(ctx, tx, runID, ruleID, arguments, status, actual); err != nil {
+				return Result{}, err
+			}
+		}
+	}
+	if postEffect {
+		if !handlerRan || status < 200 || status >= 300 || (decision.Rule.Type == "timeout_after_commit" && mutation == nil) {
+			return Result{}, fmt.Errorf("chaos rule %s expected a successful service effect", decision.RuleID)
+		}
+		actual, marshalErr := json.Marshal(response)
+		if marshalErr != nil {
+			return Result{}, marshalErr
+		}
+		if _, err := tx.ExecContext(ctx, "INSERT INTO chaos_hidden_outcomes(run_id,call_id,rule_id,status,body) VALUES(?,?,?,?,?)", runID, callID, decision.RuleID, status, string(actual)); err != nil {
+			return Result{}, err
+		}
+		if decision.Rule.Type == "timeout_after_commit" {
+			status, response = 0, map[string]string{"error": "simulated transport timeout"}
+		} else {
+			response = decision.Rule.Body
+		}
+		if err := store.AppendEventTx(ctx, tx, runID, "chaos.injected", chaosPayload); err != nil {
+			return Result{}, err
 		}
 	}
 	encoded, err := json.Marshal(response)
@@ -163,6 +218,34 @@ func (d *Dispatcher) Invoke(ctx context.Context, runID, callID, operationID stri
 		return Result{}, err
 	}
 	return result, nil
+}
+
+func (d *Dispatcher) invokeActor(ctx context.Context, tx *sql.Tx, worldID, runID string, decision chaos.Decision) error {
+	actor := decision.Rule.Actor
+	if actor == nil {
+		return fmt.Errorf("chaos rule %s has no actor", decision.RuleID)
+	}
+	op := d.Manifest.Operation(actor.Operation)
+	if op == nil || op.Method != "POST" {
+		return fmt.Errorf("chaos actor operation %q is unavailable", actor.Operation)
+	}
+	registry := d.Registry
+	if registry == nil {
+		registry = behavior.Builtin()
+	}
+	handler, ok := registry.Lookup(op.Behavior)
+	if !ok {
+		return fmt.Errorf("chaos actor behavior %q is unavailable", op.Behavior)
+	}
+	actorCallID := decision.RuleID + "-" + strconv.Itoa(decision.MatchNumber)
+	status, _, mutation, err := handler(ctx, tx, worldID, runID+"-chaos-actor", actorCallID, op.Behavior, actor.Arguments)
+	if err != nil {
+		return err
+	}
+	if status < 200 || status >= 300 || mutation == nil {
+		return fmt.Errorf("chaos actor %s did not mutate successfully: HTTP %d", actor.Operation, status)
+	}
+	return store.AppendEventTx(ctx, tx, runID, "chaos.actor_mutation", map[string]any{"rule_id": decision.RuleID, "operation_id": actor.Operation, "status": status, "mutation": mutation})
 }
 
 func validate(op compiler.Operation, args map[string]any) (int, any) {

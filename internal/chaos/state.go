@@ -10,14 +10,15 @@ import (
 )
 
 type Decision struct {
-	RuleID      string
-	Rule        Rule
-	MatchNumber int
+	RuleID       string
+	Rule         Rule
+	MatchNumber  int
+	CaptureRules []string
 }
 
 // Decide advances each matching rule once and selects the first active effect.
 // Call it only after validating arguments and checking saved call-ID results.
-func Decide(ctx context.Context, tx *sql.Tx, runID, operationID string) (Decision, error) {
+func Decide(ctx context.Context, tx *sql.Tx, runID, operationID string, arguments []byte) (Decision, error) {
 	var encoded, digest string
 	err := tx.QueryRowContext(ctx, "SELECT policy_json,digest FROM run_chaos WHERE run_id=?", runID).Scan(&encoded, &digest)
 	if err == sql.ErrNoRows {
@@ -38,6 +39,7 @@ func Decide(ctx context.Context, tx *sql.Tx, runID, operationID string) (Decisio
 		return Decision{}, fmt.Errorf("unsupported stored chaos policy version %d", policy.Version)
 	}
 	var selected Decision
+	var captureRules []string
 	for _, rule := range policy.Rules {
 		matched := false
 		for _, id := range rule.Operations {
@@ -46,6 +48,9 @@ func Decide(ctx context.Context, tx *sql.Tx, runID, operationID string) (Decisio
 		if !matched {
 			continue
 		}
+		if rule.Type == "stale_read" {
+			captureRules = append(captureRules, rule.ID)
+		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO chaos_rule_state(run_id,rule_id,matching_calls,injections) VALUES(?,?,1,0) ON CONFLICT(run_id,rule_id) DO UPDATE SET matching_calls=matching_calls+1`, runID, rule.ID); err != nil {
 			return Decision{}, err
 		}
@@ -53,13 +58,23 @@ func Decide(ctx context.Context, tx *sql.Tx, runID, operationID string) (Decisio
 		if err := tx.QueryRowContext(ctx, "SELECT matching_calls,injections FROM chaos_rule_state WHERE run_id=? AND rule_id=?", runID, rule.ID).Scan(&calls, &injections); err != nil {
 			return Decision{}, err
 		}
-		if selected.RuleID == "" && calls > rule.AfterCalls && (rule.Times == 0 || injections < rule.Times) {
+		active := selected.RuleID == "" && calls > rule.AfterCalls && (rule.Times == 0 || injections < rule.Times)
+		if active && rule.Type == "stale_read" {
+			_, _, snapshotErr := LoadSnapshot(ctx, tx, runID, rule.ID, arguments)
+			if snapshotErr == sql.ErrNoRows {
+				active = false
+			} else if snapshotErr != nil {
+				return Decision{}, snapshotErr
+			}
+		}
+		if active {
 			selected = Decision{RuleID: rule.ID, Rule: rule, MatchNumber: calls}
 			if _, err := tx.ExecContext(ctx, "UPDATE chaos_rule_state SET injections=injections+1 WHERE run_id=? AND rule_id=?", runID, rule.ID); err != nil {
 				return Decision{}, err
 			}
 		}
 	}
+	selected.CaptureRules = captureRules
 	return selected, nil
 }
 

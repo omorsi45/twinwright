@@ -42,7 +42,7 @@ func TestDecideUsesRunLocalDeterministicCounters(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			decision, err := Decide(ctx, tx, id, "getCharge")
+			decision, err := Decide(ctx, tx, id, "getCharge", []byte(`{}`))
 			if err != nil {
 				t.Fatal(err)
 			}
