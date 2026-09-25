@@ -1,0 +1,16 @@
+version: 1
+principal:
+  id: support-agent-1
+  roles: [support]
+roles:
+  support:
+    allow:
+      - customers.read
+      - invoices.read
+      - charges.read
+      - crm.accounts.read
+      - jira.issues.read
+      - jira.comments.write
+resources:
+  customer_ids: [C-104]
+  channel_ids: []
