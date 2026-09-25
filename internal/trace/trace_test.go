@@ -281,6 +281,12 @@ func (failingProvider) Next(context.Context, string, []agent.Message, []compiler
 	return agent.Message{}, errors.New("upstream rejected Authorization: Bearer abc.def-ghi")
 }
 
+type secretProvider struct{ secret string }
+
+func (p secretProvider) Next(context.Context, string, []agent.Message, []compiler.Operation) (agent.Message, error) {
+	return agent.Message{}, errors.New("upstream rejected key " + p.secret)
+}
+
 func TestBuildFailedProviderTurnIsRedacted(t *testing.T) {
 	s := newStore(t)
 	manifest := billingManifest(t)
@@ -308,6 +314,94 @@ func TestBuildFailedProviderTurnIsRedacted(t *testing.T) {
 	}
 	if strings.Contains(string(encoded), "abc.def-ghi") || !strings.Contains(string(encoded), "[REDACTED]") || trace.Summary.Errors != 1 {
 		t.Fatalf("trace=%s", encoded)
+	}
+}
+
+func TestBuildRedactsConfiguredSecret(t *testing.T) {
+	s := newStore(t)
+	manifest := billingManifest(t)
+	ctx := context.Background()
+	world, err := s.SeedScenario(ctx, 42, manifest.Digest, "duplicate-charge")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := s.CreateRun(ctx, world.ID, "duplicate-charge", "scripted", "fixture-v1", "task", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret := "custom-api-key-value"
+	runner := agent.Runner{Store: s, Dispatch: &dispatch.Dispatcher{Store: s, Manifest: manifest}, Manifest: manifest, Provider: secretProvider{secret}}
+	if _, err := runner.Execute(ctx, run.ID, 1); err == nil {
+		t.Fatal("provider failure not reported")
+	}
+	trace, err := Build(ctx, s, run.ID, secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(trace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), secret) || !strings.Contains(string(encoded), "[REDACTED]") {
+		t.Fatalf("configured secret remained in the trace: %s", encoded)
+	}
+}
+
+type scriptedCall struct {
+	calls []agent.ToolCall
+	next  int
+}
+
+func (p *scriptedCall) Next(context.Context, string, []agent.Message, []compiler.Operation) (agent.Message, error) {
+	if p.next >= len(p.calls) {
+		return agent.Message{Role: "assistant", Content: "done"}, nil
+	}
+	call := p.calls[p.next]
+	p.next++
+	return agent.Message{Role: "assistant", ToolCalls: []agent.ToolCall{call}}, nil
+}
+
+func TestBuildLabelsPermissionRevocation(t *testing.T) {
+	s := newStore(t)
+	manifest := billingManifest(t)
+	policy, err := chaos.Parse([]byte("version: 1\nrules:\n  - id: revoked\n    type: permission_revocation\n    operations: [getCustomer]\n    after_calls: 0\n"), manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := policy.CanonicalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := &scriptedCall{calls: []agent.ToolCall{{ID: "c1", OperationID: "getCustomer", Arguments: map[string]any{"id": "C-104"}}}}
+	run := execute(t, s, manifest, "duplicate-charge", "fixture-v1", store.RunOptions{ChaosJSON: encoded, ChaosDigest: policy.Digest()}, provider)
+	span := toolSpans(build(t, s, run.ID).Root)[0]
+	if span.Attributes["error.type"] != "permission_revocation" || span.Attributes["http.status"] != 403 {
+		t.Fatalf("revoked span=%+v", span.Attributes)
+	}
+}
+
+func TestBuildKeepsActorMutationFields(t *testing.T) {
+	s := newStore(t)
+	manifest := billingManifest(t)
+	policy, err := chaos.Parse([]byte("version: 1\nrules:\n  - id: other-operator\n    type: concurrent_mutation\n    operations: [getCharge]\n    times: 1\n    actor:\n      operation: createRefund\n      arguments: {charge_id: CH-1002, amount_cents: 500, reason: concurrent partial refund}\n"), manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := policy.CanonicalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := &scriptedCall{calls: []agent.ToolCall{{ID: "c1", OperationID: "getCharge", Arguments: map[string]any{"id": "CH-1002"}}}}
+	run := execute(t, s, manifest, "duplicate-charge", "fixture-v1", store.RunOptions{ChaosJSON: encoded, ChaosDigest: policy.Digest()}, provider)
+	span := toolSpans(build(t, s, run.ID).Root)[0]
+	var actor *Event
+	for i := range span.Events {
+		if span.Events[i].Name == "chaos.actor_mutation" {
+			actor = &span.Events[i]
+		}
+	}
+	if actor == nil || actor.Attributes["mutation.charge_id"] != "CH-1002" || actor.Attributes["mutation.amount_cents"] != 500 {
+		t.Fatalf("actor event=%+v", actor)
 	}
 }
 

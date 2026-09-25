@@ -189,7 +189,7 @@ Each model response and each tool call is a span. Inside a tool call, the trace 
 
 Tool time is the time inside the local transaction. Model time includes a live provider round trip only when the run used one. Simulated chaos latency is a separate attribute, not added into the wall clock. Token usage is recorded when the provider reports it. Scripted fixtures do not, and no live model run has been verified. The export has not been sent to a collector in this repository.
 
-Provider error text is redacted before it is stored: configured secrets, `sk-` API keys, and bearer tokens. `trace` redacts error messages from older ledgers the same way.
+Provider error text is redacted before it is stored: the configured API key, `sk-` API keys, and bearer tokens. `trace` and `inspect` apply the same redactor to error messages already in a ledger, including `OPENAI_API_KEY` when it is set. Like `replay` and `evaluate`, they open the database read-only and still need a writable directory, because SQLite in WAL mode creates `-wal` and `-shm` files.
 
 See `docs/adr/0012-ledger-traces.md`.
 

@@ -83,7 +83,9 @@ type Summary struct {
 }
 
 // Build reads one run and returns its trace.
-func Build(ctx context.Context, s *store.Store, runID string) (Trace, error) {
+// Build reads one run and returns its trace. secrets are masked in error text
+// in addition to the built-in key and bearer patterns.
+func Build(ctx context.Context, s *store.Store, runID string, secrets ...string) (Trace, error) {
 	run, err := s.Run(ctx, runID)
 	if err != nil {
 		return Trace{}, err
@@ -95,7 +97,7 @@ func Build(ctx context.Context, s *store.Store, runID string) (Trace, error) {
 	if len(events) == 0 {
 		return Trace{}, fmt.Errorf("run %s has no events", runID)
 	}
-	b := builder{run: run, summary: Summary{RunID: run.ID, Scenario: run.Scenario, Provider: run.Provider, Model: run.Model,
+	b := builder{run: run, secrets: secrets, summary: Summary{RunID: run.ID, Scenario: run.Scenario, Provider: run.Provider, Model: run.Model,
 		Principal: run.PrincipalID, WorldID: run.WorldID, Status: run.Status, Events: len(events)}}
 	b.root = b.span("run", events[0])
 	b.root.Attributes = map[string]any{"run.id": run.ID, "world.id": run.WorldID, "scenario": run.Scenario,
@@ -159,6 +161,7 @@ func roundMS(value float64) float64 {
 
 type builder struct {
 	run         store.Run
+	secrets     []string
 	root        *Span
 	current     *Span
 	lastModel   *Span
@@ -270,6 +273,9 @@ func (b *builder) add(event store.Event) error {
 			span.Attributes["simulated_latency_ms"] = latency
 			b.summary.SimulatedLatencyMS += latency
 		}
+		if kind, ok := attributes["type"].(string); ok && kind != "" {
+			span.Attributes["fault.type"] = kind
+		}
 		b.summary.Faults++
 		b.note(span, event, "fault.injected", attributes)
 	case "chaos.actor_mutation":
@@ -277,7 +283,16 @@ func (b *builder) add(event store.Event) error {
 		if err != nil {
 			return err
 		}
-		b.note(span, event, "chaos.actor_mutation", pick(payload, "rule_id", "operation_id", "status"))
+		attributes := pick(payload, "rule_id", "operation_id", "status")
+		if mutation, ok := payload["mutation"].(map[string]any); ok {
+			for key, value := range mutation {
+				switch value.(type) {
+				case string, json.Number, bool:
+					attributes["mutation."+key] = scalar(value)
+				}
+			}
+		}
+		b.note(span, event, "chaos.actor_mutation", attributes)
 	case "retry":
 		span, err := b.tool()
 		if err != nil {
@@ -308,11 +323,11 @@ func (b *builder) add(event store.Event) error {
 		case kind == "provider" && b.lastModel != nil:
 			b.lastModel.Status = "error"
 			b.lastModel.Attributes["error.type"] = "provider"
-			b.lastModel.Attributes["error.message"] = message(payload)
+			b.lastModel.Attributes["error.message"] = b.message(payload)
 			b.summary.Errors++
 		default:
 			b.summary.Errors++
-			b.note(b.root, event, "error", map[string]any{"error.type": kind, "error.message": message(payload)})
+			b.note(b.root, event, "error", map[string]any{"error.type": kind, "error.message": b.message(payload)})
 		}
 	case "tool.response":
 		span, err := b.tool()
@@ -328,10 +343,11 @@ func (b *builder) add(event store.Event) error {
 		span.Status = "ok"
 		if status < 200 || status >= 300 {
 			span.Status = "error"
-			span.Attributes["error.type"] = errorType(status, span.Attributes["authorization.denied"] == true)
+			span.Attributes["error.type"] = b.errorType(span, status)
 			b.summary.FailedToolCalls++
 		}
 		delete(span.Attributes, "authorization.denied")
+		delete(span.Attributes, "fault.type")
 		if b.checkpoints {
 			span.Attributes["checkpoint"] = true
 		}
@@ -346,6 +362,16 @@ func (b *builder) tool() (*Span, error) {
 		return nil, fmt.Errorf("tool event outside a tool call")
 	}
 	return b.current, nil
+}
+
+func (b *builder) errorType(span *Span, status int) string {
+	if span.Attributes["authorization.denied"] == true {
+		return "authorization_denied"
+	}
+	if fault, ok := span.Attributes["fault.type"].(string); ok && fault == "permission_revocation" {
+		return fault
+	}
+	return errorType(status, false)
 }
 
 func errorType(status int, denied bool) string {
@@ -364,9 +390,9 @@ func errorType(status int, denied bool) string {
 	return "unexpected_status"
 }
 
-func message(payload map[string]any) string {
+func (b *builder) message(payload map[string]any) string {
 	text, _ := payload["message"].(string)
-	return redact.String(text)
+	return redact.String(text, b.secrets...)
 }
 
 func pick(payload map[string]any, keys ...string) map[string]any {

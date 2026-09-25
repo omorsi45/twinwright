@@ -10,6 +10,6 @@ Span and trace IDs are hashes of the run ID and the starting event sequence, so 
 
 `inspect` now leads with that summary, using a struct so the key is not sorted under the raw events. `trace --format otlp` writes one OTLP JSON document. A fork links to the parent root span, whose ID is the same hash the parent trace uses, so the parent does not have to be loaded. The document has not been delivered to a collector here.
 
-Provider failures used to store the raw HTTP body. The OpenAI adapter now runs that text, and the error returned to the runner, through a redactor that masks the configured API key, `sk-` keys, and bearer tokens. `trace` applies the same redactor to error messages already in a ledger. The redactor does not try to detect every secret shape.
+Provider failures used to store the raw HTTP body. The OpenAI adapter now runs that text, and the error returned to the runner, through a redactor that masks the configured API key, `sk-` keys, and bearer tokens. `trace` and `inspect` apply the same redactor to error messages already in a ledger, and they also mask `OPENAI_API_KEY` when that variable is set. The redactor does not try to detect every secret shape. A simulated permission revocation is labeled `permission_revocation` rather than a generic client error, and an actor mutation keeps the scalar fields of the write it performed.
 
 There is no metrics pipeline, no sampling, and no UI. Tool time is local transaction time. Model time includes a network round trip only for a live provider, and no live run has been verified.

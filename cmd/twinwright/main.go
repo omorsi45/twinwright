@@ -581,7 +581,7 @@ func runCLI(args []string, out io.Writer) error {
 			return err
 		}
 		defer s.Close()
-		built, err := trace.Build(ctx, s, args[1])
+		built, err := trace.Build(ctx, s, args[1], configuredSecrets()...)
 		if err != nil {
 			return err
 		}
@@ -633,7 +633,7 @@ func runCLI(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		built, err := trace.Build(ctx, s, run.ID)
+		built, err := trace.Build(ctx, s, run.ID, configuredSecrets()...)
 		if err != nil {
 			return err
 		}
@@ -743,6 +743,13 @@ func addSecurity(ctx context.Context, result map[string]any, s *store.Store, run
 	return nil
 }
 func emit(out io.Writer, value any) error { return json.NewEncoder(out).Encode(value) }
+
+func configuredSecrets() []string {
+	if key := os.Getenv("OPENAI_API_KEY"); key != "" {
+		return []string{key}
+	}
+	return nil
+}
 
 // inspection keeps summary first. A map would sort keys and bury it under the raw ledger.
 type inspection struct {
