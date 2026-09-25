@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -257,5 +258,168 @@ func TestVerifyPreservesRecordedNumberRepresentation(t *testing.T) {
 	}
 	if !report.Verified {
 		t.Fatalf("unchanged numeric run diverged: %+v", report)
+	}
+}
+
+type companyProvider struct{ scenario string }
+
+func (p companyProvider) Next(_ context.Context, _ string, history []agent.Message, _ []compiler.Operation) (agent.Message, error) {
+	tools := []agent.Message{}
+	for _, message := range history {
+		if message.Role == "tool" {
+			tools = append(tools, message)
+		}
+	}
+	call := func(id, operation string, args map[string]any) (agent.Message, error) {
+		return agent.Message{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: id, OperationID: operation, Arguments: args}}}, nil
+	}
+	switch len(tools) {
+	case 0:
+		return call("company-note", "crmAddAccountNote", map[string]any{"account_id": "A-104", "body": "Reviewed the billing result."})
+	case 1:
+		if p.scenario == "company-incident" {
+			return call("company-issue", "ticketCreateIssue", map[string]any{"project_id": "PROJ-ENG", "account_id": "A-104", "title": "Billing retry incident", "priority": "high"})
+		}
+	case 2:
+		if p.scenario == "company-incident" {
+			var issue struct {
+				ID string `json:"id"`
+			}
+			if err := json.Unmarshal([]byte(tools[1].Content), &issue); err != nil {
+				return agent.Message{}, err
+			}
+			return call("company-comment", "ticketAddComment", map[string]any{"issue_id": issue.ID, "body": "Investigating retry worker."})
+		}
+	case 3:
+		if p.scenario == "company-incident" {
+			return call("company-message", "messagePostMessage", map[string]any{"channel_id": "CH-SUPPORT", "body": "Incident ticket is open."})
+		}
+	}
+	return agent.Message{Role: "assistant", Content: "Review complete."}, nil
+}
+
+func completedCompanyRun(t *testing.T, scenario string) (*store.Store, store.Run, compiler.Manifest) {
+	t.Helper()
+	ctx := context.Background()
+	root := filepath.Join("..", "..", "examples", "company")
+	spec, err := os.ReadFile(filepath.Join(root, "openapi.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bindings, err := os.ReadFile(filepath.Join(root, "bindings.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := compiler.Compile(spec, bindings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := store.Open(filepath.Join(t.TempDir(), "company.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { source.Close() })
+	world, err := source.SeedScenario(ctx, 42, manifest.Digest, scenario)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := source.CreateRun(ctx, world.ID, scenario, "scripted-test", "fixture-v1", "Review C-104 billing and incident signals.", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := agent.Runner{Store: source, Dispatch: &dispatch.Dispatcher{Store: source, Manifest: manifest}, Manifest: manifest, Provider: companyProvider{scenario}}
+	done, err := runner.Execute(ctx, run.ID, 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done.Status != "completed" {
+		t.Fatalf("run status=%s", done.Status)
+	}
+	return source, done, manifest
+}
+
+func TestVerifyCompanyScenariosPreserveSource(t *testing.T) {
+	for _, scenario := range []string{"company-incident", "company-routine", "company-no-duplicate"} {
+		t.Run(scenario, func(t *testing.T) {
+			ctx := context.Background()
+			source, run, manifest := completedCompanyRun(t, scenario)
+			before, err := source.Events(ctx, run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var notesBefore int
+			if err = source.DB.QueryRowContext(ctx, "SELECT count(*) FROM crm_notes WHERE world_id=?", run.WorldID).Scan(&notesBefore); err != nil {
+				t.Fatal(err)
+			}
+			report, err := Verify(ctx, source, run.ID, manifest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !report.Verified || report.ModelTurns == 0 || report.ToolCalls == 0 {
+				t.Fatalf("report=%+v", report)
+			}
+			after, err := source.Events(ctx, run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var notesAfter int
+			if err = source.DB.QueryRowContext(ctx, "SELECT count(*) FROM crm_notes WHERE world_id=?", run.WorldID).Scan(&notesAfter); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(before, after) || notesBefore != notesAfter {
+				t.Fatalf("source changed during replay: events=%d/%d notes=%d/%d", len(before), len(after), notesBefore, notesAfter)
+			}
+		})
+	}
+}
+
+func TestVerifyDetectsTamperedCompanyTables(t *testing.T) {
+	for _, tc := range []struct{ table, update string }{
+		{"subscriptions", "UPDATE subscriptions SET plan='tampered' WHERE world_id=?"},
+		{"crm_accounts", "UPDATE crm_accounts SET status='tampered' WHERE world_id=?"},
+		{"crm_contacts", "UPDATE crm_contacts SET name='tampered' WHERE world_id=?"},
+		{"crm_notes", "UPDATE crm_notes SET body='tampered' WHERE world_id=?"},
+		{"ticket_projects", "UPDATE ticket_projects SET name='tampered' WHERE world_id=?"},
+		{"ticket_issues", "UPDATE ticket_issues SET title='tampered' WHERE world_id=?"},
+		{"ticket_comments", "UPDATE ticket_comments SET body='tampered' WHERE world_id=?"},
+		{"message_workspaces", "UPDATE message_workspaces SET name='tampered' WHERE world_id=?"},
+		{"message_channels", "UPDATE message_channels SET name='tampered' WHERE world_id=?"},
+		{"message_members", "UPDATE message_members SET principal_id='tampered' WHERE world_id=?"},
+		{"message_messages", "UPDATE message_messages SET body='tampered' WHERE world_id=?"},
+	} {
+		t.Run(tc.table, func(t *testing.T) {
+			ctx := context.Background()
+			source, run, manifest := completedCompanyRun(t, "company-incident")
+			result, err := source.DB.ExecContext(ctx, tc.update, run.WorldID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			changed, err := result.RowsAffected()
+			if err != nil || changed == 0 {
+				t.Fatalf("tamper changed %d rows: %v", changed, err)
+			}
+			report, err := Verify(ctx, source, run.ID, manifest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if report.Verified || report.Divergence != tc.table+" state differs" {
+				t.Fatalf("tampered %s accepted: %+v", tc.table, report)
+			}
+		})
+	}
+}
+
+func TestVerifyBillingRunIgnoresCompanyTables(t *testing.T) {
+	ctx := context.Background()
+	source, run, manifest := completedRun(t)
+	if _, err := source.DB.ExecContext(ctx, "INSERT INTO crm_accounts(world_id,id,customer_id,status,representative_id) VALUES(?,?,?,?,?)", run.WorldID, "A-extra", "C-104", "active", "REP-1"); err != nil {
+		t.Fatal(err)
+	}
+	report, err := Verify(ctx, source, run.ID, manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Verified {
+		t.Fatalf("billing replay included company table: %+v", report)
 	}
 }
