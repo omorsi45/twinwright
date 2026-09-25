@@ -63,8 +63,13 @@ func runCLI(args []string, out io.Writer) error {
 		}
 		return emit(out, map[string]any{"digest": manifest.Digest, "operations": len(manifest.Operations), "manifest_path": *outputPath})
 	case "run":
-		if len(args) < 2 || args[1] != "duplicate-charge" {
-			return fmt.Errorf("only the duplicate-charge scenario is available")
+		if len(args) < 2 {
+			return fmt.Errorf("usage: twinwright run <scenario> [options]")
+		}
+		scenario := args[1]
+		task, err := scenarioTask(scenario)
+		if err != nil {
+			return err
 		}
 		fs := flag.NewFlagSet("run", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
@@ -86,7 +91,7 @@ func runCLI(args []string, out io.Writer) error {
 			return fmt.Errorf("unknown fault operation %q", *fault)
 		}
 		*model = resolveRunModel(*providerName, *model)
-		provider, err := selectProvider(*providerName, *model)
+		provider, err := selectProvider(*providerName, *model, scenario)
 		if err != nil {
 			return err
 		}
@@ -95,12 +100,11 @@ func runCLI(args []string, out io.Writer) error {
 			return err
 		}
 		defer s.Close()
-		world, err := s.Seed(ctx, *seed, manifest.Digest)
+		world, err := s.SeedScenario(ctx, *seed, manifest.Digest, scenario)
 		if err != nil {
 			return err
 		}
-		task := "Customer C-104 says they were charged twice. Investigate the account and refund only the duplicate charge if appropriate."
-		run, err := s.CreateRun(ctx, world.ID, "duplicate-charge", *providerName, *model, task, *fault)
+		run, err := s.CreateRun(ctx, world.ID, scenario, *providerName, *model, task, *fault)
 		if err != nil {
 			return err
 		}
@@ -151,7 +155,7 @@ func runCLI(args []string, out io.Writer) error {
 		if *model != "" && *model != run.Model {
 			return fmt.Errorf("model mismatch: run uses %s", run.Model)
 		}
-		provider, err := selectProvider(run.Provider, run.Model)
+		provider, err := selectProvider(run.Provider, run.Model, run.Scenario)
 		if err != nil {
 			return err
 		}
@@ -215,7 +219,7 @@ func runCLI(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		report, err := eval.DuplicateCharge(ctx, s, run.WorldID)
+		report, err := eval.Evaluate(ctx, s, run.WorldID, run.Scenario)
 		if err != nil {
 			return err
 		}
@@ -252,9 +256,12 @@ func resolveRunModel(agentName, model string) string {
 		return model
 	}
 }
-func selectProvider(name, model string) (agent.Provider, error) {
+func selectProvider(name, model, scenario string) (agent.Provider, error) {
 	switch name {
 	case "scripted":
+		if scenario != "duplicate-charge" {
+			return agent.CompanyScriptedProvider{Scenario: scenario}, nil
+		}
 		return agent.ScriptedProvider{}, nil
 	case "openai":
 		if os.Getenv("OPENAI_API_KEY") == "" {
@@ -269,10 +276,25 @@ func selectProvider(name, model string) (agent.Provider, error) {
 	}
 }
 func emitResult(ctx context.Context, out io.Writer, s *store.Store, run store.Run) error {
-	report, err := eval.DuplicateCharge(ctx, s, run.WorldID)
+	report, err := eval.Evaluate(ctx, s, run.WorldID, run.Scenario)
 	if err != nil {
 		return err
 	}
 	return emit(out, map[string]any{"run": run, "evaluation": report})
 }
 func emit(out io.Writer, value any) error { return json.NewEncoder(out).Encode(value) }
+
+func scenarioTask(scenario string) (string, error) {
+	switch scenario {
+	case "duplicate-charge":
+		return "Customer C-104 says they were charged twice. Investigate the account and refund only the duplicate charge if appropriate.", nil
+	case "company-incident":
+		return "Investigate C-104 across billing and CRM. Refund only a duplicate charge. Record a CRM resolution note, track the software incident in ticketing, and notify the support channel.", nil
+	case "company-routine":
+		return "Investigate C-104 across billing and CRM. Refund only a duplicate charge, record a CRM resolution note, and escalate only if there is software incident evidence.", nil
+	case "company-no-duplicate":
+		return "Investigate C-104 across billing and CRM. Refund only if a duplicate charge exists, record the finding in CRM, and escalate only if there is software incident evidence.", nil
+	default:
+		return "", fmt.Errorf("unknown scenario %q", scenario)
+	}
+}
