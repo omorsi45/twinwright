@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"twinwright/internal/agent"
+	"twinwright/internal/assertion"
 	"twinwright/internal/authz"
 	"twinwright/internal/behavior"
 	"twinwright/internal/chaos"
@@ -440,6 +441,60 @@ func runCLI(args []string, out io.Writer) error {
 		}
 		if !report.Verified {
 			return fmt.Errorf("replay divergence: %s", report.Divergence)
+		}
+		return nil
+	case "evaluate":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: twinwright evaluate <run-id> --assertions path [--manifest path] [--db path]")
+		}
+		fs := flag.NewFlagSet("evaluate", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		manifestPath := fs.String("manifest", "twinwright.manifest.json", "compiled manifest")
+		dbPath := fs.String("db", "twinwright.db", "SQLite world database")
+		assertionsPath := fs.String("assertions", "", "assertion YAML file")
+		if err := fs.Parse(args[2:]); err != nil {
+			return err
+		}
+		if *assertionsPath == "" {
+			return fmt.Errorf("evaluate requires --assertions")
+		}
+		manifest, err := readManifest(*manifestPath)
+		if err != nil {
+			return err
+		}
+		raw, err := os.ReadFile(*assertionsPath)
+		if err != nil {
+			return err
+		}
+		set, err := assertion.Parse(raw, manifest, assertion.Builtins())
+		if err != nil {
+			return err
+		}
+		s, err := store.OpenReadOnly(*dbPath)
+		if err != nil {
+			return err
+		}
+		defer s.Close()
+		run, err := s.Run(ctx, args[1])
+		if err != nil {
+			return err
+		}
+		var worldDigest string
+		if err := s.DB.QueryRowContext(ctx, "SELECT digest FROM worlds WHERE id=?", run.WorldID).Scan(&worldDigest); err != nil {
+			return err
+		}
+		if worldDigest != manifest.Digest {
+			return fmt.Errorf("manifest mismatch for run %s", run.ID)
+		}
+		report, err := assertion.Check(ctx, s, run.ID, set)
+		if err != nil {
+			return err
+		}
+		if err := emit(out, map[string]any{"run_id": run.ID, "assertions": report}); err != nil {
+			return err
+		}
+		if !report.Passed {
+			return fmt.Errorf("assertions failed for run %s", run.ID)
 		}
 		return nil
 	case "inspect":

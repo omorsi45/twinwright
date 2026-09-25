@@ -571,6 +571,84 @@ func TestSecurityScenarioFromCLI(t *testing.T) {
 	}
 }
 
+func TestEvaluateAssertionsFromCLI(t *testing.T) {
+	root := filepath.Join("..", "..", "examples")
+	dir := t.TempDir()
+	manifest, billing, db := filepath.Join(dir, "company.json"), filepath.Join(dir, "billing.json"), filepath.Join(dir, "world.db")
+	assertions := filepath.Join(root, "assertions", "prompt-injection-ticket.yaml")
+	must := func(args ...string) *bytes.Buffer {
+		t.Helper()
+		var out bytes.Buffer
+		if err := runCLI(args, &out); err != nil {
+			t.Fatalf("%v: %v", args, err)
+		}
+		return &out
+	}
+	runID := func(out *bytes.Buffer) string {
+		t.Helper()
+		var result struct {
+			Run struct {
+				ID string `json:"id"`
+			} `json:"run"`
+		}
+		if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		return result.Run.ID
+	}
+	must("build", filepath.Join(root, "company", "openapi.yaml"), "--bindings", filepath.Join(root, "company", "bindings.yaml"), "--out", manifest)
+	must("build", filepath.Join(root, "billing", "openapi.yaml"), "--out", billing)
+
+	missing := filepath.Join(dir, "missing.db")
+	if err := runCLI([]string{"evaluate", "R-x", "--assertions", assertions, "--manifest", manifest, "--db", missing}, &bytes.Buffer{}); err == nil {
+		t.Fatal("missing database accepted")
+	}
+	if _, err := os.Stat(missing); !os.IsNotExist(err) {
+		t.Fatalf("evaluate created a database: %v", err)
+	}
+
+	secure := runID(must("run", "prompt-injection-ticket", "--agent", "scripted", "--manifest", manifest, "--db", db, "--auth", filepath.Join(root, "security", "support-policy.yaml")))
+	var report struct {
+		RunID      string `json:"run_id"`
+		Assertions struct {
+			Passed  bool `json:"passed"`
+			Results []struct {
+				ID     string `json:"id"`
+				Passed bool   `json:"passed"`
+			} `json:"results"`
+		} `json:"assertions"`
+	}
+	if err := json.Unmarshal(must("evaluate", secure, "--assertions", assertions, "--manifest", manifest, "--db", db).Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.RunID != secure || !report.Assertions.Passed || len(report.Assertions.Results) != 7 {
+		t.Fatalf("report=%+v", report)
+	}
+
+	open := runID(must("run", "prompt-injection-ticket", "--agent", "scripted", "--manifest", manifest, "--db", db, "--auth", filepath.Join(root, "security", "overprivileged-policy.yaml")))
+	var out bytes.Buffer
+	if err := runCLI([]string{"evaluate", open, "--assertions", assertions, "--manifest", manifest, "--db", db}, &out); err == nil || !strings.Contains(err.Error(), "assertions failed") {
+		t.Fatalf("failed assertions exited cleanly: %v", err)
+	}
+	if !strings.Contains(out.String(), `"passed":false`) {
+		t.Fatalf("failure report not emitted: %s", out.String())
+	}
+
+	invalid := filepath.Join(dir, "invalid.yaml")
+	if err := os.WriteFile(invalid, []byte("version: 1\nassertions: [{id: a, type: row_count, table: payroll, equals: 0}]\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := runCLI([]string{"evaluate", secure, "--assertions", invalid, "--manifest", manifest, "--db", db}, &bytes.Buffer{}); err == nil {
+		t.Fatal("invalid assertions accepted")
+	}
+	if err := runCLI([]string{"evaluate", secure, "--assertions", filepath.Join(root, "assertions", "duplicate-charge.yaml"), "--manifest", billing, "--db", db}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "manifest mismatch") {
+		t.Fatalf("manifest mismatch accepted: %v", err)
+	}
+	if err := runCLI([]string{"evaluate", secure, "--manifest", manifest, "--db", db}, &bytes.Buffer{}); err == nil {
+		t.Fatal("missing --assertions accepted")
+	}
+}
+
 func TestCompanyScenariosFromCLI(t *testing.T) {
 	root := filepath.Join("..", "..", "examples", "company")
 	for _, scenario := range []string{"company-incident", "company-routine", "company-no-duplicate"} {
