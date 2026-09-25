@@ -153,6 +153,55 @@ func TestCreateForkPreservesParentAndPriorResults(t *testing.T) {
 	}
 }
 
+func TestCreateRejectsTamperedModelRequestAfterRelisting(t *testing.T) {
+	ctx := context.Background()
+	source, destination, parent, manifest := completedBilling(t)
+	events, err := source.Events(ctx, parent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var request store.Event
+	for _, event := range events {
+		if event.Type == "model.request" {
+			request = event
+			break
+		}
+	}
+	if request.Seq == 0 {
+		t.Fatal("model request missing")
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(request.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	payload["task"] = "tampered task"
+	changed, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := destination.DB.ExecContext(ctx, "UPDATE events SET payload=? WHERE run_id=? AND seq=?", string(changed), parent.ID, request.Seq); err != nil {
+		t.Fatal(err)
+	}
+	points, err := checkpoint.List(ctx, source, parent.ID, manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected, err := checkpoint.Select(points, request.Seq+1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Create(ctx, source, destination, selected, manifest, Options{}); err == nil {
+		t.Fatal("tampered model request accepted")
+	}
+	var children int
+	if err := destination.DB.QueryRowContext(ctx, "SELECT count(*) FROM fork_lineage").Scan(&children); err != nil {
+		t.Fatal(err)
+	}
+	if children != 0 {
+		t.Fatalf("created %d child after tampered request", children)
+	}
+}
+
 func refundAmount(t *testing.T, s *store.Store, worldID string) int64 {
 	t.Helper()
 	var amount int64

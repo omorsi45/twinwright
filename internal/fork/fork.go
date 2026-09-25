@@ -26,26 +26,42 @@ type Result struct {
 	Checkpoint checkpoint.Checkpoint `json:"checkpoint"`
 }
 
+// ValidateOptions checks a fork's future execution settings without writing.
+func ValidateOptions(parent store.Run, manifest compiler.Manifest, options Options) error {
+	if options.FaultOperation != nil && *options.FaultOperation != "" && manifest.Operation(*options.FaultOperation) == nil {
+		return fmt.Errorf("unknown fault operation %q", *options.FaultOperation)
+	}
+	if options.Provider != "" && options.Provider != "scripted" && options.Provider != "openai" {
+		return fmt.Errorf("unsupported fork provider %q", options.Provider)
+	}
+	if options.Provider != "" && options.Provider != parent.Provider && options.Model == "" {
+		return fmt.Errorf("changing fork provider requires an explicit model")
+	}
+	provider, model := parent.Provider, parent.Model
+	if options.Provider != "" {
+		provider = options.Provider
+	}
+	if options.Model != "" {
+		model = options.Model
+	}
+	if provider == "" || model == "" {
+		return fmt.Errorf("fork provider and model are required")
+	}
+	return nil
+}
+
 // Create reconstructs the chosen prefix, then writes an isolated child atomically.
 // sourceReadOnly and destination must refer to the same database file.
 func Create(ctx context.Context, sourceReadOnly, destination *store.Store, selected checkpoint.Checkpoint, manifest compiler.Manifest, options Options) (Result, error) {
 	if selected.FormatVersion != checkpoint.FormatVersion || selected.ManifestDigest != manifest.Digest {
 		return Result{}, fmt.Errorf("checkpoint format or manifest mismatch")
 	}
-	if options.FaultOperation != nil && *options.FaultOperation != "" && manifest.Operation(*options.FaultOperation) == nil {
-		return Result{}, fmt.Errorf("unknown fault operation %q", *options.FaultOperation)
-	}
 	parent, err := sourceReadOnly.Run(ctx, selected.RunID)
 	if err != nil {
 		return Result{}, err
 	}
-	if options.Provider != "" {
-		if options.Provider != "scripted" && options.Provider != "openai" {
-			return Result{}, fmt.Errorf("unsupported fork provider %q", options.Provider)
-		}
-		if options.Provider != parent.Provider && options.Model == "" {
-			return Result{}, fmt.Errorf("changing fork provider requires an explicit model")
-		}
+	if err := ValidateOptions(parent, manifest, options); err != nil {
+		return Result{}, err
 	}
 	originalEvents, err := sourceReadOnly.Events(ctx, parent.ID)
 	if err != nil {

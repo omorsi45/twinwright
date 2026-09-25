@@ -48,7 +48,7 @@ func checkpointFixture(t *testing.T) (*store.Store, string, compiler.Manifest) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.StartModelCall(ctx, run.ID, map[string]any{"task": "task"}); err != nil {
+	if err := s.StartModelCall(ctx, run.ID, map[string]any{"task": run.Task, "provider": run.Provider, "model": run.Model, "history": []agent.Message{}, "operations": manifest.Operations}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.SaveTurn(ctx, run.ID, 1, string(transcript), message); err != nil {

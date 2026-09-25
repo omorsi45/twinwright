@@ -64,9 +64,21 @@ func Reconstruct(ctx context.Context, source *store.Store, runID string, selecte
 		event := events[i]
 		switch event.Type {
 		case "model.request":
-			request, err := decodePayload(event.Payload)
+			current, err := target.Run(ctx, runID)
 			if err != nil {
 				return nil, store.Run{}, err
+			}
+			var requestHistory []agent.Message
+			if err := json.Unmarshal([]byte(current.Transcript), &requestHistory); err != nil {
+				return nil, store.Run{}, err
+			}
+			request := map[string]any{"task": current.Task, "provider": current.Provider, "model": current.Model, "history": requestHistory, "operations": manifest.Operations}
+			encoded, err := json.Marshal(request)
+			if err != nil {
+				return nil, store.Run{}, err
+			}
+			if !equalPayload(event.Payload, encoded) {
+				return nil, store.Run{}, fmt.Errorf("model request differs from reconstructed context at event %d", event.Seq)
 			}
 			if err := target.StartModelCall(ctx, runID, request); err != nil {
 				return nil, store.Run{}, err

@@ -279,6 +279,9 @@ func runCLI(args []string, out io.Writer) error {
 				options.FaultOperation = fault
 			}
 		})
+		if err := fork.ValidateOptions(parent, manifest, options); err != nil {
+			return err
+		}
 		var provider agent.Provider
 		if *steps > 0 {
 			providerNameForRun, modelForRun := parent.Provider, parent.Model
@@ -292,6 +295,13 @@ func runCLI(args []string, out io.Writer) error {
 			if err != nil {
 				return err
 			}
+		}
+		rebuilt, _, err := checkpoint.Reconstruct(ctx, source, parent.ID, selected, manifest)
+		if err != nil {
+			return err
+		}
+		if err := rebuilt.Close(); err != nil {
+			return err
 		}
 		destination, err := store.Open(*dbPath)
 		if err != nil {

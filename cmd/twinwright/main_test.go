@@ -584,6 +584,14 @@ func TestCLIForksAndInspectsLineage(t *testing.T) {
 	if comparison["parent_run_id"] != parent.Run.ID || comparison["child_run_id"] != childID {
 		t.Fatalf("comparison=%s", compared.String())
 	}
+	var replayed bytes.Buffer
+	if err := runCLI([]string{"replay", childID, "--manifest", manifest, "--db", db}, &replayed); err != nil {
+		t.Fatal(err)
+	}
+	var replayReport map[string]any
+	if err := json.Unmarshal(replayed.Bytes(), &replayReport); err != nil || replayReport["verified"] != true {
+		t.Fatalf("fork replay=%s err=%v", replayed.String(), err)
+	}
 	if err := runCLI([]string{"fork", parent.Run.ID, "--at-event", "4", "--manifest", manifest, "--db", db}, &bytes.Buffer{}); err == nil {
 		t.Fatal("mid-tool event accepted")
 	}
@@ -607,5 +615,101 @@ func TestCLIForksAndInspectsLineage(t *testing.T) {
 	}
 	if after != before {
 		t.Fatalf("invalid immediate continuation created a child: before=%d after=%d", before, after)
+	}
+}
+
+func TestCLIReplayLegacyDatabaseWithoutLineageTable(t *testing.T) {
+	dir := t.TempDir()
+	manifest := filepath.Join(dir, "manifest.json")
+	db := filepath.Join(dir, "legacy.db")
+	root := filepath.Join("..", "..", "examples", "billing")
+	if err := runCLI([]string{"build", filepath.Join(root, "openapi.yaml"), "--out", manifest}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	var started bytes.Buffer
+	if err := runCLI([]string{"run", "duplicate-charge", "--agent", "scripted", "--manifest", manifest, "--db", db, "--steps", "20"}, &started); err != nil {
+		t.Fatal(err)
+	}
+	var body struct {
+		Run struct {
+			ID string `json:"id"`
+		} `json:"run"`
+	}
+	if err := json.Unmarshal(started.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	s, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec("DROP TABLE fork_lineage"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec("DROP TABLE checkpoints"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var replayed bytes.Buffer
+	if err := runCLI([]string{"replay", body.Run.ID, "--manifest", manifest, "--db", db}, &replayed); err != nil {
+		t.Fatal(err)
+	}
+	var report map[string]any
+	if err := json.Unmarshal(replayed.Bytes(), &report); err != nil || report["verified"] != true {
+		t.Fatalf("legacy replay=%s err=%v", replayed.String(), err)
+	}
+}
+
+func TestCLIFailedForkDoesNotMigrateLegacyDatabase(t *testing.T) {
+	dir := t.TempDir()
+	manifest := filepath.Join(dir, "manifest.json")
+	db := filepath.Join(dir, "legacy.db")
+	root := filepath.Join("..", "..", "examples", "billing")
+	if err := runCLI([]string{"build", filepath.Join(root, "openapi.yaml"), "--out", manifest}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	var started bytes.Buffer
+	if err := runCLI([]string{"run", "duplicate-charge", "--agent", "scripted", "--manifest", manifest, "--db", db, "--steps", "20"}, &started); err != nil {
+		t.Fatal(err)
+	}
+	var body struct {
+		Run struct {
+			ID string `json:"id"`
+		} `json:"run"`
+	}
+	if err := json.Unmarshal(started.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	s, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec("DROP TABLE fork_lineage"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec("DROP TABLE checkpoints"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec("UPDATE events SET payload=? WHERE run_id=? AND seq=2", `{"task":"tampered"}`, body.Run.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := runCLI([]string{"fork", body.Run.ID, "--at-event", "3", "--manifest", manifest, "--db", db}, &bytes.Buffer{}); err == nil {
+		t.Fatal("tampered fork accepted")
+	}
+	readonly, err := store.OpenReadOnly(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readonly.Close()
+	var count int
+	if err := readonly.DB.QueryRow("SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('checkpoints','fork_lineage')").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("failed fork created %d lineage tables", count)
 	}
 }

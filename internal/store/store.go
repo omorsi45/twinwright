@@ -286,6 +286,13 @@ func (s *Store) Run(ctx context.Context, id string) (Run, error) {
 
 func (s *Store) Lineage(ctx context.Context, childRunID string) (ForkLineage, error) {
 	var lineage ForkLineage
+	var exists int
+	if err := s.DB.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='fork_lineage'").Scan(&exists); err != nil {
+		return lineage, err
+	}
+	if exists == 0 {
+		return lineage, sql.ErrNoRows
+	}
 	err := s.DB.QueryRowContext(ctx, `SELECT child_run_id,parent_run_id,fork_event_seq,checkpoint_id,format_version,manifest_digest,prefix_digest,parent_provider,parent_model FROM fork_lineage WHERE child_run_id=?`, childRunID).Scan(
 		&lineage.ChildRunID, &lineage.ParentRunID, &lineage.ForkEventSeq, &lineage.CheckpointID, &lineage.FormatVersion, &lineage.ManifestDigest, &lineage.PrefixDigest, &lineage.ParentProvider, &lineage.ParentModel)
 	return lineage, err
