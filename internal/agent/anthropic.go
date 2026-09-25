@@ -34,7 +34,8 @@ func (p AnthropicProvider) Next(ctx context.Context, task string, history []Mess
 		client = &http.Client{Timeout: 90 * time.Second}
 	}
 	messages := []any{map[string]any{"role": "user", "content": task}}
-	for _, m := range history {
+	for i := 0; i < len(history); i++ {
+		m := history[i]
 		switch m.Role {
 		case "assistant":
 			if len(m.RawOutput) > 0 {
@@ -52,7 +53,17 @@ func (p AnthropicProvider) Next(ctx context.Context, task string, history []Mess
 				messages = append(messages, map[string]any{"role": "assistant", "content": content})
 			}
 		case "tool":
-			messages = append(messages, map[string]any{"role": "user", "content": []any{map[string]any{"type": "tool_result", "tool_use_id": m.CallID, "content": m.Content}}})
+			results := []any{}
+			for i < len(history) && history[i].Role == "tool" {
+				block := map[string]any{"type": "tool_result", "tool_use_id": history[i].CallID, "content": history[i].Content}
+				if history[i].Status == 0 || history[i].Status >= 400 {
+					block["is_error"] = true
+				}
+				results = append(results, block)
+				i++
+			}
+			i--
+			messages = append(messages, map[string]any{"role": "user", "content": results})
 		}
 	}
 	tools := []any{}
@@ -70,6 +81,7 @@ func (p AnthropicProvider) Next(ctx context.Context, task string, history []Mess
 	payload := map[string]any{"model": p.Model, "max_tokens": 4096, "system": guidanceFor(ops), "messages": messages}
 	if len(tools) > 0 {
 		payload["tools"] = tools
+		payload["tool_choice"] = map[string]any{"type": "auto", "disable_parallel_tool_use": true}
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {

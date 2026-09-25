@@ -517,6 +517,7 @@ func runCLI(args []string, out io.Writer) error {
 		assertionsPath := fs.String("assertions", "", "assertion YAML file defining success; defaults to the scenario evaluation")
 		trials := fs.Int("trials", 1, "forks per candidate and intervention")
 		steps := fs.Int("steps", 20, "maximum model turns per fork")
+		baseURL := fs.String("base-url", os.Getenv("OPENAI_BASE_URL"), "base URL for openai-compatible")
 		if err := fs.Parse(args[2:]); err != nil {
 			return err
 		}
@@ -553,7 +554,7 @@ func runCLI(args []string, out io.Writer) error {
 		}
 		defer source.Close()
 		analysis, err := counterfactual.Prepare(ctx, source, args[1], manifest, set, judge, counterfactual.Options{Trials: *trials, Steps: *steps, ProviderFor: func(provider, model, scenario string) (agent.Provider, error) {
-			return selectProvider(provider, model, scenario, os.Getenv("OPENAI_BASE_URL"))
+			return selectProvider(provider, model, scenario, *baseURL)
 		}})
 		if err != nil {
 			return err

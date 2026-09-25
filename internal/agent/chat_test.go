@@ -40,6 +40,24 @@ func TestChatCompletionsToolRoundTrip(t *testing.T) {
 	}
 }
 
+func TestChatCompletionsToolAssistantUsesNullContent(t *testing.T) {
+	var saw string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		saw = string(body)
+		w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer server.Close()
+	p := ChatCompletionsProvider{Model: "local", BaseURL: server.URL + "/v1", Client: server.Client()}
+	history := []Message{{Role: "assistant", ToolCalls: []ToolCall{{ID: "call-1", OperationID: "getCharge", Arguments: map[string]any{"id": "CH-1"}}}}, {Role: "tool", CallID: "call-1", Content: `{}`}}
+	if _, err := p.Next(context.Background(), "Inspect", history, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(saw, `"content":null`) || strings.Contains(saw, `"content":""`) {
+		t.Fatalf("tool assistant content should be null: %s", saw)
+	}
+}
+
 func TestChatCompletionsRedactsErrors(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)

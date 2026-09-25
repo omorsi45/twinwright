@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -38,6 +39,34 @@ func TestAnthropicToolRoundTrip(t *testing.T) {
 	second, err := p.Next(context.Background(), "Inspect", []Message{first, {Role: "tool", CallID: "toolu_1", Content: `{"id":"CH-1002"}`}}, ops)
 	if err != nil || second.Content != "Done" || !sawResult {
 		t.Fatalf("second=%+v err=%v", second, err)
+	}
+}
+
+func TestAnthropicCoalescesConsecutiveToolResults(t *testing.T) {
+	var saw string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		saw = string(body)
+		w.Write([]byte(`{"content":[{"type":"text","text":"Done"}]}`))
+	}))
+	defer server.Close()
+	p := AnthropicProvider{APIKey: "anthropic-key", Model: "claude-test", URL: server.URL, Client: server.Client()}
+	history := []Message{
+		{Role: "assistant", RawOutput: []json.RawMessage{[]byte(`{"type":"tool_use","id":"toolu_a","name":"getCharge","input":{"id":"CH-1"}}`), []byte(`{"type":"tool_use","id":"toolu_b","name":"getCharge","input":{"id":"CH-2"}}`)}, ToolCalls: []ToolCall{{ID: "toolu_a", OperationID: "getCharge"}, {ID: "toolu_b", OperationID: "getCharge"}}},
+		{Role: "tool", CallID: "toolu_a", Content: `{"id":"CH-1"}`, Status: 200},
+		{Role: "tool", CallID: "toolu_b", Content: `{"error":"gone"}`, Status: 404},
+	}
+	if _, err := p.Next(context.Background(), "Inspect", history, nil); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(saw, `"role":"user"`) != 2 {
+		t.Fatalf("expected task user plus one coalesced tool user, got %s", saw)
+	}
+	if strings.Count(saw, `"type":"tool_result"`) != 2 || !strings.Contains(saw, `"tool_use_id":"toolu_a"`) || !strings.Contains(saw, `"tool_use_id":"toolu_b"`) {
+		t.Fatalf("missing tool results: %s", saw)
+	}
+	if !strings.Contains(saw, `"is_error":true`) {
+		t.Fatalf("expected is_error on failed tool: %s", saw)
 	}
 }
 

@@ -44,7 +44,11 @@ func (p ChatCompletionsProvider) Next(ctx context.Context, task string, history 
 					}
 					calls = append(calls, map[string]any{"id": call.ID, "type": "function", "function": map[string]any{"name": call.OperationID, "arguments": string(args)}})
 				}
-				messages = append(messages, map[string]any{"role": "assistant", "content": m.Content, "tool_calls": calls})
+				var content any
+				if m.Content != "" {
+					content = m.Content
+				}
+				messages = append(messages, map[string]any{"role": "assistant", "content": content, "tool_calls": calls})
 			} else if m.Content != "" {
 				messages = append(messages, map[string]any{"role": "assistant", "content": m.Content})
 			}
