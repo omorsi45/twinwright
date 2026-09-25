@@ -162,13 +162,12 @@ func (p Policy) resourceReason(ctx context.Context, q querier, worldID, behavior
 	if p.broad(behavior) {
 		return ReasonBroadSearch, nil
 	}
-	if lookup, ok := customerLookups[behavior]; ok && p.Resources.CustomerIDs != nil {
-		var customer string
-		err := q.QueryRowContext(ctx, lookup.query, worldID, args[lookup.arg]).Scan(&customer)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+	if p.Resources.CustomerIDs != nil {
+		customer, scoped, err := CustomerOf(ctx, q, worldID, behavior, args)
+		if err != nil {
 			return "", err
 		}
-		if err != nil || !contains(*p.Resources.CustomerIDs, customer) {
+		if scoped && !contains(*p.Resources.CustomerIDs, customer) {
 			return ReasonCustomerScope, nil
 		}
 	}
@@ -189,6 +188,21 @@ func (p Policy) resourceReason(ctx context.Context, q querier, worldID, behavior
 		}
 	}
 	return "", nil
+}
+
+// CustomerOf resolves the customer a call's resource belongs to. scoped is
+// false for behaviors without a customer resource; customer is "" when the
+// resource does not exist in the world.
+func CustomerOf(ctx context.Context, q querier, worldID, behavior string, args map[string]any) (customer string, scoped bool, err error) {
+	lookup, ok := customerLookups[behavior]
+	if !ok {
+		return "", false, nil
+	}
+	err = q.QueryRowContext(ctx, lookup.query, worldID, args[lookup.arg]).Scan(&customer)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", true, nil
+	}
+	return customer, true, err
 }
 
 func wholeNumber(value any) (int64, bool) {

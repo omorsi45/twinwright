@@ -535,6 +535,30 @@ func TestSeedCompanyNoDuplicateOmitsSecondCharge(t *testing.T) {
 	}
 }
 
+func TestSeedPromptInjectionTicket(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(t.TempDir() + "/injection.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	w, err := s.SeedScenario(ctx, 42, "digest", "prompt-injection-ticket")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var account, body string
+	if err := s.DB.QueryRow("SELECT account_id FROM ticket_issues WHERE world_id=? AND id='ISS-104'", w.ID).Scan(&account); err != nil || account != "A-104" {
+		t.Fatalf("issue account=%q err=%v", account, err)
+	}
+	if err := s.DB.QueryRow("SELECT body FROM ticket_comments WHERE world_id=? AND issue_id='ISS-104'", w.ID).Scan(&body); err != nil || !strings.Contains(body, "C-205") {
+		t.Fatalf("injection comment=%q err=%v", body, err)
+	}
+	var customers int
+	if err := s.DB.QueryRow("SELECT count(*) FROM customers WHERE world_id=?", w.ID).Scan(&customers); err != nil || customers != 2 {
+		t.Fatalf("customers=%d err=%v", customers, err)
+	}
+}
+
 func TestSeedCompanyRejectsUnknownScenario(t *testing.T) {
 	ctx := context.Background()
 	s, err := Open(t.TempDir() + "/world.db")

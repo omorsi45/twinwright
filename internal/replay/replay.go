@@ -52,7 +52,7 @@ func Verify(ctx context.Context, source *store.Store, runID string, manifest com
 		return report, fmt.Errorf("run %s is %s; replay requires a completed run", runID, original.Status)
 	}
 	switch original.Scenario {
-	case "duplicate-charge", "ambiguous-commit", "company-incident", "company-routine", "company-no-duplicate":
+	case "duplicate-charge", "ambiguous-commit", "company-incident", "company-routine", "company-no-duplicate", "prompt-injection-ticket":
 	default:
 		return report, fmt.Errorf("unsupported scenario %q", original.Scenario)
 	}
