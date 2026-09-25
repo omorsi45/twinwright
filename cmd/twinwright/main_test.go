@@ -1217,3 +1217,84 @@ func TestCounterfactualFromCLI(t *testing.T) {
 	}
 	must("replay", security.Candidates[0].Evidence[0].RunID, "--manifest", company, "--db", db)
 }
+
+func TestTraceAndInspectSummaryFromCLI(t *testing.T) {
+	root := filepath.Join("..", "..", "examples", "billing")
+	dir := t.TempDir()
+	manifest, db := filepath.Join(dir, "manifest.json"), filepath.Join(dir, "world.db")
+	var out bytes.Buffer
+	if err := runCLI([]string{"build", filepath.Join(root, "openapi.yaml"), "--out", manifest}, &out); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := runCLI([]string{"run", "duplicate-charge", "--agent", "scripted", "--fault", "listCharges", "--manifest", manifest, "--db", db}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var result struct {
+		Run struct {
+			ID string `json:"id"`
+		} `json:"run"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(dir, "missing.db")
+	if err := runCLI([]string{"trace", result.Run.ID, "--db", missing}, &bytes.Buffer{}); err == nil {
+		t.Fatal("missing database accepted")
+	}
+	if _, err := os.Stat(missing); !os.IsNotExist(err) {
+		t.Fatalf("trace created a database: %v", err)
+	}
+	if err := runCLI([]string{"trace", result.Run.ID, "--format", "yaml", "--db", db}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "unknown trace format") {
+		t.Fatalf("bad format error=%v", err)
+	}
+	out.Reset()
+	if err := runCLI([]string{"trace", result.Run.ID, "--db", db}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var traced struct {
+		TraceID string `json:"trace_id"`
+		Summary struct {
+			ToolCalls       int `json:"tool_calls"`
+			FailedToolCalls int `json:"failed_tool_calls"`
+			Faults          int `json:"faults"`
+			Retries         int `json:"retries"`
+			TokenUsage      struct {
+				Recorded bool `json:"recorded"`
+			} `json:"token_usage"`
+		} `json:"summary"`
+		Root struct {
+			Name string `json:"name"`
+		} `json:"root"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &traced); err != nil {
+		t.Fatal(err)
+	}
+	if len(traced.TraceID) != 32 || traced.Root.Name != "run" || traced.Summary.ToolCalls != 5 || traced.Summary.FailedToolCalls != 1 || traced.Summary.Faults != 1 || traced.Summary.Retries != 1 || traced.Summary.TokenUsage.Recorded {
+		t.Fatalf("trace=%s", out.String())
+	}
+	out.Reset()
+	if err := runCLI([]string{"trace", result.Run.ID, "--format", "text", "--db", db}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "tool.call listCharges status=503 server_error") {
+		t.Fatalf("text=%s", out.String())
+	}
+	out.Reset()
+	if err := runCLI([]string{"trace", result.Run.ID, "--format", "otlp", "--db", db}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), `"traceId"`) || !json.Valid(out.Bytes()) {
+		t.Fatalf("otlp=%s", out.String())
+	}
+	out.Reset()
+	if err := runCLI([]string{"inspect", result.Run.ID, "--db", db}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(out.String(), `{"summary":`) {
+		t.Fatalf("inspect does not lead with the summary: %.120s", out.String())
+	}
+	if !strings.Contains(out.String(), `"events":`) || !strings.Contains(out.String(), `"evaluation":`) {
+		t.Fatalf("inspect lost existing fields: %s", out.String())
+	}
+}
