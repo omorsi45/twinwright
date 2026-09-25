@@ -66,6 +66,13 @@ type ForkLineage struct {
 	AuthReplaced   bool   `json:"auth_replaced"`
 }
 
+// Observation replaces what a fork child saw as one call's tool response.
+type Observation struct {
+	CallID string          `json:"call_id"`
+	Status int             `json:"status"`
+	Body   json.RawMessage `json:"body"`
+}
+
 func Open(path string) (*Store, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -106,6 +113,7 @@ func Open(path string) (*Store, error) {
 		`CREATE TABLE IF NOT EXISTS chaos_hidden_outcomes (run_id TEXT NOT NULL, call_id TEXT NOT NULL, rule_id TEXT NOT NULL, status INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY(run_id,call_id))`,
 		`CREATE TABLE IF NOT EXISTS run_auth (run_id TEXT PRIMARY KEY, policy_json TEXT NOT NULL, digest TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS auth_state (run_id TEXT PRIMARY KEY, call_index INTEGER NOT NULL DEFAULT 0)`,
+		`CREATE TABLE IF NOT EXISTS fork_observations (child_run_id TEXT PRIMARY KEY, call_id TEXT NOT NULL, status INTEGER NOT NULL, body TEXT NOT NULL)`,
 	}
 	for _, stmt := range schema {
 		if _, err = db.Exec(stmt); err != nil {
@@ -456,6 +464,24 @@ func (s *Store) AuthPolicy(ctx context.Context, runID string) ([]byte, string, e
 		return nil, "", err
 	}
 	return []byte(encoded), digest, nil
+}
+
+// ObservationOverride returns sql.ErrNoRows for old databases or forks without an override.
+func (s *Store) ObservationOverride(ctx context.Context, childRunID string) (Observation, error) {
+	var exists int
+	if err := s.DB.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='fork_observations'").Scan(&exists); err != nil {
+		return Observation{}, err
+	}
+	if exists == 0 {
+		return Observation{}, sql.ErrNoRows
+	}
+	var observation Observation
+	var body string
+	if err := s.DB.QueryRowContext(ctx, "SELECT call_id,status,body FROM fork_observations WHERE child_run_id=?", childRunID).Scan(&observation.CallID, &observation.Status, &body); err != nil {
+		return Observation{}, err
+	}
+	observation.Body = json.RawMessage(body)
+	return observation, nil
 }
 
 // AttachChaos initializes policy for a replay run before tool execution.

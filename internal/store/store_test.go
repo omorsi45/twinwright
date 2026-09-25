@@ -183,6 +183,9 @@ func TestReadOnlyLegacyDatabaseHasNoChaosPolicy(t *testing.T) {
 	if _, _, err := s.ChaosPolicy(ctx, "old"); err != sql.ErrNoRows {
 		t.Fatalf("legacy policy error=%v", err)
 	}
+	if _, err := s.ObservationOverride(ctx, "old"); err != sql.ErrNoRows {
+		t.Fatalf("legacy observation override error=%v", err)
+	}
 }
 
 func TestSeedReproducesInitialWorld(t *testing.T) {

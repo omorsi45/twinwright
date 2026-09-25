@@ -24,6 +24,9 @@ type Options struct {
 	// AuthPolicyRaw replaces the inherited authorization policy; the child
 	// then starts at call zero.
 	AuthPolicyRaw []byte
+	// Observation replaces what the child saw as the response of the call
+	// whose tool response is the fork checkpoint. World state is unchanged.
+	Observation *store.Observation
 }
 
 type Result struct {
@@ -87,11 +90,24 @@ func Create(ctx context.Context, sourceReadOnly, destination *store.Store, selec
 		return Result{}, err
 	}
 	initialTip := len(originalEvents)
+	var observation store.Observation
+	var observationEvent map[string]any
+	if options.Observation != nil {
+		if observation, observationEvent, err = prepareObservation(originalEvents, selected, *options.Observation); err != nil {
+			return Result{}, err
+		}
+	}
 	rebuiltStore, rebuilt, err := checkpoint.Reconstruct(ctx, sourceReadOnly, parent.ID, selected, manifest)
 	if err != nil {
 		return Result{}, err
 	}
 	defer rebuiltStore.Close()
+	transcript := rebuilt.Transcript
+	if observationEvent != nil {
+		if transcript, err = applyObservation(transcript, observation); err != nil {
+			return Result{}, err
+		}
+	}
 	provider, model := parent.Provider, parent.Model
 	if options.Provider != "" {
 		provider = options.Provider
@@ -154,13 +170,21 @@ func Create(ctx context.Context, sourceReadOnly, destination *store.Store, selec
 		principal = authPolicy.Principal.ID
 	}
 	child := store.Run{ID: runID, WorldID: worldID, Scenario: parent.Scenario, Provider: provider, Model: model, Task: parent.Task,
-		Status: "paused", Step: rebuilt.Step, Transcript: rebuilt.Transcript, FaultOperation: fault, PrincipalID: principal}
+		Status: "paused", Step: rebuilt.Step, Transcript: transcript, FaultOperation: fault, PrincipalID: principal}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO runs(id,world_id,scenario,provider,model,task,status,step,transcript,fault_operation,fault_consumed,principal_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
 		child.ID, child.WorldID, child.Scenario, child.Provider, child.Model, child.Task, child.Status, child.Step, child.Transcript, child.FaultOperation, consumed, child.PrincipalID); err != nil {
 		return Result{}, err
 	}
 	if err := copyToolResults(ctx, rebuiltStore.DB, tx, parent.ID, child.ID); err != nil {
 		return Result{}, err
+	}
+	if observationEvent != nil {
+		if err := overrideToolResult(ctx, tx, child.ID, observation); err != nil {
+			return Result{}, err
+		}
+		if _, err := tx.ExecContext(ctx, "INSERT INTO fork_observations(child_run_id,call_id,status,body) VALUES(?,?,?,?)", child.ID, observation.CallID, observation.Status, string(observation.Body)); err != nil {
+			return Result{}, err
+		}
 	}
 	if len(options.ChaosPolicyRaw) > 0 {
 		policy, err := chaos.Parse(options.ChaosPolicyRaw, manifest)
@@ -201,10 +225,26 @@ func Create(ctx context.Context, sourceReadOnly, destination *store.Store, selec
 	}); err != nil {
 		return Result{}, err
 	}
+	if observationEvent != nil {
+		if err := store.AppendEventTx(ctx, tx, child.ID, "observation.overridden", observationEvent); err != nil {
+			return Result{}, err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return Result{}, err
 	}
 	return Result{Run: child, World: store.World{ID: worldID, Seed: seed, Digest: digest}, Checkpoint: selected}, nil
+}
+
+func overrideToolResult(ctx context.Context, tx *sql.Tx, runID string, o store.Observation) error {
+	result, err := tx.ExecContext(ctx, "UPDATE tool_results SET status=?,body=? WHERE run_id=? AND call_id=?", o.Status, string(o.Body), runID, o.CallID)
+	if err != nil {
+		return err
+	}
+	if n, err := result.RowsAffected(); err != nil || n != 1 {
+		return fmt.Errorf("observation override found no saved result for call %s", o.CallID)
+	}
+	return nil
 }
 
 func randomID(prefix string) (string, error) {
