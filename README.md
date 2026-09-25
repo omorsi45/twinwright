@@ -5,7 +5,7 @@ Twinwright runs agents against local, stateful simulations of business software.
 ## Requirements
 
 - Go 1.27 or newer
-- An OpenAI API key and model name for live model runs
+- An OpenAI API key for live model runs
 
 No key is needed for the deterministic scripted example. The scripted agent is a test fixture; it is not a model integration.
 
@@ -33,12 +33,14 @@ Replay verifies a completed run by executing its recorded assistant decisions in
 
 Keep the compiled manifest for resume and replay: its digest must match the world used by the run. A run also saves its provider model and uses that model on resume. If execution fails after a run starts, the error includes the run ID so it can be inspected or resumed. Older development databases without the model column are updated when opened.
 
-For a live agent, set `OPENAI_API_KEY` and choose a model:
+For a live agent, set `OPENAI_API_KEY`. The repo defaults to `gpt-6-sol`:
 
 ```powershell
 $env:OPENAI_API_KEY = 'your-key'
-go run ./cmd/twinwright run duplicate-charge --agent openai --model <model-name> --seed 42 --fault listCharges
+go run ./cmd/twinwright run duplicate-charge --agent openai --seed 42 --fault listCharges
 ```
+
+Override the default with `OPENAI_MODEL` or `--model`. Keep your API key outside the repository.
 
 The OpenAI adapter uses the [Responses API](https://developers.openai.com/api/docs/guides/function-calling) with function tools. Live results depend on model behavior and have not been exercised without a key; the adapter is covered by a local HTTP test. The evaluator trusts only SQLite state, never the agent's final message.
 

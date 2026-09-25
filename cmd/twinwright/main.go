@@ -85,9 +85,7 @@ func runCLI(args []string, out io.Writer) error {
 		if *fault != "" && manifest.Operation(*fault) == nil {
 			return fmt.Errorf("unknown fault operation %q", *fault)
 		}
-		if *providerName == "scripted" && *model == "" {
-			*model = "fixture-v1"
-		}
+		*model = resolveRunModel(*providerName, *model)
 		provider, err := selectProvider(*providerName, *model)
 		if err != nil {
 			return err
@@ -241,13 +239,29 @@ func readManifest(path string) (compiler.Manifest, error) {
 	}
 	return m, nil
 }
+func resolveRunModel(agentName, model string) string {
+	if model != "" {
+		return model
+	}
+	switch agentName {
+	case "openai":
+		return "gpt-6-sol"
+	case "scripted":
+		return "fixture-v1"
+	default:
+		return model
+	}
+}
 func selectProvider(name, model string) (agent.Provider, error) {
 	switch name {
 	case "scripted":
 		return agent.ScriptedProvider{}, nil
 	case "openai":
-		if os.Getenv("OPENAI_API_KEY") == "" || model == "" {
-			return nil, fmt.Errorf("OPENAI_API_KEY and --model (or OPENAI_MODEL) are required for openai")
+		if os.Getenv("OPENAI_API_KEY") == "" {
+			return nil, fmt.Errorf("OPENAI_API_KEY is required for openai")
+		}
+		if model == "" {
+			return nil, fmt.Errorf("model is required for openai")
 		}
 		return agent.OpenAIProvider{APIKey: os.Getenv("OPENAI_API_KEY"), Model: model}, nil
 	default:

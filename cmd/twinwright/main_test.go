@@ -226,3 +226,24 @@ func TestCLIReplayMissingDatabaseDoesNotCreateFile(t *testing.T) {
 		t.Fatalf("replay created missing database: %v", err)
 	}
 }
+
+func TestResolveRunModel(t *testing.T) {
+	cases := []struct {
+		name      string
+		agent     string
+		requested string
+		want      string
+	}{
+		{name: "default OpenAI model", agent: "openai", want: "gpt-6-sol"},
+		{name: "OpenAI override", agent: "openai", requested: "custom-model", want: "custom-model"},
+		{name: "scripted fixture", agent: "scripted", want: "fixture-v1"},
+		{name: "scripted override", agent: "scripted", requested: "custom-fixture", want: "custom-fixture"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolveRunModel(tc.agent, tc.requested); got != tc.want {
+				t.Fatalf("resolveRunModel(%q, %q) = %q, want %q", tc.agent, tc.requested, got, tc.want)
+			}
+		})
+	}
+}
