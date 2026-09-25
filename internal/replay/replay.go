@@ -49,7 +49,9 @@ func Verify(ctx context.Context, source *store.Store, runID string, manifest com
 	if original.Status != "completed" {
 		return report, fmt.Errorf("run %s is %s; replay requires a completed run", runID, original.Status)
 	}
-	if original.Scenario != "duplicate-charge" {
+	switch original.Scenario {
+	case "duplicate-charge", "company-incident", "company-routine", "company-no-duplicate":
+	default:
 		return report, fmt.Errorf("unsupported scenario %q", original.Scenario)
 	}
 	var seed int64
@@ -75,7 +77,7 @@ func Verify(ctx context.Context, source *store.Store, runID string, manifest com
 		return report, err
 	}
 	defer target.Close()
-	world, err := target.Seed(ctx, seed, digest)
+	world, err := target.SeedScenario(ctx, seed, digest, original.Scenario)
 	if err != nil {
 		return report, err
 	}
@@ -120,17 +122,34 @@ func Verify(ctx context.Context, source *store.Store, runID string, manifest com
 	if !sameJSON([]byte(original.Transcript), []byte(replayed.Transcript)) {
 		return diverged(report, "final transcript differs"), nil
 	}
-	for _, table := range []struct{ name, columns string }{
-		{"customers", "id,name"},
-		{"invoices", "id,customer_id,amount_cents,subscription_id"},
-		{"charges", "id,invoice_id,amount_cents,refunded_cents,created_at"},
-		{"refunds", "id,charge_id,amount_cents,reason,created_at"},
-	} {
-		left, err := billingRows(ctx, source.DB, table.name, table.columns, original.WorldID)
+	type tableSpec struct{ name, columns, orderBy string }
+	tables := []tableSpec{
+		{"customers", "id,name", "id"},
+		{"invoices", "id,customer_id,amount_cents,subscription_id", "id"},
+		{"charges", "id,invoice_id,amount_cents,refunded_cents,created_at", "id"},
+		{"refunds", "id,charge_id,amount_cents,reason,created_at", "id"},
+	}
+	if original.Scenario != "duplicate-charge" {
+		tables = append(tables, []tableSpec{
+			{"subscriptions", "id,customer_id,status,plan", "id"},
+			{"crm_accounts", "id,customer_id,status,representative_id", "id"},
+			{"crm_contacts", "id,account_id,name,email", "id"},
+			{"crm_notes", "id,account_id,body,created_at", "id"},
+			{"ticket_projects", "id,key,name", "id"},
+			{"ticket_issues", "id,project_id,account_id,title,status,priority", "id"},
+			{"ticket_comments", "id,issue_id,body,created_at", "id"},
+			{"message_workspaces", "id,name", "id"},
+			{"message_channels", "id,workspace_id,name", "id"},
+			{"message_members", "channel_id,principal_id", "channel_id,principal_id"},
+			{"message_messages", "id,channel_id,body,created_at", "id"},
+		}...)
+	}
+	for _, table := range tables {
+		left, err := stateRows(ctx, source.DB, table.name, table.columns, table.orderBy, original.WorldID)
 		if err != nil {
 			return report, err
 		}
-		right, err := billingRows(ctx, target.DB, table.name, table.columns, world.ID)
+		right, err := stateRows(ctx, target.DB, table.name, table.columns, table.orderBy, world.ID)
 		if err != nil {
 			return report, err
 		}
@@ -301,8 +320,8 @@ func compareResults(left, right []savedResult) string {
 	return ""
 }
 
-func billingRows(ctx context.Context, db *sql.DB, table, columns, worldID string) ([][]string, error) {
-	query := fmt.Sprintf("SELECT %s FROM %s WHERE world_id=? ORDER BY id", columns, table)
+func stateRows(ctx context.Context, db *sql.DB, table, columns, orderBy, worldID string) ([][]string, error) {
+	query := fmt.Sprintf("SELECT %s FROM %s WHERE world_id=? ORDER BY %s", columns, table, orderBy)
 	rows, err := db.QueryContext(ctx, query, worldID)
 	if err != nil {
 		return nil, err

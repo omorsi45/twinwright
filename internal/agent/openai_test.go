@@ -121,3 +121,51 @@ func TestOpenAIInvalidJSONErrorIncludesResponseExcerpt(t *testing.T) {
 		t.Fatalf("error=%v", err)
 	}
 }
+
+func TestCompanyToolGuidanceIsSentToModel(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Input []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"input"`
+			Tools []struct {
+				Name        string `json:"name"`
+				Description string `json:"description"`
+			} `json:"tools"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		if len(body.Input) < 2 || !strings.Contains(body.Input[0].Content, "CRM") {
+			t.Errorf("company guidance missing: %+v", body.Input)
+		}
+		for _, tool := range body.Tools {
+			switch tool.Name {
+			case "crmUpdateAccountStatus":
+				if !strings.Contains(tool.Description, "needs_followup") {
+					t.Errorf("CRM status values missing: %+v", tool)
+				}
+			case "ticketCreateIssue":
+				if !strings.Contains(tool.Description, "PROJ-ENG") {
+					t.Errorf("ticket project missing: %+v", tool)
+				}
+			case "messageListChannels":
+				if !strings.Contains(tool.Description, "WS-1") {
+					t.Errorf("workspace missing: %+v", tool)
+				}
+			}
+		}
+		w.Write([]byte(`{"output":[{"type":"message","content":[{"type":"output_text","text":"Done"}]}]}`))
+	}))
+	defer server.Close()
+	p := OpenAIProvider{APIKey: "test-key", Model: "test-model", URL: server.URL, Client: server.Client()}
+	ops := []compiler.Operation{
+		{ID: "crmUpdateAccountStatus", Required: []string{"account_id", "status"}, Properties: map[string]string{"account_id": "string", "status": "string"}},
+		{ID: "ticketCreateIssue", Required: []string{"project_id", "account_id", "title", "priority"}, Properties: map[string]string{"project_id": "string", "account_id": "string", "title": "string", "priority": "string"}},
+		{ID: "messageListChannels", Required: []string{"id"}, Properties: map[string]string{"id": "string"}},
+	}
+	if _, err := p.Next(context.Background(), "Investigate C-104 across company services", nil, ops); err != nil {
+		t.Fatal(err)
+	}
+}

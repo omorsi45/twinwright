@@ -223,3 +223,108 @@ func TestValidationErrorIsStableForMultipleInvalidArguments(t *testing.T) {
 		}
 	}
 }
+
+func TestMessagingDispatchFaultThenSingleCommittedPost(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(t.TempDir() + "/world.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	world, err := s.SeedScenario(ctx, 42, "digest", "company-incident")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := s.CreateRun(ctx, world.ID, "company-incident", "scripted", "fixture-v1", "task", "messagePostMessage")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := compiler.Manifest{Operations: []compiler.Operation{
+		{ID: "messagePostMessage", Behavior: "messaging.postMessage", Required: []string{"body", "channel_id"}, Properties: map[string]string{"body": "string", "channel_id": "string"}},
+		{ID: "messageReadChannel", Behavior: "messaging.readChannel", Required: []string{"id"}, Properties: map[string]string{"id": "string"}},
+	}}
+	d := Dispatcher{Store: s, Manifest: manifest}
+	args := map[string]any{"channel_id": "CH-SUPPORT", "body": "Investigating C-104"}
+	faulted, err := d.Invoke(ctx, run.ID, "call-1", "messagePostMessage", args)
+	if err != nil || faulted.Status != 503 {
+		t.Fatalf("faulted post: result=%v err=%v", faulted, err)
+	}
+	var count int
+	if err = s.DB.QueryRowContext(ctx, "SELECT count(*) FROM message_messages WHERE world_id=?", world.ID).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("fault mutated state: count=%d err=%v", count, err)
+	}
+	posted, err := d.Invoke(ctx, run.ID, "call-2", "messagePostMessage", args)
+	if err != nil || posted.Status != 201 {
+		t.Fatalf("post: result=%v err=%v", posted, err)
+	}
+	repeat, err := d.Invoke(ctx, run.ID, "call-2", "messagePostMessage", args)
+	if err != nil || string(repeat.Body) != string(posted.Body) {
+		t.Fatalf("repeat: result=%v err=%v", repeat, err)
+	}
+	if _, err = d.Invoke(ctx, run.ID, "call-2", "messagePostMessage", map[string]any{"channel_id": "CH-SUPPORT", "body": "changed"}); err == nil {
+		t.Fatal("changed arguments reused committed call ID")
+	}
+	read, err := d.Invoke(ctx, run.ID, "call-3", "messageReadChannel", map[string]any{"id": "CH-SUPPORT"})
+	if err != nil || read.Status != 200 {
+		t.Fatalf("read: result=%v err=%v", read, err)
+	}
+	var body struct {
+		Messages []struct {
+			Body string `json:"body"`
+		} `json:"messages"`
+	}
+	if err = json.Unmarshal(read.Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Messages) != 1 || body.Messages[0].Body != "Investigating C-104" {
+		t.Fatalf("messages=%v", body.Messages)
+	}
+	if err = s.DB.QueryRowContext(ctx, "SELECT count(*) FROM message_messages WHERE world_id=?", world.ID).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("committed count=%d err=%v", count, err)
+	}
+}
+
+func TestTicketDispatchCommitsOnceAndReadsCurrentIssue(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(t.TempDir() + "/world.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	world, err := s.SeedScenario(ctx, 42, "digest", "company-incident")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := s.CreateRun(ctx, world.ID, "company-incident", "scripted", "fixture-v1", "task", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := compiler.Manifest{Operations: []compiler.Operation{
+		{ID: "ticketCreateIssue", Behavior: "ticket.createIssue", Required: []string{"account_id", "priority", "project_id", "title"}, Properties: map[string]string{"account_id": "string", "priority": "string", "project_id": "string", "title": "string"}},
+		{ID: "ticketGetIssue", Behavior: "ticket.getIssue", Required: []string{"id"}, Properties: map[string]string{"id": "string"}},
+	}}
+	d := Dispatcher{Store: s, Manifest: manifest}
+	args := map[string]any{"account_id": "A-104", "priority": "high", "project_id": "PROJ-ENG", "title": "C-104 billing retry incident"}
+	created, err := d.Invoke(ctx, run.ID, "issue-1", "ticketCreateIssue", args)
+	if err != nil || created.Status != 201 {
+		t.Fatalf("create: result=%v err=%v", created, err)
+	}
+	repeat, err := d.Invoke(ctx, run.ID, "issue-1", "ticketCreateIssue", args)
+	if err != nil || string(repeat.Body) != string(created.Body) {
+		t.Fatalf("repeat: result=%v err=%v", repeat, err)
+	}
+	var issue struct {
+		ID string `json:"id"`
+	}
+	if err = json.Unmarshal(created.Body, &issue); err != nil || issue.ID == "" {
+		t.Fatalf("issue=%v err=%v", issue, err)
+	}
+	got, err := d.Invoke(ctx, run.ID, "issue-2", "ticketGetIssue", map[string]any{"id": issue.ID})
+	if err != nil || got.Status != 200 {
+		t.Fatalf("get: result=%v err=%v", got, err)
+	}
+	var count int
+	if err = s.DB.QueryRowContext(ctx, "SELECT count(*) FROM ticket_issues WHERE world_id=?", world.ID).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("issue count=%d err=%v", count, err)
+	}
+}

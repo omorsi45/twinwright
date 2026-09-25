@@ -247,3 +247,49 @@ func TestResolveRunModel(t *testing.T) {
 		})
 	}
 }
+
+func TestCompanyScenariosFromCLI(t *testing.T) {
+	root := filepath.Join("..", "..", "examples", "company")
+	for _, scenario := range []string{"company-incident", "company-routine", "company-no-duplicate"} {
+		t.Run(scenario, func(t *testing.T) {
+			dir := t.TempDir()
+			manifest := filepath.Join(dir, "manifest.json")
+			db := filepath.Join(dir, "world.db")
+			invoke := func(args ...string) map[string]any {
+				t.Helper()
+				var out bytes.Buffer
+				if err := runCLI(args, &out); err != nil {
+					t.Fatal(err)
+				}
+				var value map[string]any
+				if err := json.Unmarshal(out.Bytes(), &value); err != nil {
+					t.Fatal(err)
+				}
+				return value
+			}
+			invoke("build", filepath.Join(root, "openapi.yaml"), "--bindings", filepath.Join(root, "bindings.yaml"), "--out", manifest)
+			runArgs := []string{"run", scenario, "--agent", "scripted", "--manifest", manifest, "--db", db, "--steps", "4"}
+			if scenario == "company-incident" {
+				runArgs = append(runArgs, "--fault", "createRefund")
+			}
+			paused := invoke(runArgs...)
+			run := paused["run"].(map[string]any)
+			if run["status"] != "paused" {
+				t.Fatalf("run=%v", run)
+			}
+			task := run["task"].(string)
+			if !strings.Contains(task, "PROJ-ENG") || !strings.Contains(task, "WS-1") {
+				t.Fatalf("company resources are not discoverable in task: %s", task)
+			}
+			id := run["id"].(string)
+			completed := invoke("resume", id, "--agent", "scripted", "--manifest", manifest, "--db", db, "--steps", "30")
+			if completed["run"].(map[string]any)["status"] != "completed" || completed["evaluation"].(map[string]any)["passed"] != true {
+				t.Fatalf("completed=%v", completed)
+			}
+			inspected := invoke("inspect", id, "--db", db)
+			if inspected["evaluation"].(map[string]any)["passed"] != true {
+				t.Fatalf("inspect=%v", inspected)
+			}
+		})
+	}
+}

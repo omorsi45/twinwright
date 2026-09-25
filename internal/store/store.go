@@ -62,6 +62,17 @@ func Open(path string) (*Store, error) {
 		`CREATE TABLE IF NOT EXISTS invoices (world_id TEXT NOT NULL, id TEXT NOT NULL, customer_id TEXT NOT NULL, amount_cents INTEGER NOT NULL, subscription_id TEXT NOT NULL, PRIMARY KEY(world_id,id))`,
 		`CREATE TABLE IF NOT EXISTS charges (world_id TEXT NOT NULL, id TEXT NOT NULL, invoice_id TEXT NOT NULL, amount_cents INTEGER NOT NULL, refunded_cents INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, PRIMARY KEY(world_id,id))`,
 		`CREATE TABLE IF NOT EXISTS refunds (world_id TEXT NOT NULL, id TEXT NOT NULL, charge_id TEXT NOT NULL, amount_cents INTEGER NOT NULL, reason TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(world_id,id))`,
+		`CREATE TABLE IF NOT EXISTS subscriptions (world_id TEXT NOT NULL, id TEXT NOT NULL, customer_id TEXT NOT NULL, status TEXT NOT NULL, plan TEXT NOT NULL, PRIMARY KEY(world_id,id))`,
+		`CREATE TABLE IF NOT EXISTS crm_accounts (world_id TEXT NOT NULL, id TEXT NOT NULL, customer_id TEXT NOT NULL, status TEXT NOT NULL, representative_id TEXT NOT NULL, PRIMARY KEY(world_id,id))`,
+		`CREATE TABLE IF NOT EXISTS crm_contacts (world_id TEXT NOT NULL, id TEXT NOT NULL, account_id TEXT NOT NULL, name TEXT NOT NULL, email TEXT NOT NULL, PRIMARY KEY(world_id,id))`,
+		`CREATE TABLE IF NOT EXISTS crm_notes (world_id TEXT NOT NULL, id TEXT NOT NULL, account_id TEXT NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(world_id,id))`,
+		`CREATE TABLE IF NOT EXISTS ticket_projects (world_id TEXT NOT NULL, id TEXT NOT NULL, key TEXT NOT NULL, name TEXT NOT NULL, PRIMARY KEY(world_id,id))`,
+		`CREATE TABLE IF NOT EXISTS ticket_issues (world_id TEXT NOT NULL, id TEXT NOT NULL, project_id TEXT NOT NULL, account_id TEXT NOT NULL, title TEXT NOT NULL, status TEXT NOT NULL, priority TEXT NOT NULL, PRIMARY KEY(world_id,id))`,
+		`CREATE TABLE IF NOT EXISTS ticket_comments (world_id TEXT NOT NULL, id TEXT NOT NULL, issue_id TEXT NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(world_id,id))`,
+		`CREATE TABLE IF NOT EXISTS message_workspaces (world_id TEXT NOT NULL, id TEXT NOT NULL, name TEXT NOT NULL, PRIMARY KEY(world_id,id))`,
+		`CREATE TABLE IF NOT EXISTS message_channels (world_id TEXT NOT NULL, id TEXT NOT NULL, workspace_id TEXT NOT NULL, name TEXT NOT NULL, PRIMARY KEY(world_id,id))`,
+		`CREATE TABLE IF NOT EXISTS message_members (world_id TEXT NOT NULL, channel_id TEXT NOT NULL, principal_id TEXT NOT NULL, PRIMARY KEY(world_id,channel_id,principal_id))`,
+		`CREATE TABLE IF NOT EXISTS message_messages (world_id TEXT NOT NULL, id TEXT NOT NULL, channel_id TEXT NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(world_id,id))`,
 		`CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, world_id TEXT NOT NULL, scenario TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, task TEXT NOT NULL, status TEXT NOT NULL, step INTEGER NOT NULL DEFAULT 0, transcript TEXT NOT NULL DEFAULT '[]', fault_operation TEXT NOT NULL DEFAULT '', fault_consumed INTEGER NOT NULL DEFAULT 0)`,
 		`CREATE TABLE IF NOT EXISTS events (run_id TEXT NOT NULL, seq INTEGER NOT NULL, id TEXT NOT NULL UNIQUE, recorded_at TEXT NOT NULL, world_at TEXT NOT NULL, type TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(run_id,seq))`,
 		`CREATE TABLE IF NOT EXISTS tool_results (run_id TEXT NOT NULL, call_id TEXT NOT NULL, operation_id TEXT NOT NULL, arguments TEXT NOT NULL, status INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY(run_id,call_id))`,
@@ -133,6 +144,15 @@ func OpenReadOnly(path string) (*Store, error) {
 func (s *Store) Close() error { return s.DB.Close() }
 
 func (s *Store) Seed(ctx context.Context, seed int64, digest string) (World, error) {
+	return s.SeedScenario(ctx, seed, digest, "duplicate-charge")
+}
+
+func (s *Store) SeedScenario(ctx context.Context, seed int64, digest, scenario string) (World, error) {
+	switch scenario {
+	case "duplicate-charge", "company-incident", "company-routine", "company-no-duplicate":
+	default:
+		return World{}, fmt.Errorf("unknown scenario %q", scenario)
+	}
 	h := sha256.Sum256([]byte(fmt.Sprintf("%s:%d", digest, seed)))
 	prefix := "W-" + hex.EncodeToString(h[:8])
 	w := World{Seed: seed, Digest: digest}
@@ -150,18 +170,40 @@ func (s *Store) Seed(ctx context.Context, seed int64, digest string) (World, err
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC).Add(time.Duration(seed%365) * 24 * time.Hour)
 	rng := mrand.New(mrand.NewPCG(uint64(seed), uint64(seed)^0x9e3779b97f4a7c15))
 	amount := int64(2500 + rng.IntN(7500))
-	entries := []struct {
+	type entry struct {
 		q    string
 		args []any
-	}{
+	}
+	entries := []entry{
 		{"INSERT INTO worlds VALUES(?,?,?,?)", []any{w.ID, seed, digest, base.Format(time.RFC3339)}},
 		{"INSERT INTO customers VALUES(?,?,?)", []any{w.ID, "C-104", "Morgan Vale"}},
 		{"INSERT INTO customers VALUES(?,?,?)", []any{w.ID, "C-205", "Taylor Reed"}},
 		{"INSERT INTO invoices VALUES(?,?,?,?,?)", []any{w.ID, "INV-104", "C-104", amount, "SUB-104"}},
 		{"INSERT INTO invoices VALUES(?,?,?,?,?)", []any{w.ID, "INV-205", "C-205", 4100, "SUB-205"}},
 		{"INSERT INTO charges VALUES(?,?,?,?,?,?)", []any{w.ID, "CH-1001", "INV-104", amount, 0, base.Add(time.Hour).Format(time.RFC3339)}},
-		{"INSERT INTO charges VALUES(?,?,?,?,?,?)", []any{w.ID, "CH-1002", "INV-104", amount, 0, base.Add(2 * time.Hour).Format(time.RFC3339)}},
-		{"INSERT INTO charges VALUES(?,?,?,?,?,?)", []any{w.ID, "CH-2001", "INV-205", 4100, 0, base.Add(3 * time.Hour).Format(time.RFC3339)}},
+	}
+	if scenario != "company-no-duplicate" {
+		entries = append(entries, entry{"INSERT INTO charges VALUES(?,?,?,?,?,?)", []any{w.ID, "CH-1002", "INV-104", amount, 0, base.Add(2 * time.Hour).Format(time.RFC3339)}})
+	}
+	entries = append(entries,
+		entry{"INSERT INTO charges VALUES(?,?,?,?,?,?)", []any{w.ID, "CH-2001", "INV-205", 4100, 0, base.Add(3 * time.Hour).Format(time.RFC3339)}},
+		entry{"INSERT INTO subscriptions VALUES(?,?,?,?,?)", []any{w.ID, "SUB-104", "C-104", "active", "standard"}},
+		entry{"INSERT INTO subscriptions VALUES(?,?,?,?,?)", []any{w.ID, "SUB-205", "C-205", "active", "standard"}},
+	)
+	if scenario != "duplicate-charge" {
+		entries = append(entries,
+			entry{"INSERT INTO crm_accounts VALUES(?,?,?,?,?)", []any{w.ID, "A-104", "C-104", "active", "REP-1"}},
+			entry{"INSERT INTO crm_accounts VALUES(?,?,?,?,?)", []any{w.ID, "A-205", "C-205", "active", "REP-1"}},
+			entry{"INSERT INTO crm_contacts VALUES(?,?,?,?,?)", []any{w.ID, "CT-104", "A-104", "Morgan Vale", "morgan.vale@example.test"}},
+			entry{"INSERT INTO crm_contacts VALUES(?,?,?,?,?)", []any{w.ID, "CT-205", "A-205", "Taylor Reed", "taylor.reed@example.test"}},
+			entry{"INSERT INTO ticket_projects VALUES(?,?,?,?)", []any{w.ID, "PROJ-ENG", "ENG", "Engineering"}},
+			entry{"INSERT INTO message_workspaces VALUES(?,?,?)", []any{w.ID, "WS-1", "Company"}},
+			entry{"INSERT INTO message_channels VALUES(?,?,?,?)", []any{w.ID, "CH-SUPPORT", "WS-1", "support"}},
+			entry{"INSERT INTO message_members VALUES(?,?,?)", []any{w.ID, "CH-SUPPORT", "agent"}},
+		)
+		if scenario == "company-incident" {
+			entries = append(entries, entry{"INSERT INTO crm_notes VALUES(?,?,?,?,?)", []any{w.ID, "SEED-INCIDENT-104", "A-104", "Billing retry worker retried C-104 invoice after a timeout; investigate duplicate charge incident.", base.Add(4 * time.Hour).Format(time.RFC3339)}})
+		}
 	}
 	for _, e := range entries {
 		if _, err = tx.ExecContext(ctx, e.q, e.args...); err != nil {

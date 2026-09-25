@@ -29,6 +29,16 @@ func Handle(ctx context.Context, tx *sql.Tx, worldID, runID, callID, behavior st
 			return 0, nil, nil, err
 		}
 		return 200, map[string]any{"id": id, "name": name}, nil, nil
+	case "billing.getSubscription":
+		var id, customerID, status, plan string
+		err := tx.QueryRowContext(ctx, "SELECT id,customer_id,status,plan FROM subscriptions WHERE world_id=? AND id=?", worldID, args["id"]).Scan(&id, &customerID, &status, &plan)
+		if err == sql.ErrNoRows {
+			return 404, map[string]string{"error": "subscription not found"}, nil, nil
+		}
+		if err != nil {
+			return 0, nil, nil, err
+		}
+		return 200, map[string]any{"id": id, "customer_id": customerID, "status": status, "plan": plan}, nil, nil
 	case "billing.listInvoices":
 		rows, err := tx.QueryContext(ctx, "SELECT id,customer_id,amount_cents,subscription_id FROM invoices WHERE world_id=? AND customer_id=? ORDER BY id", worldID, args["id"])
 		if err != nil {
