@@ -25,7 +25,7 @@ The dispatcher validates operation ID and arguments, applies the specified one-s
 - `Run`: run ID, world ID, scenario, task, provider, status, iteration cursor, transcript, and optional fault configuration.
 - `Event`: run-scoped monotonically ordered sequence and stable ID, UTC recorded timestamp, virtual world timestamp, type, operation/call correlation, and JSON payload.
 
-The same seed and manifest produce the same initial entities, IDs, amounts, and virtual timestamps. Run IDs may differ between starts. Given identical persisted model outputs and tool calls, dispatch and evaluation are deterministic. Live model decisions and network timing are not deterministic; store complete requests and responses to make later replay possible.
+The same seed and manifest produce the same initial entities, business IDs, amounts, and virtual timestamps. Each run gets a separate world instance ID, so runs cannot mutate each other's state. Given identical persisted model outputs and tool calls, dispatch and evaluation are deterministic. Live model decisions and network timing are not deterministic; the ledger stores normalized model requests and response items for eventual replay work.
 
 ## Event and transaction contract
 
@@ -33,7 +33,7 @@ Events are append-only rows keyed by `(run_id, sequence)`; `event_id` derives fr
 
 The runner gives each tool call a stable call ID and persists intent before dispatch. For a mutating call, the refund row, charge update, mutation event, exact tool response, and run cursor/transcript advance commit in **one SQLite transaction**. A unique `(run_id, call_id)` result key makes retries return the saved response. If the process dies before commit, nothing mutated; if it dies after commit, resume sees the saved result and does not refund again. SQLite is the single writer and source of truth for this slice.
 
-The once-only HTTP 503 fault is consumed in a transaction with its response and fault event. A resumed run sees the saved 503 for the same call; a subsequent new call may succeed. The runner exposes 503 as an ordinary tool result so the agent can choose to retry. A step limit pauses **between** completed provider/tool steps and writes the resume cursor. Resuming sends the persisted conversation to the provider; it never repeats a committed tool call. This is checkpointing, not full counterfactual replay.
+The once-only HTTP 503 fault is consumed in a transaction with its response and fault event. A resumed run sees the saved 503 for the same call; a subsequent new call may succeed and records a retry event. The runner exposes 503 as an ordinary tool result so the agent can choose to retry. A step limit pauses **between** completed provider/tool steps and writes the resume cursor. Resuming sends the persisted conversation to the provider; it never repeats a committed tool call. This is checkpointing, not full counterfactual replay.
 
 ## Agent contract
 

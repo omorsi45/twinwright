@@ -1,36 +1,64 @@
 package compiler
 
 import (
- "os"
- "path/filepath"
- "strings"
- "testing"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
 )
 
 func example(t *testing.T) ([]byte, []byte) {
- t.Helper()
- root := filepath.Join("..", "..", "examples", "billing")
- spec, err := os.ReadFile(filepath.Join(root, "openapi.yaml")); if err != nil { t.Fatal(err) }
- bindings, err := os.ReadFile(filepath.Join(root, "bindings.yaml")); if err != nil { t.Fatal(err) }
- return spec, bindings
+	t.Helper()
+	root := filepath.Join("..", "..", "examples", "billing")
+	spec, err := os.ReadFile(filepath.Join(root, "openapi.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bindings, err := os.ReadFile(filepath.Join(root, "bindings.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return spec, bindings
 }
 
 func TestCompileExampleAndStableDigest(t *testing.T) {
- spec, bindings := example(t)
- a, err := Compile(spec, bindings); if err != nil { t.Fatal(err) }
- b, err := Compile(spec, bindings); if err != nil { t.Fatal(err) }
- if len(a.Operations) != 5 || a.Digest != b.Digest { t.Fatalf("operations=%d digests=%s,%s", len(a.Operations), a.Digest, b.Digest) }
- op := a.Operation("createRefund")
- if op == nil || op.Method != "POST" || len(op.Required) != 3 { t.Fatalf("refund operation=%+v", op) }
+	spec, bindings := example(t)
+	a, err := Compile(spec, bindings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := Compile(spec, bindings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(a.Operations) != 5 || a.Digest != b.Digest {
+		t.Fatalf("operations=%d digests=%s,%s", len(a.Operations), a.Digest, b.Digest)
+	}
+	op := a.Operation("createRefund")
+	if op == nil || op.Method != "POST" || len(op.Required) != 3 {
+		t.Fatalf("refund operation=%+v", op)
+	}
 }
 
 func TestCompileRejectsUnboundUnsupportedAndExternalReferences(t *testing.T) {
- spec, bindings := example(t)
- cases := []struct{name string; spec, bindings []byte; want string}{
-  {"unbound", spec, []byte("operations:\n  getCustomer: billing.getCustomer\n"), "unbound"},
-  {"unsupported method", []byte(strings.Replace(string(spec), "    post:\n", "    patch:\n", 1)), bindings, "unsupported"},
-  {"external ref", append(append([]byte{}, spec...), []byte("\ncomponents:\n  schemas:\n    X:\n      $ref: https://example.com/schema.yaml\n")...), bindings, "reference"},
-  {"duplicate id", []byte(strings.Replace(string(spec), "operationId: getCharge", "operationId: getCustomer", 1)), bindings, "duplicate"},
- }
- for _, tc := range cases { t.Run(tc.name, func(t *testing.T) { _, err := Compile(tc.spec, tc.bindings); if err == nil || !strings.Contains(err.Error(), tc.want) { t.Fatalf("error=%v, want %s", err, tc.want) } }) }
+	spec, bindings := example(t)
+	cases := []struct {
+		name           string
+		spec, bindings []byte
+		want           string
+	}{
+		{"unbound", spec, []byte("operations:\n  getCustomer: billing.getCustomer\n"), "unbound"},
+		{"unsupported method", []byte(strings.Replace(string(spec), "    post:\n", "    patch:\n", 1)), bindings, "unsupported"},
+		{"external ref", append(append([]byte{}, spec...), []byte("\ncomponents:\n  schemas:\n    X:\n      $ref: https://example.com/schema.yaml\n")...), bindings, "reference"},
+		{"duplicate id", []byte(strings.Replace(string(spec), "operationId: getCharge", "operationId: getCustomer", 1)), bindings, "duplicate"},
+		{"wrong route", []byte(strings.Replace(string(spec), "/refunds:", "/unrelated:", 1)), bindings, "unsupported path"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Compile(tc.spec, tc.bindings)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error=%v, want %s", err, tc.want)
+			}
+		})
+	}
 }
