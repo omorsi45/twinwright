@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 
 	"twinwright/internal/billing"
 	"twinwright/internal/compiler"
@@ -125,7 +126,13 @@ func validate(op compiler.Operation, args map[string]any) (int, any) {
 			return 400, map[string]string{"error": "missing " + name}
 		}
 	}
-	for name, value := range args {
+	names := make([]string, 0, len(args))
+	for name := range args {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		value := args[name]
 		typ, ok := op.Properties[name]
 		if !ok {
 			return 400, map[string]string{"error": "unexpected " + name}

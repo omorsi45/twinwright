@@ -212,3 +212,14 @@ func TestRefundRollbackAndIdempotentCommit(t *testing.T) {
 		t.Fatalf("refunds=%d", refundCount)
 	}
 }
+
+func TestValidationErrorIsStableForMultipleInvalidArguments(t *testing.T) {
+	op := compiler.Operation{Properties: map[string]string{"alpha": "string", "zeta": "string"}}
+	args := map[string]any{"zeta": "", "alpha": ""}
+	for i := 0; i < 100; i++ {
+		status, body := validate(op, args)
+		if status != 400 || body.(map[string]string)["error"] != "invalid alpha" {
+			t.Fatalf("iteration %d returned HTTP %d %v", i, status, body)
+		}
+	}
+}
