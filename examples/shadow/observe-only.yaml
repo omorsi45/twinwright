@@ -1,0 +1,7 @@
+version: 1
+mode: observe
+label: experimental
+secret_env: []
+source:
+  type: file
+  path: shadow/sample-observations.jsonl
