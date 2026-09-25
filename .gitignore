@@ -4,3 +4,6 @@
 *.db-shm
 *.db-wal
 bin/
+
+# Local planning briefs and working designs
+/design/

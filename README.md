@@ -46,7 +46,7 @@ The OpenAI adapter uses the [Responses API](https://developers.openai.com/api/do
 
 ## Scope
 
-The compiler supports exactly five fictional billing operations and rejects other routes or unbound operations. OpenAPI defines callable shapes; [bindings](examples/billing/bindings.yaml) choose explicit stateful behaviors. The current scope has no production billing connection, permissions, generic service generation, distributed workers, or general replay engine. The [Phase 0 design](docs/superpowers/specs/2026-09-24-billing-world-design.md), [replay design](docs/superpowers/specs/2026-09-25-replay-verification-design.md), and [ADRs](docs/adr) describe the boundaries and next risks.
+The compiler supports exactly five fictional billing operations and rejects other routes or unbound operations. OpenAPI defines callable shapes; [bindings](examples/billing/bindings.yaml) choose explicit stateful behaviors. The current scope has no production billing connection, permissions, generic service generation, distributed workers, or general replay engine. The [ADRs](docs/adr) describe the public architectural decisions and current limits.
 
 ## License
 
