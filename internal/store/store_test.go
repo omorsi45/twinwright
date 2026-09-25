@@ -164,3 +164,51 @@ func TestRunPersistsProviderModel(t *testing.T) {
 		t.Fatalf("model=%q", loaded.Model)
 	}
 }
+
+func TestCreateReplayRunPreservesIDAndIsolation(t *testing.T) {
+	ctx := context.Background()
+	source, err := Open(t.TempDir() + "/source.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	sourceWorld, err := source.Seed(ctx, 42, "digest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err := source.CreateRun(ctx, sourceWorld.ID, "duplicate-charge", "scripted", "fixture-v1", "task", "listCharges")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	target, err := Open(t.TempDir() + "/target.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer target.Close()
+	targetWorld, err := target.Seed(ctx, 42, "digest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := target.CreateReplayRun(ctx, original, targetWorld.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayed.ID != original.ID || replayed.WorldID != targetWorld.ID {
+		t.Fatalf("replayed=%+v original=%+v", replayed, original)
+	}
+	saved, err := source.Run(ctx, original.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.WorldID != sourceWorld.ID {
+		t.Fatalf("source run changed: %+v", saved)
+	}
+	events, err := target.Events(ctx, original.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Type != "execution.started" {
+		t.Fatalf("replay start events=%+v", events)
+	}
+}

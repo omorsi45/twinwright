@@ -24,11 +24,14 @@ The `run` command prints a JSON run ID and pauses after three model turns. Then 
 ```powershell
 go run ./cmd/twinwright resume <run-id> --agent scripted
 go run ./cmd/twinwright inspect <run-id>
+go run ./cmd/twinwright replay <run-id>
 ```
 
 The default database is `twinwright.db`; it is ignored by Git. Each `run` creates a new isolated world instance, even when the same seed is used. `inspect` shows ledger events and four deterministic state checks.
 
-Keep the compiled manifest for resume: its digest must match the world used by the run. A run also saves its provider model and uses that model on resume. If execution fails after a run starts, the error includes the run ID so it can be inspected or resumed. Older development databases without the model column are updated when opened.
+Replay verifies a completed run by executing its recorded assistant decisions in a fresh in-memory billing world. It makes no model call and leaves the source database unchanged. A successful report includes model, tool, and event counts. On a difference, it emits a JSON report with the first divergence and exits nonzero. Replay currently supports completed duplicate-charge runs with valid model turns; it does not support counterfactual changes or historical runtime versions.
+
+Keep the compiled manifest for resume and replay: its digest must match the world used by the run. A run also saves its provider model and uses that model on resume. If execution fails after a run starts, the error includes the run ID so it can be inspected or resumed. Older development databases without the model column are updated when opened.
 
 For a live agent, set `OPENAI_API_KEY` and choose a model:
 
@@ -41,4 +44,4 @@ The OpenAI adapter uses the [Responses API](https://developers.openai.com/api/do
 
 ## Scope
 
-The compiler supports exactly five fictional billing operations and rejects other routes or unbound operations. OpenAPI defines callable shapes; [bindings](examples/billing/bindings.yaml) choose explicit stateful behaviors. This milestone has no production billing connection, permissions, generic service generation, distributed workers, or replay engine. The [Phase 0 design](docs/superpowers/specs/2026-09-24-billing-world-design.md), [ADRs](docs/adr), and [implementation plan](docs/superpowers/plans/2026-09-24-billing-world.md) describe the boundaries and next risks.
+The compiler supports exactly five fictional billing operations and rejects other routes or unbound operations. OpenAPI defines callable shapes; [bindings](examples/billing/bindings.yaml) choose explicit stateful behaviors. The current scope has no production billing connection, permissions, generic service generation, distributed workers, or general replay engine. The [Phase 0 design](docs/superpowers/specs/2026-09-24-billing-world-design.md), [replay design](docs/superpowers/specs/2026-09-25-replay-verification-design.md), and [ADRs](docs/adr) describe the boundaries and next risks.

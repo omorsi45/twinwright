@@ -1,0 +1,330 @@
+package replay
+
+import (
+	"bytes"
+	"context"
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"reflect"
+
+	"twinwright/internal/agent"
+	"twinwright/internal/compiler"
+	"twinwright/internal/dispatch"
+	"twinwright/internal/store"
+)
+
+type Report struct {
+	RunID          string `json:"run_id"`
+	Verified       bool   `json:"verified"`
+	ModelTurns     int    `json:"model_turns"`
+	ToolCalls      int    `json:"tool_calls"`
+	EventsCompared int    `json:"events_compared"`
+	Divergence     string `json:"divergence,omitempty"`
+}
+
+type recordedProvider struct {
+	messages []agent.Message
+	next     int
+}
+
+func (p *recordedProvider) Next(_ context.Context, _ string, _ []agent.Message, _ []compiler.Operation) (agent.Message, error) {
+	if p.next >= len(p.messages) {
+		return agent.Message{}, fmt.Errorf("recorded model responses exhausted")
+	}
+	message := p.messages[p.next]
+	p.next++
+	return message, nil
+}
+
+func Verify(ctx context.Context, source *store.Store, runID string, manifest compiler.Manifest) (Report, error) {
+	report := Report{RunID: runID}
+	if err := compiler.ValidateManifest(manifest); err != nil {
+		return report, fmt.Errorf("manifest: %w", err)
+	}
+	original, err := source.Run(ctx, runID)
+	if err != nil {
+		return report, err
+	}
+	if original.Status != "completed" {
+		return report, fmt.Errorf("run %s is %s; replay requires a completed run", runID, original.Status)
+	}
+	if original.Scenario != "duplicate-charge" {
+		return report, fmt.Errorf("unsupported scenario %q", original.Scenario)
+	}
+	var seed int64
+	var digest string
+	if err = source.DB.QueryRowContext(ctx, "SELECT seed,digest FROM worlds WHERE id=?", original.WorldID).Scan(&seed, &digest); err != nil {
+		return report, err
+	}
+	if digest != manifest.Digest {
+		return report, fmt.Errorf("manifest mismatch for run %s", runID)
+	}
+	sourceEvents, err := source.Events(ctx, runID)
+	if err != nil {
+		return report, err
+	}
+	messages, err := recordedMessages(original, sourceEvents)
+	if err != nil {
+		return report, err
+	}
+	report.ModelTurns = len(messages)
+
+	target, err := store.Open(":memory:")
+	if err != nil {
+		return report, err
+	}
+	defer target.Close()
+	world, err := target.Seed(ctx, seed, digest)
+	if err != nil {
+		return report, err
+	}
+	if _, err = target.CreateReplayRun(ctx, original, world.ID); err != nil {
+		return report, err
+	}
+	provider := &recordedProvider{messages: messages}
+	runner := agent.Runner{
+		Store: target, Dispatch: &dispatch.Dispatcher{Store: target, Manifest: manifest},
+		Manifest: manifest, Provider: provider,
+	}
+	replayed, err := runner.Execute(ctx, runID, len(messages)+1)
+	if ctx.Err() != nil {
+		return report, ctx.Err()
+	}
+	if err != nil {
+		return diverged(report, fmt.Sprintf("replayed execution: %v", err)), nil
+	}
+	if replayed.Status != "completed" || provider.next != len(messages) {
+		return diverged(report, fmt.Sprintf("replayed run ended %s after %d of %d model turns", replayed.Status, provider.next, len(messages))), nil
+	}
+	targetEvents, err := target.Events(ctx, runID)
+	if err != nil {
+		return report, err
+	}
+	if difference := compareEvents(sourceEvents, targetEvents); difference != "" {
+		return diverged(report, difference), nil
+	}
+	report.EventsCompared = countSemantic(sourceEvents)
+	sourceResults, err := toolResults(ctx, source.DB, runID)
+	if err != nil {
+		return report, err
+	}
+	targetResults, err := toolResults(ctx, target.DB, runID)
+	if err != nil {
+		return report, err
+	}
+	report.ToolCalls = len(sourceResults)
+	if difference := compareResults(sourceResults, targetResults); difference != "" {
+		return diverged(report, difference), nil
+	}
+	if !sameJSON([]byte(original.Transcript), []byte(replayed.Transcript)) {
+		return diverged(report, "final transcript differs"), nil
+	}
+	for _, table := range []struct{ name, columns string }{
+		{"customers", "id,name"},
+		{"invoices", "id,customer_id,amount_cents,subscription_id"},
+		{"charges", "id,invoice_id,amount_cents,refunded_cents,created_at"},
+		{"refunds", "id,charge_id,amount_cents,reason,created_at"},
+	} {
+		left, err := billingRows(ctx, source.DB, table.name, table.columns, original.WorldID)
+		if err != nil {
+			return report, err
+		}
+		right, err := billingRows(ctx, target.DB, table.name, table.columns, world.ID)
+		if err != nil {
+			return report, err
+		}
+		if !reflect.DeepEqual(left, right) {
+			return diverged(report, table.name+" state differs"), nil
+		}
+	}
+	report.Verified = true
+	return report, nil
+}
+
+func diverged(report Report, reason string) Report {
+	report.Divergence = reason
+	return report
+}
+
+func recordedMessages(run store.Run, events []store.Event) ([]agent.Message, error) {
+	if len(events) == 0 || events[0].Type != "execution.started" || events[len(events)-1].Type != "execution.completed" {
+		return nil, fmt.Errorf("run ledger is missing start or completion")
+	}
+	var messages []agent.Message
+	requests := 0
+	for i, event := range events {
+		if event.Seq != i+1 || event.ID != fmt.Sprintf("%s/%d", run.ID, i+1) || event.RunID != run.ID {
+			return nil, fmt.Errorf("ledger sequence or ID differs at position %d", i+1)
+		}
+		if !json.Valid(event.Payload) {
+			return nil, fmt.Errorf("invalid event payload at sequence %d", event.Seq)
+		}
+		switch event.Type {
+		case "execution.started":
+			if i != 0 {
+				return nil, fmt.Errorf("unexpected start event at sequence %d", event.Seq)
+			}
+			var detail map[string]string
+			if err := json.Unmarshal(event.Payload, &detail); err != nil {
+				return nil, err
+			}
+			if detail["scenario"] != run.Scenario || detail["provider"] != run.Provider ||
+				detail["model"] != run.Model || detail["world_id"] != run.WorldID {
+				return nil, fmt.Errorf("execution start metadata differs from run")
+			}
+		case "execution.completed":
+			if i != len(events)-1 {
+				return nil, fmt.Errorf("completion event is not last")
+			}
+		case "execution.paused", "tool.request", "tool.response", "state.mutation", "retry":
+		case "model.request":
+			requests++
+		case "model.response":
+			var message agent.Message
+			if err := json.Unmarshal(event.Payload, &message); err != nil {
+				return nil, fmt.Errorf("model response at sequence %d: %w", event.Seq, err)
+			}
+			if message.Role != "assistant" {
+				return nil, fmt.Errorf("model response at sequence %d is not a completed assistant turn", event.Seq)
+			}
+			messages = append(messages, message)
+		case "error":
+			var detail map[string]any
+			if err := json.Unmarshal(event.Payload, &detail); err != nil {
+				return nil, err
+			}
+			if detail["kind"] != "injected_503" {
+				return nil, fmt.Errorf("run contains unsupported %v error at sequence %d", detail["kind"], event.Seq)
+			}
+		default:
+			return nil, fmt.Errorf("unknown event type %q at sequence %d", event.Type, event.Seq)
+		}
+	}
+	if requests != len(messages) || len(messages) == 0 {
+		return nil, fmt.Errorf("run has incomplete model history")
+	}
+	return messages, nil
+}
+
+func semantic(typ string) bool {
+	switch typ {
+	case "model.request", "model.response", "tool.request", "tool.response", "state.mutation", "error", "retry":
+		return true
+	}
+	return false
+}
+
+func countSemantic(events []store.Event) int {
+	n := 0
+	for _, e := range events {
+		if semantic(e.Type) {
+			n++
+		}
+	}
+	return n
+}
+
+func compareEvents(left, right []store.Event) string {
+	a, b := []store.Event{}, []store.Event{}
+	for _, e := range left {
+		if semantic(e.Type) {
+			a = append(a, e)
+		}
+	}
+	for _, e := range right {
+		if semantic(e.Type) {
+			b = append(b, e)
+		}
+	}
+	if len(a) != len(b) {
+		return fmt.Sprintf("semantic event count differs: recorded %d, replayed %d", len(a), len(b))
+	}
+	for i := range a {
+		if a[i].Type != b[i].Type || !sameJSON(a[i].Payload, b[i].Payload) {
+			return fmt.Sprintf("event %d (%s) differs", a[i].Seq, a[i].Type)
+		}
+	}
+	return ""
+}
+
+func sameJSON(a, b []byte) bool {
+	if !json.Valid(a) || !json.Valid(b) {
+		return false
+	}
+	decode := func(data []byte) any {
+		var value any
+		reader := json.NewDecoder(bytes.NewReader(data))
+		reader.UseNumber()
+		_ = reader.Decode(&value)
+		return value
+	}
+	return reflect.DeepEqual(decode(a), decode(b))
+}
+
+type savedResult struct {
+	callID, operation, arguments, body string
+	status                             int
+}
+
+func toolResults(ctx context.Context, db *sql.DB, runID string) ([]savedResult, error) {
+	rows, err := db.QueryContext(ctx, "SELECT call_id,operation_id,arguments,status,body FROM tool_results WHERE run_id=? ORDER BY call_id", runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []savedResult
+	for rows.Next() {
+		var value savedResult
+		if err = rows.Scan(&value.callID, &value.operation, &value.arguments, &value.status, &value.body); err != nil {
+			return nil, err
+		}
+		result = append(result, value)
+	}
+	return result, rows.Err()
+}
+
+func compareResults(left, right []savedResult) string {
+	if len(left) != len(right) {
+		return fmt.Sprintf("tool result count differs: recorded %d, replayed %d", len(left), len(right))
+	}
+	for i := range left {
+		if left[i].callID != right[i].callID || left[i].operation != right[i].operation ||
+			left[i].status != right[i].status ||
+			!sameJSON([]byte(left[i].arguments), []byte(right[i].arguments)) ||
+			!sameJSON([]byte(left[i].body), []byte(right[i].body)) {
+			return fmt.Sprintf("tool result for call %s differs", left[i].callID)
+		}
+	}
+	return ""
+}
+
+func billingRows(ctx context.Context, db *sql.DB, table, columns, worldID string) ([][]string, error) {
+	query := fmt.Sprintf("SELECT %s FROM %s WHERE world_id=? ORDER BY id", columns, table)
+	rows, err := db.QueryContext(ctx, query, worldID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	names, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+	var result [][]string
+	for rows.Next() {
+		values := make([]any, len(names))
+		pointers := make([]any, len(names))
+		for i := range values {
+			pointers[i] = &values[i]
+		}
+		if err = rows.Scan(pointers...); err != nil {
+			return nil, err
+		}
+		record := make([]string, len(names))
+		for i, value := range values {
+			record[i] = fmt.Sprint(value)
+		}
+		result = append(result, record)
+	}
+	return result, rows.Err()
+}

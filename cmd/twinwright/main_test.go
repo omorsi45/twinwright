@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"twinwright/internal/store"
 )
 
 func TestBuildRunResumeInspect(t *testing.T) {
@@ -150,5 +151,62 @@ func TestFailedRunErrorIncludesRecoverableID(t *testing.T) {
 	}
 	if err = runCLI([]string{"inspect", id, "--db", db}, &bytes.Buffer{}); err != nil {
 		t.Fatalf("saved run is not inspectable: %v", err)
+	}
+}
+
+func TestCLIReplayCompletedRun(t *testing.T) {
+	root := filepath.Join("..", "..", "examples", "billing")
+	dir := t.TempDir()
+	manifest := filepath.Join(dir, "manifest.json")
+	db := filepath.Join(dir, "world.db")
+	var out bytes.Buffer
+	if err := runCLI([]string{"build", filepath.Join(root, "openapi.yaml"), "--out", manifest}, &out); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := runCLI([]string{"run", "duplicate-charge", "--agent", "scripted", "--manifest", manifest, "--db", db, "--fault", "listCharges"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var started struct {
+		Run struct {
+			ID string `json:"id"`
+		} `json:"run"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &started); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := runCLI([]string{"replay", started.Run.ID, "--manifest", manifest, "--db", db}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var report struct {
+		Verified bool `json:"verified"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if !report.Verified {
+		t.Fatalf("replay=%s", out.String())
+	}
+	s, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.DB.Exec("UPDATE refunds SET reason='changed'"); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	err = runCLI([]string{"replay", started.Run.ID, "--manifest", manifest, "--db", db}, &out)
+	if err == nil || !strings.Contains(err.Error(), "replay divergence") {
+		t.Fatalf("tampered state replay error=%v", err)
+	}
+	if err = json.Unmarshal(out.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Verified {
+		t.Fatalf("tampered state accepted: %s", out.String())
 	}
 }

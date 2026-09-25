@@ -307,3 +307,27 @@ func (s *Store) SaveStatus(ctx context.Context, runID, status, typ string, paylo
 	}
 	return tx.Commit()
 }
+
+// CreateReplayRun starts a run with a preserved ID in an isolated store.
+func (s *Store) CreateReplayRun(ctx context.Context, original Run, worldID string) (Run, error) {
+	r := Run{
+		ID: original.ID, WorldID: worldID, Scenario: original.Scenario,
+		Provider: original.Provider, Model: original.Model, Task: original.Task,
+		Status: "running", Transcript: "[]", FaultOperation: original.FaultOperation,
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return Run{}, err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, "INSERT INTO runs(id,world_id,scenario,provider,model,task,status,transcript,fault_operation) VALUES(?,?,?,?,?,?,?,?,?)", r.ID, r.WorldID, r.Scenario, r.Provider, r.Model, r.Task, r.Status, r.Transcript, r.FaultOperation); err != nil {
+		return Run{}, err
+	}
+	if err = AppendEventTx(ctx, tx, r.ID, "execution.started", map[string]any{"scenario": r.Scenario, "provider": r.Provider, "model": r.Model, "world_id": worldID}); err != nil {
+		return Run{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return Run{}, err
+	}
+	return r, nil
+}

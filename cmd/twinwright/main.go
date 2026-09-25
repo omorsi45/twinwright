@@ -13,6 +13,7 @@ import (
 	"twinwright/internal/compiler"
 	"twinwright/internal/dispatch"
 	"twinwright/internal/eval"
+	"twinwright/internal/replay"
 	"twinwright/internal/store"
 )
 
@@ -25,7 +26,7 @@ func main() {
 
 func runCLI(args []string, out io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: twinwright build|run|resume|inspect ...")
+		return fmt.Errorf("usage: twinwright build|run|resume|inspect|replay ...")
 	}
 	ctx := context.Background()
 	switch args[0] {
@@ -162,6 +163,37 @@ func runCLI(args []string, out io.Writer) error {
 			return fmt.Errorf("run %s failed: %w", runID, err)
 		}
 		return emitResult(ctx, out, s, result)
+	case "replay":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: twinwright replay <run-id> [--manifest path] [--db path]")
+		}
+		fs := flag.NewFlagSet("replay", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		manifestPath := fs.String("manifest", "twinwright.manifest.json", "compiled manifest")
+		dbPath := fs.String("db", "twinwright.db", "SQLite world database")
+		if err := fs.Parse(args[2:]); err != nil {
+			return err
+		}
+		manifest, err := readManifest(*manifestPath)
+		if err != nil {
+			return err
+		}
+		s, err := store.Open(*dbPath)
+		if err != nil {
+			return err
+		}
+		defer s.Close()
+		report, err := replay.Verify(ctx, s, args[1], manifest)
+		if err != nil {
+			return err
+		}
+		if err = emit(out, report); err != nil {
+			return err
+		}
+		if !report.Verified {
+			return fmt.Errorf("replay divergence: %s", report.Divergence)
+		}
+		return nil
 	case "inspect":
 		if len(args) < 2 {
 			return fmt.Errorf("usage: twinwright inspect <run-id> [--db path]")
