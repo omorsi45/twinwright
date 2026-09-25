@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"twinwright/internal/authz"
 	"twinwright/internal/compiler"
 	"twinwright/internal/dispatch"
 	"twinwright/internal/store"
@@ -77,11 +78,15 @@ func (r Runner) Execute(ctx context.Context, runID string, maxSteps int) (store.
 			}
 			return r.Store.Run(ctx, runID)
 		}
-		request := map[string]any{"task": run.Task, "provider": run.Provider, "model": run.Model, "history": history, "operations": r.Manifest.Operations}
+		operations, err := authz.Exposed(ctx, r.Store.DB, runID, r.Manifest.Operations)
+		if err != nil {
+			return store.Run{}, err
+		}
+		request := map[string]any{"task": run.Task, "provider": run.Provider, "model": run.Model, "history": history, "operations": operations}
 		if err = r.Store.StartModelCall(ctx, runID, request); err != nil {
 			return store.Run{}, err
 		}
-		next, err := r.Provider.Next(ctx, run.Task, history, r.Manifest.Operations)
+		next, err := r.Provider.Next(ctx, run.Task, history, operations)
 		if err != nil {
 			if saveErr := r.Store.FailModelTurn(ctx, runID, next, err.Error()); saveErr != nil {
 				return store.Run{}, fmt.Errorf("provider error: %v; recording error: %w", err, saveErr)

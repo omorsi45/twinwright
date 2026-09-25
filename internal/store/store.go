@@ -459,6 +459,15 @@ func (s *Store) AttachChaos(ctx context.Context, runID string, policyJSON []byte
 	return err
 }
 
+// AttachAuth initializes the authorization policy for a replay run before tool execution.
+func (s *Store) AttachAuth(ctx context.Context, runID string, policyJSON []byte, digest string) error {
+	if err := checkDigest("authorization", policyJSON, digest); err != nil {
+		return err
+	}
+	_, err := s.DB.ExecContext(ctx, "INSERT INTO run_auth(run_id,policy_json,digest) VALUES(?,?,?)", runID, string(policyJSON), digest)
+	return err
+}
+
 func (s *Store) Run(ctx context.Context, id string) (Run, error) {
 	var r Run
 	principal := "principal_id"

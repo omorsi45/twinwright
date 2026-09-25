@@ -218,7 +218,7 @@ func Exposed(ctx context.Context, q querier, runID string, ops []compiler.Operat
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
 	}
-	var out []compiler.Operation
+	out := []compiler.Operation{}
 	for _, op := range ops {
 		permission, mapped := Permission(op)
 		if mapped && policy.grantReason(permission, call+1) == "" && !policy.broad(op.Behavior) {
