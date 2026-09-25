@@ -15,6 +15,7 @@ import (
 	"twinwright/internal/assertion"
 	"twinwright/internal/authz"
 	"twinwright/internal/behavior"
+	"twinwright/internal/bench"
 	"twinwright/internal/chaos"
 	"twinwright/internal/checkpoint"
 	"twinwright/internal/compiler"
@@ -36,7 +37,7 @@ func main() {
 
 func runCLI(args []string, out io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: twinwright build|build-world|run|resume|inspect|trace|replay|checkpoints|fork|compare|evaluate|counterfactual ...")
+		return fmt.Errorf("usage: twinwright build|build-world|run|resume|inspect|trace|replay|checkpoints|fork|compare|evaluate|counterfactual|bench ...")
 	}
 	ctx := context.Background()
 	switch args[0] {
@@ -402,7 +403,26 @@ func runCLI(args []string, out io.Writer) error {
 		return emit(out, result)
 	case "compare":
 		if len(args) < 3 {
-			return fmt.Errorf("usage: twinwright compare <parent-run-id> <child-run-id> [--db path]")
+			return fmt.Errorf("usage: twinwright compare <parent-run-id> <child-run-id> [--db path] | twinwright compare <report-a.json> <report-b.json>")
+		}
+		if looksLikeBenchReport(args[1]) && looksLikeBenchReport(args[2]) {
+			left, err := os.ReadFile(args[1])
+			if err != nil {
+				return err
+			}
+			right, err := os.ReadFile(args[2])
+			if err != nil {
+				return err
+			}
+			a, err := bench.DecodeReport(left)
+			if err != nil {
+				return err
+			}
+			b, err := bench.DecodeReport(right)
+			if err != nil {
+				return err
+			}
+			return emit(out, bench.CompareReports(a, b))
 		}
 		fs := flag.NewFlagSet("compare", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
@@ -567,6 +587,68 @@ func runCLI(args []string, out io.Writer) error {
 		report, err := analysis.Run(ctx, source, destination)
 		if err != nil {
 			return err
+		}
+		return emit(out, report)
+	case "bench":
+		fs := flag.NewFlagSet("bench", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		suiteName := fs.String("suite", "standard", "suite name under examples/bench")
+		suiteFile := fs.String("suite-file", "", "explicit suite YAML path")
+		examplesRoot := fs.String("examples", "examples", "examples directory")
+		dbDir := fs.String("db-dir", "", "directory for per-case databases; defaults to a temp dir")
+		outPath := fs.String("out", "", "write the JSON report to this path")
+		providerName := fs.String("agent", "scripted", "scripted, openai, openai-compatible, or anthropic")
+		model := fs.String("model", "", "provider model")
+		baseURL := fs.String("base-url", os.Getenv("OPENAI_BASE_URL"), "base URL for openai-compatible")
+		seed := fs.Int64("seed", 42, "world seed")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *model == "" {
+			*model = defaultModel(*providerName)
+		}
+		*model = resolveRunModel(*providerName, *model)
+		path := *suiteFile
+		if path == "" {
+			path = filepath.Join(*examplesRoot, "bench", *suiteName+".yaml")
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		suite, err := bench.Parse(raw, *examplesRoot)
+		if err != nil {
+			return err
+		}
+		workDir := *dbDir
+		if workDir == "" {
+			workDir, err = os.MkdirTemp("", "twinwright-bench-*")
+			if err != nil {
+				return err
+			}
+			defer os.RemoveAll(workDir)
+		}
+		report, err := bench.Run(ctx, suite, bench.Options{
+			ExamplesRoot: *examplesRoot,
+			WorkDir:      workDir,
+			Agent:        *providerName,
+			Model:        *model,
+			BaseURL:      *baseURL,
+			Seed:         *seed,
+			ProviderFor:  selectProvider,
+		})
+		if err != nil {
+			return err
+		}
+		fmt.Fprint(out, report.FormatText())
+		if *outPath != "" {
+			data, err := json.MarshalIndent(report, "", "  ")
+			if err != nil {
+				return err
+			}
+			if err := os.WriteFile(*outPath, append(data, '\n'), 0644); err != nil {
+				return err
+			}
 		}
 		return emit(out, report)
 	case "trace":
@@ -778,6 +860,15 @@ func addSecurity(ctx context.Context, result map[string]any, s *store.Store, run
 	return nil
 }
 func emit(out io.Writer, value any) error { return json.NewEncoder(out).Encode(value) }
+
+func looksLikeBenchReport(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	_, err = bench.DecodeReport(data)
+	return err == nil
+}
 
 func configuredSecrets() []string {
 	var secrets []string
