@@ -478,6 +478,7 @@ func TestResolveRunModel(t *testing.T) {
 		{name: "OpenAI override", agent: "openai", requested: "custom-model", want: "custom-model"},
 		{name: "scripted fixture", agent: "scripted", want: "fixture-v1"},
 		{name: "scripted override", agent: "scripted", requested: "custom-fixture", want: "custom-fixture"},
+		{name: "anthropic has no default model", agent: "anthropic", want: ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -485,6 +486,30 @@ func TestResolveRunModel(t *testing.T) {
 				t.Fatalf("resolveRunModel(%q, %q) = %q, want %q", tc.agent, tc.requested, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestProviderPreflightDoesNotCreateDatabase(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("OPENAI_BASE_URL", "")
+	t.Setenv("ANTHROPIC_MODEL", "")
+	root := filepath.Join("..", "..", "examples", "billing")
+	dir := t.TempDir()
+	manifest, db := filepath.Join(dir, "manifest.json"), filepath.Join(dir, "world.db")
+	if err := runCLI([]string{"build", filepath.Join(root, "openapi.yaml"), "--out", manifest}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string][]string{
+		"anthropic":         {"run", "duplicate-charge", "--agent", "anthropic", "--model", "claude-test", "--manifest", manifest, "--db", db},
+		"openai-compatible": {"run", "duplicate-charge", "--agent", "openai-compatible", "--model", "local", "--manifest", manifest, "--db", db},
+	}
+	for name, args := range cases {
+		if err := runCLI(args, &bytes.Buffer{}); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+		if _, err := os.Stat(db); !os.IsNotExist(err) {
+			t.Fatalf("%s created a database: %v", name, err)
+		}
 	}
 }
 

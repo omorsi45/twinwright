@@ -116,8 +116,9 @@ func runCLI(args []string, out io.Writer) error {
 		fs.SetOutput(io.Discard)
 		manifestPath := fs.String("manifest", "twinwright.manifest.json", "compiled manifest")
 		dbPath := fs.String("db", "twinwright.db", "SQLite world database")
-		providerName := fs.String("agent", "openai", "openai or scripted example")
-		model := fs.String("model", os.Getenv("OPENAI_MODEL"), "OpenAI model")
+		providerName := fs.String("agent", "openai", "scripted, openai, openai-compatible, or anthropic")
+		model := fs.String("model", "", "provider model; defaults depend on the agent")
+		baseURL := fs.String("base-url", os.Getenv("OPENAI_BASE_URL"), "base URL for openai-compatible")
 		seed := fs.Int64("seed", 42, "world seed")
 		fault := fs.String("fault", "", "operation ID that returns HTTP 503 once")
 		chaosPath := fs.String("chaos", "", "deterministic chaos policy YAML")
@@ -178,11 +179,14 @@ func runCLI(args []string, out io.Writer) error {
 			}
 			options.AuthDigest = policy.Digest()
 		}
+		if *model == "" {
+			*model = defaultModel(*providerName)
+		}
 		*model = resolveRunModel(*providerName, *model)
 		if scenario == "ambiguous-commit" && *providerName == "scripted" {
 			*model = "fixture-" + *recovery + "-v1"
 		}
-		provider, err := selectProvider(*providerName, *model, scenario)
+		provider, err := selectProvider(*providerName, *model, scenario, *baseURL)
 		if err != nil {
 			return err
 		}
@@ -216,6 +220,7 @@ func runCLI(args []string, out io.Writer) error {
 		dbPath := fs.String("db", "twinwright.db", "SQLite world database")
 		providerName := fs.String("agent", "", "run's provider")
 		model := fs.String("model", "", "use the model saved with the run")
+		baseURL := fs.String("base-url", os.Getenv("OPENAI_BASE_URL"), "base URL for openai-compatible")
 		steps := fs.Int("steps", 20, "maximum model turns in this invocation")
 		if err := fs.Parse(args[2:]); err != nil {
 			return err
@@ -246,7 +251,7 @@ func runCLI(args []string, out io.Writer) error {
 		if *model != "" && *model != run.Model {
 			return fmt.Errorf("model mismatch: run uses %s", run.Model)
 		}
-		provider, err := selectProvider(run.Provider, run.Model, run.Scenario)
+		provider, err := selectProvider(run.Provider, run.Model, run.Scenario, *baseURL)
 		if err != nil {
 			return err
 		}
@@ -295,6 +300,7 @@ func runCLI(args []string, out io.Writer) error {
 		fault := fs.String("fault", "", "new one-time fault operation")
 		chaosPath := fs.String("chaos", "", "replacement chaos policy YAML for child")
 		authPath := fs.String("auth", "", "replacement authorization policy YAML for child")
+		baseURL := fs.String("base-url", os.Getenv("OPENAI_BASE_URL"), "base URL for openai-compatible")
 		steps := fs.Int("steps", 0, "model turns to run after fork; zero leaves the child paused")
 		if err := fs.Parse(args[2:]); err != nil {
 			return err
@@ -356,7 +362,7 @@ func runCLI(args []string, out io.Writer) error {
 			if options.Model != "" {
 				modelForRun = options.Model
 			}
-			provider, err = selectProvider(providerNameForRun, modelForRun, parent.Scenario)
+			provider, err = selectProvider(providerNameForRun, modelForRun, parent.Scenario, *baseURL)
 			if err != nil {
 				return err
 			}
@@ -511,6 +517,7 @@ func runCLI(args []string, out io.Writer) error {
 		assertionsPath := fs.String("assertions", "", "assertion YAML file defining success; defaults to the scenario evaluation")
 		trials := fs.Int("trials", 1, "forks per candidate and intervention")
 		steps := fs.Int("steps", 20, "maximum model turns per fork")
+		baseURL := fs.String("base-url", os.Getenv("OPENAI_BASE_URL"), "base URL for openai-compatible")
 		if err := fs.Parse(args[2:]); err != nil {
 			return err
 		}
@@ -546,7 +553,9 @@ func runCLI(args []string, out io.Writer) error {
 			return err
 		}
 		defer source.Close()
-		analysis, err := counterfactual.Prepare(ctx, source, args[1], manifest, set, judge, counterfactual.Options{Trials: *trials, Steps: *steps, ProviderFor: selectProvider})
+		analysis, err := counterfactual.Prepare(ctx, source, args[1], manifest, set, judge, counterfactual.Options{Trials: *trials, Steps: *steps, ProviderFor: func(provider, model, scenario string) (agent.Provider, error) {
+			return selectProvider(provider, model, scenario, *baseURL)
+		}})
 		if err != nil {
 			return err
 		}
@@ -675,6 +684,16 @@ func readManifest(path string) (compiler.Manifest, error) {
 	}
 	return m, nil
 }
+func defaultModel(agentName string) string {
+	switch agentName {
+	case "openai", "openai-compatible":
+		return os.Getenv("OPENAI_MODEL")
+	case "anthropic":
+		return os.Getenv("ANTHROPIC_MODEL")
+	default:
+		return ""
+	}
+}
 func resolveRunModel(agentName, model string) string {
 	if model != "" {
 		return model
@@ -688,7 +707,7 @@ func resolveRunModel(agentName, model string) string {
 		return model
 	}
 }
-func selectProvider(name, model, scenario string) (agent.Provider, error) {
+func selectProvider(name, model, scenario, baseURL string) (agent.Provider, error) {
 	switch name {
 	case "scripted":
 		if scenario == "ambiguous-commit" {
@@ -709,6 +728,22 @@ func selectProvider(name, model, scenario string) (agent.Provider, error) {
 			return nil, fmt.Errorf("model is required for openai")
 		}
 		return agent.OpenAIProvider{APIKey: os.Getenv("OPENAI_API_KEY"), Model: model}, nil
+	case "openai-compatible":
+		if baseURL == "" {
+			return nil, fmt.Errorf("openai-compatible requires --base-url or OPENAI_BASE_URL")
+		}
+		if model == "" {
+			return nil, fmt.Errorf("model is required for openai-compatible")
+		}
+		return agent.ChatCompletionsProvider{APIKey: os.Getenv("OPENAI_API_KEY"), Model: model, BaseURL: baseURL}, nil
+	case "anthropic":
+		if os.Getenv("ANTHROPIC_API_KEY") == "" {
+			return nil, fmt.Errorf("ANTHROPIC_API_KEY is required for anthropic")
+		}
+		if model == "" {
+			return nil, fmt.Errorf("model is required for anthropic")
+		}
+		return agent.AnthropicProvider{APIKey: os.Getenv("ANTHROPIC_API_KEY"), Model: model}, nil
 	default:
 		return nil, fmt.Errorf("unknown agent %q", name)
 	}
@@ -745,10 +780,14 @@ func addSecurity(ctx context.Context, result map[string]any, s *store.Store, run
 func emit(out io.Writer, value any) error { return json.NewEncoder(out).Encode(value) }
 
 func configuredSecrets() []string {
+	var secrets []string
 	if key := os.Getenv("OPENAI_API_KEY"); key != "" {
-		return []string{key}
+		secrets = append(secrets, key)
 	}
-	return nil
+	if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
+		secrets = append(secrets, key)
+	}
+	return secrets
 }
 
 // inspection keeps summary first. A map would sort keys and bury it under the raw ledger.

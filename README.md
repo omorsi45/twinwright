@@ -53,6 +53,7 @@ A run can:
 - compare parent and forked trajectories
 - fork a failed run at candidate events, change one variable per fork, and rank which events the failure was sensitive to
 - summarize a run and render its ledger as a trace, including an OpenTelemetry JSON export
+- drive a run with OpenAI Responses, an OpenAI-compatible chat endpoint, Anthropic Messages, or a scripted fixture
 
 The project includes a minimal billing world and a multi-service company world spanning billing, CRM, ticketing, and messaging.
 
@@ -399,28 +400,46 @@ This is intervention analysis. The counts describe the forks that ran; they are 
 
 See `examples/counterfactual/` and `docs/adr/0011-counterfactual-analysis.md`.
 
-## Live model execution
+## Agent providers
 
-Twinwright includes an OpenAI Responses API provider with function tools.
+`--agent` selects the provider. The world, dispatcher, and evaluator do not learn vendor details. Each adapter maps a vendor response into Twinwright's internal message shape and keeps the raw response for the ledger.
 
-Set your API key outside the repository:
+| Agent | Endpoint | Credentials / config |
+| --- | --- | --- |
+| `scripted` | in-process fixtures | none |
+| `openai` | OpenAI Responses API | `OPENAI_API_KEY`; model defaults to `gpt-6-sol`, or `OPENAI_MODEL` / `--model` |
+| `openai-compatible` | `{base}/chat/completions` | `--base-url` or `OPENAI_BASE_URL`; optional `OPENAI_API_KEY`; model required via `--model` or `OPENAI_MODEL` |
+| `anthropic` | Anthropic Messages API | `ANTHROPIC_API_KEY`; model required via `--model` or `ANTHROPIC_MODEL` (no invented default) |
 
 ```bash
 export OPENAI_API_KEY="..."
-```
-
-Then run a live agent:
-
-```bash
 go run ./cmd/twinwright run company-incident \
   --agent openai \
   --manifest company.world.manifest.json \
   --db company.db
 ```
 
-Use `OPENAI_MODEL` or `--model` to select a model.
+```bash
+export OPENAI_BASE_URL="http://127.0.0.1:11434/v1"
+go run ./cmd/twinwright run duplicate-charge \
+  --agent openai-compatible \
+  --model local-model \
+  --manifest twinwright.manifest.json \
+  --db twinwright.db
+```
 
-Live model behavior is nondeterministic. Twinwright's world state, tool execution, recorded decisions, and deterministic evaluators provide the reproducible boundary around it. When the Responses API reports token usage, the assistant turn stores it. Error bodies are redacted before they reach the ledger.
+```bash
+export ANTHROPIC_API_KEY="..."
+export ANTHROPIC_MODEL="claude-..."
+go run ./cmd/twinwright run company-incident \
+  --agent anthropic \
+  --manifest company.world.manifest.json \
+  --db company.db
+```
+
+The base URL is process configuration, not a ledger column. Resuming an `openai-compatible` run needs `--base-url` or `OPENAI_BASE_URL` again. The stored provider name and model are what replay and traces show.
+
+Live model behavior is nondeterministic. Twinwright's world state, tool execution, recorded decisions, and deterministic evaluators provide the reproducible boundary around it. When a provider reports token usage, the assistant turn stores it. Error bodies are redacted before they reach the ledger. No live OpenAI, Anthropic, or local-server run has been verified in this repository; scripted fixtures are the tested path. See `docs/adr/0013-agent-providers.md`.
 
 ## Engineering guarantees
 
@@ -656,6 +675,7 @@ Major runtime contracts are documented as ADRs under `docs/adr/`, including:
 - declarative run assertions
 - counterfactual intervention analysis and observation overrides
 - ledger traces and provider error redaction
+- multiple agent providers behind one internal message shape
 
 The ADRs document not only what Twinwright does, but why the implementation makes those tradeoffs.
 
