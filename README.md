@@ -439,7 +439,7 @@ go run ./cmd/twinwright run company-incident \
 
 The base URL is process configuration, not a ledger column. Resuming an `openai-compatible` run needs `--base-url` or `OPENAI_BASE_URL` again. The stored provider name and model are what replay and traces show.
 
-Live model behavior is nondeterministic. Twinwright's world state, tool execution, recorded decisions, and deterministic evaluators provide the reproducible boundary around it. When a provider reports token usage, the assistant turn stores it. Error bodies are redacted before they reach the ledger. No live OpenAI, Anthropic, or local-server run has been verified in this repository; scripted fixtures are the tested path.
+Live model behavior is nondeterministic. Twinwright's world state, tool execution, recorded decisions, and deterministic evaluators provide the reproducible boundary around it. When a provider reports token usage, the assistant turn stores it. Error bodies are redacted before they reach the ledger. No live OpenAI, Anthropic, or local-server run has been verified in this repository; scripted fixtures are the tested path. See `docs/adr/0013-agent-providers.md`.
 
 ## Engineering guarantees
 
