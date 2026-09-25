@@ -29,7 +29,7 @@ go run ./cmd/twinwright replay <run-id>
 
 The default database is `twinwright.db`; it is ignored by Git. Each `run` creates a new isolated world instance, even when the same seed is used. `inspect` shows ledger events and four deterministic state checks.
 
-Replay verifies a completed run by executing its recorded assistant decisions in a fresh in-memory world. It makes no model call and leaves the source database unchanged. A successful report includes model, tool, and event counts. On a difference, it emits a JSON report with the first divergence and exits nonzero. Replay supports the billing and company example scenarios with valid model turns; it does not support counterfactual changes or historical runtime versions.
+Replay verifies a completed run by executing its recorded assistant decisions in an isolated in-memory world. For a fork, it first reconstructs the parent checkpoint and then verifies the child suffix. It makes no model call and leaves the source database unchanged. A successful report includes model, tool, and event counts. On a difference, it emits a JSON report with the first divergence and exits nonzero. Replay supports the billing and company example scenarios with valid model turns; historical runtime versions are not yet supported.
 
 ## Try the company scenarios
 
@@ -60,6 +60,26 @@ go run ./cmd/twinwright replay <run-id> --manifest company.world.manifest.json -
 ```
 
 The definition declares `version: 1`, a `company-v1` seed profile, service files, entity fields, and relationships such as `crm.accounts.customer_id` to `billing.customers.id`. Referenced files must stay under the definition directory. Each operation needs an explicit behavior binding; the compiler accepts only primitive GET path arguments or required POST JSON object arguments. New business behavior requires a registered Go handler, and relationship metadata does not create database constraints. The original `build` command and manifests remain supported. See [ADR 0006](docs/adr/0006-world-definition.md) for the boundary.
+
+## Checkpoints and counterfactual forks
+
+A paused or completed run can list committed restore boundaries. Choose an `event_seq` from the JSON output:
+
+```powershell
+go run ./cmd/twinwright checkpoints <run-id> --manifest company.world.manifest.json --db company.db
+go run ./cmd/twinwright fork <run-id> --at-event <event-seq> --manifest company.world.manifest.json --db company.db
+```
+
+The fork command creates a separate world and a paused child run. It reconstructs and verifies the selected prefix before copying state. The parent is unchanged. Use `--steps 20` to continue immediately, or resume the returned child run later. `--agent`, `--model`, and `--fault` can change future execution while preserving prior observations. A new fault is applied only to the child.
+
+```powershell
+go run ./cmd/twinwright resume <child-run-id> --agent scripted --manifest company.world.manifest.json --db company.db
+go run ./cmd/twinwright inspect <child-run-id> --db company.db
+go run ./cmd/twinwright compare <parent-run-id> <child-run-id> --db company.db
+go run ./cmd/twinwright replay <child-run-id> --manifest company.world.manifest.json --db company.db
+```
+
+`inspect` includes parent and checkpoint lineage for a fork. `compare` reports tool and mutation trajectories after the fork point, state row differences, and completed-run evaluation checks. Latency and model usage are marked unavailable because the current runtime does not record those measurements. Checkpoints require the same manifest digest and a paused or completed root source; event sequences inside a tool transaction are rejected. Nested forks are not yet supported. See [ADR 0007](docs/adr/0007-checkpoint-fork.md).
 
 Keep the compiled manifest for resume and replay: its digest must match the world used by the run. A run also saves its provider model and uses that model on resume. If execution fails after a run starts, the error includes the run ID so it can be inspected or resumed. Older development databases without the model column are updated when opened.
 

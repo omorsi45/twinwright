@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -462,5 +463,253 @@ func TestCompanyScenarioAcceptsRenamedBoundOperation(t *testing.T) {
 	}
 	if err := checkScenarioManifest(manifest, "company-routine"); err != nil {
 		t.Fatalf("renamed bound operation rejected: %v", err)
+	}
+}
+
+func TestCLICheckpointsListsCommittedBoundaries(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join("..", "..", "examples", "billing")
+	manifest := filepath.Join(dir, "manifest.json")
+	db := filepath.Join(dir, "world.db")
+	if err := runCLI([]string{"build", filepath.Join(root, "openapi.yaml"), "--out", manifest}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	var started bytes.Buffer
+	if err := runCLI([]string{"run", "duplicate-charge", "--agent", "scripted", "--manifest", manifest, "--db", db, "--steps", "1"}, &started); err != nil {
+		t.Fatal(err)
+	}
+	var run struct {
+		Run struct {
+			ID string `json:"id"`
+		} `json:"run"`
+	}
+	if err := json.Unmarshal(started.Bytes(), &run); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := runCLI([]string{"checkpoints", run.Run.ID, "--manifest", manifest, "--db", db}, &output); err != nil {
+		t.Fatal(err)
+	}
+	var listed struct {
+		RunID       string `json:"run_id"`
+		Checkpoints []struct {
+			ID       string `json:"id"`
+			EventSeq int    `json:"event_seq"`
+		} `json:"checkpoints"`
+	}
+	if err := json.Unmarshal(output.Bytes(), &listed); err != nil {
+		t.Fatal(err)
+	}
+	if listed.RunID != run.Run.ID || len(listed.Checkpoints) < 2 || listed.Checkpoints[0].ID == "" {
+		t.Fatalf("checkpoints=%s", output.String())
+	}
+}
+
+func TestCLIForksAndInspectsLineage(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join("..", "..", "examples", "billing")
+	manifest := filepath.Join(dir, "manifest.json")
+	db := filepath.Join(dir, "world.db")
+	if err := runCLI([]string{"build", filepath.Join(root, "openapi.yaml"), "--out", manifest}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	var started bytes.Buffer
+	if err := runCLI([]string{"run", "duplicate-charge", "--agent", "scripted", "--manifest", manifest, "--db", db, "--steps", "20"}, &started); err != nil {
+		t.Fatal(err)
+	}
+	var parent struct {
+		Run struct {
+			ID string `json:"id"`
+		} `json:"run"`
+	}
+	if err := json.Unmarshal(started.Bytes(), &parent); err != nil {
+		t.Fatal(err)
+	}
+	var listed bytes.Buffer
+	if err := runCLI([]string{"checkpoints", parent.Run.ID, "--manifest", manifest, "--db", db}, &listed); err != nil {
+		t.Fatal(err)
+	}
+	var checkpoints struct {
+		Checkpoints []struct {
+			EventSeq  int    `json:"event_seq"`
+			EventType string `json:"event_type"`
+		} `json:"checkpoints"`
+	}
+	if err := json.Unmarshal(listed.Bytes(), &checkpoints); err != nil {
+		t.Fatal(err)
+	}
+	var eventSeq int
+	for _, point := range checkpoints.Checkpoints {
+		if point.EventType == "model.response" {
+			eventSeq = point.EventSeq
+			break
+		}
+	}
+	if eventSeq == 0 {
+		t.Fatal("model checkpoint missing")
+	}
+	var output bytes.Buffer
+	if err := runCLI([]string{"fork", parent.Run.ID, "--at-event", strconv.Itoa(eventSeq), "--manifest", manifest, "--db", db, "--steps", "20"}, &output); err != nil {
+		t.Fatal(err)
+	}
+	var forkBody map[string]any
+	if err := json.Unmarshal(output.Bytes(), &forkBody); err != nil {
+		t.Fatal(err)
+	}
+	child := forkBody["fork"].(map[string]any)["run"].(map[string]any)
+	childID := child["id"].(string)
+	if childID == parent.Run.ID || child["status"] != "completed" {
+		t.Fatalf("fork result=%s", output.String())
+	}
+	var inspected bytes.Buffer
+	if err := runCLI([]string{"inspect", childID, "--db", db}, &inspected); err != nil {
+		t.Fatal(err)
+	}
+	var report map[string]any
+	if err := json.Unmarshal(inspected.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	lineage := report["lineage"].(map[string]any)
+	if lineage["parent_run_id"] != parent.Run.ID || int(lineage["fork_event_seq"].(float64)) != eventSeq {
+		t.Fatalf("lineage=%v", lineage)
+	}
+	var compared bytes.Buffer
+	if err := runCLI([]string{"compare", parent.Run.ID, childID, "--db", db}, &compared); err != nil {
+		t.Fatal(err)
+	}
+	var comparison map[string]any
+	if err := json.Unmarshal(compared.Bytes(), &comparison); err != nil {
+		t.Fatal(err)
+	}
+	if comparison["parent_run_id"] != parent.Run.ID || comparison["child_run_id"] != childID {
+		t.Fatalf("comparison=%s", compared.String())
+	}
+	var replayed bytes.Buffer
+	if err := runCLI([]string{"replay", childID, "--manifest", manifest, "--db", db}, &replayed); err != nil {
+		t.Fatal(err)
+	}
+	var replayReport map[string]any
+	if err := json.Unmarshal(replayed.Bytes(), &replayReport); err != nil || replayReport["verified"] != true {
+		t.Fatalf("fork replay=%s err=%v", replayed.String(), err)
+	}
+	if err := runCLI([]string{"fork", parent.Run.ID, "--at-event", "4", "--manifest", manifest, "--db", db}, &bytes.Buffer{}); err == nil {
+		t.Fatal("mid-tool event accepted")
+	}
+	t.Setenv("OPENAI_API_KEY", "")
+	s, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var before, after int
+	if err := s.DB.QueryRow("SELECT count(*) FROM fork_lineage").Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	if err := runCLI([]string{"fork", parent.Run.ID, "--at-event", strconv.Itoa(eventSeq), "--manifest", manifest, "--db", db, "--agent", "openai", "--steps", "1"}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "OPENAI_API_KEY") {
+		t.Fatalf("missing key error=%v", err)
+	}
+	if err := s.DB.QueryRow("SELECT count(*) FROM fork_lineage").Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if after != before {
+		t.Fatalf("invalid immediate continuation created a child: before=%d after=%d", before, after)
+	}
+}
+
+func TestCLIReplayLegacyDatabaseWithoutLineageTable(t *testing.T) {
+	dir := t.TempDir()
+	manifest := filepath.Join(dir, "manifest.json")
+	db := filepath.Join(dir, "legacy.db")
+	root := filepath.Join("..", "..", "examples", "billing")
+	if err := runCLI([]string{"build", filepath.Join(root, "openapi.yaml"), "--out", manifest}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	var started bytes.Buffer
+	if err := runCLI([]string{"run", "duplicate-charge", "--agent", "scripted", "--manifest", manifest, "--db", db, "--steps", "20"}, &started); err != nil {
+		t.Fatal(err)
+	}
+	var body struct {
+		Run struct {
+			ID string `json:"id"`
+		} `json:"run"`
+	}
+	if err := json.Unmarshal(started.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	s, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec("DROP TABLE fork_lineage"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec("DROP TABLE checkpoints"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var replayed bytes.Buffer
+	if err := runCLI([]string{"replay", body.Run.ID, "--manifest", manifest, "--db", db}, &replayed); err != nil {
+		t.Fatal(err)
+	}
+	var report map[string]any
+	if err := json.Unmarshal(replayed.Bytes(), &report); err != nil || report["verified"] != true {
+		t.Fatalf("legacy replay=%s err=%v", replayed.String(), err)
+	}
+}
+
+func TestCLIFailedForkDoesNotMigrateLegacyDatabase(t *testing.T) {
+	dir := t.TempDir()
+	manifest := filepath.Join(dir, "manifest.json")
+	db := filepath.Join(dir, "legacy.db")
+	root := filepath.Join("..", "..", "examples", "billing")
+	if err := runCLI([]string{"build", filepath.Join(root, "openapi.yaml"), "--out", manifest}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	var started bytes.Buffer
+	if err := runCLI([]string{"run", "duplicate-charge", "--agent", "scripted", "--manifest", manifest, "--db", db, "--steps", "20"}, &started); err != nil {
+		t.Fatal(err)
+	}
+	var body struct {
+		Run struct {
+			ID string `json:"id"`
+		} `json:"run"`
+	}
+	if err := json.Unmarshal(started.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	s, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec("DROP TABLE fork_lineage"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec("DROP TABLE checkpoints"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec("UPDATE events SET payload=? WHERE run_id=? AND seq=2", `{"task":"tampered"}`, body.Run.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := runCLI([]string{"fork", body.Run.ID, "--at-event", "3", "--manifest", manifest, "--db", db}, &bytes.Buffer{}); err == nil {
+		t.Fatal("tampered fork accepted")
+	}
+	readonly, err := store.OpenReadOnly(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readonly.Close()
+	var count int
+	if err := readonly.DB.QueryRow("SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('checkpoints','fork_lineage')").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("failed fork created %d lineage tables", count)
 	}
 }

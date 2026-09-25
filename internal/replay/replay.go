@@ -11,6 +11,7 @@ import (
 	"twinwright/internal/agent"
 	"twinwright/internal/compiler"
 	"twinwright/internal/dispatch"
+	"twinwright/internal/fork"
 	"twinwright/internal/store"
 )
 
@@ -62,28 +63,44 @@ func Verify(ctx context.Context, source *store.Store, runID string, manifest com
 	if digest != manifest.Digest {
 		return report, fmt.Errorf("manifest mismatch for run %s", runID)
 	}
+	lineage, lineageErr := source.Lineage(ctx, runID)
+	if lineageErr != nil && lineageErr != sql.ErrNoRows {
+		return report, lineageErr
+	}
+	forked := lineageErr == nil
 	sourceEvents, err := source.Events(ctx, runID)
 	if err != nil {
 		return report, err
 	}
-	messages, err := recordedMessages(original, sourceEvents)
+	messages, err := recordedMessages(original, sourceEvents, forked)
 	if err != nil {
 		return report, err
 	}
 	report.ModelTurns = len(messages)
 
-	target, err := store.Open(":memory:")
+	var target *store.Store
+	var worldID string
+	if forked {
+		target, err = fork.ReconstructForReplay(ctx, source, original, lineage, manifest)
+		worldID = original.WorldID
+	} else {
+		target, err = store.Open(":memory:")
+		if err == nil {
+			var world store.World
+			world, err = target.SeedScenario(ctx, seed, digest, original.Scenario)
+			if err == nil {
+				worldID = world.ID
+				_, err = target.CreateReplayRun(ctx, original, world.ID)
+			}
+		}
+	}
 	if err != nil {
+		if target != nil {
+			target.Close()
+		}
 		return report, err
 	}
 	defer target.Close()
-	world, err := target.SeedScenario(ctx, seed, digest, original.Scenario)
-	if err != nil {
-		return report, err
-	}
-	if _, err = target.CreateReplayRun(ctx, original, world.ID); err != nil {
-		return report, err
-	}
 	provider := &recordedProvider{messages: messages}
 	runner := agent.Runner{
 		Store: target, Dispatch: &dispatch.Dispatcher{Store: target, Manifest: manifest},
@@ -102,6 +119,11 @@ func Verify(ctx context.Context, source *store.Store, runID string, manifest com
 	targetEvents, err := target.Events(ctx, runID)
 	if err != nil {
 		return report, err
+	}
+	if forked && (len(sourceEvents) == 0 || len(targetEvents) == 0 ||
+		sourceEvents[0].Type != "execution.forked" || sourceEvents[0].WorldAt != targetEvents[0].WorldAt ||
+		!sameJSON(sourceEvents[0].Payload, targetEvents[0].Payload)) {
+		return diverged(report, "fork origin event differs from lineage"), nil
 	}
 	if difference := compareEvents(sourceEvents, targetEvents); difference != "" {
 		return diverged(report, difference), nil
@@ -149,7 +171,7 @@ func Verify(ctx context.Context, source *store.Store, runID string, manifest com
 		if err != nil {
 			return report, err
 		}
-		right, err := stateRows(ctx, target.DB, table.name, table.columns, table.orderBy, world.ID)
+		right, err := stateRows(ctx, target.DB, table.name, table.columns, table.orderBy, worldID)
 		if err != nil {
 			return report, err
 		}
@@ -166,8 +188,12 @@ func diverged(report Report, reason string) Report {
 	return report
 }
 
-func recordedMessages(run store.Run, events []store.Event) ([]agent.Message, error) {
-	if len(events) == 0 || events[0].Type != "execution.started" || events[len(events)-1].Type != "execution.completed" {
+func recordedMessages(run store.Run, events []store.Event, forked bool) ([]agent.Message, error) {
+	startType := "execution.started"
+	if forked {
+		startType = "execution.forked"
+	}
+	if len(events) == 0 || events[0].Type != startType || events[len(events)-1].Type != "execution.completed" {
 		return nil, fmt.Errorf("run ledger is missing start or completion")
 	}
 	var messages []agent.Message
@@ -180,8 +206,12 @@ func recordedMessages(run store.Run, events []store.Event) ([]agent.Message, err
 			return nil, fmt.Errorf("invalid event payload at sequence %d", event.Seq)
 		}
 		switch event.Type {
+		case "execution.forked":
+			if !forked || i != 0 {
+				return nil, fmt.Errorf("unexpected fork event at sequence %d", event.Seq)
+			}
 		case "execution.started":
-			if i != 0 {
+			if forked || i != 0 {
 				return nil, fmt.Errorf("unexpected start event at sequence %d", event.Seq)
 			}
 			var detail map[string]string
@@ -222,7 +252,7 @@ func recordedMessages(run store.Run, events []store.Event) ([]agent.Message, err
 			return nil, fmt.Errorf("unknown event type %q at sequence %d", event.Type, event.Seq)
 		}
 	}
-	if requests != len(messages) || len(messages) == 0 {
+	if requests != len(messages) || (!forked && len(messages) == 0) {
 		return nil, fmt.Errorf("run has incomplete model history")
 	}
 	return messages, nil

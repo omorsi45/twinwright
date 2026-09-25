@@ -43,6 +43,17 @@ type Event struct {
 	Type       string          `json:"type"`
 	Payload    json.RawMessage `json:"payload"`
 }
+type ForkLineage struct {
+	ChildRunID     string `json:"child_run_id"`
+	ParentRunID    string `json:"parent_run_id"`
+	ForkEventSeq   int    `json:"fork_event_seq"`
+	CheckpointID   string `json:"checkpoint_id"`
+	FormatVersion  int    `json:"format_version"`
+	ManifestDigest string `json:"manifest_digest"`
+	PrefixDigest   string `json:"prefix_digest"`
+	ParentProvider string `json:"parent_provider"`
+	ParentModel    string `json:"parent_model"`
+}
 
 func Open(path string) (*Store, error) {
 	db, err := sql.Open("sqlite", path)
@@ -76,6 +87,8 @@ func Open(path string) (*Store, error) {
 		`CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, world_id TEXT NOT NULL, scenario TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, task TEXT NOT NULL, status TEXT NOT NULL, step INTEGER NOT NULL DEFAULT 0, transcript TEXT NOT NULL DEFAULT '[]', fault_operation TEXT NOT NULL DEFAULT '', fault_consumed INTEGER NOT NULL DEFAULT 0)`,
 		`CREATE TABLE IF NOT EXISTS events (run_id TEXT NOT NULL, seq INTEGER NOT NULL, id TEXT NOT NULL UNIQUE, recorded_at TEXT NOT NULL, world_at TEXT NOT NULL, type TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(run_id,seq))`,
 		`CREATE TABLE IF NOT EXISTS tool_results (run_id TEXT NOT NULL, call_id TEXT NOT NULL, operation_id TEXT NOT NULL, arguments TEXT NOT NULL, status INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY(run_id,call_id))`,
+		`CREATE TABLE IF NOT EXISTS checkpoints (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, event_seq INTEGER NOT NULL, format_version INTEGER NOT NULL, manifest_digest TEXT NOT NULL, prefix_digest TEXT NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS fork_lineage (child_run_id TEXT PRIMARY KEY, parent_run_id TEXT NOT NULL, fork_event_seq INTEGER NOT NULL, checkpoint_id TEXT NOT NULL, format_version INTEGER NOT NULL, manifest_digest TEXT NOT NULL, prefix_digest TEXT NOT NULL, parent_provider TEXT NOT NULL, parent_model TEXT NOT NULL)`,
 	}
 	for _, stmt := range schema {
 		if _, err = db.Exec(stmt); err != nil {
@@ -269,6 +282,20 @@ func (s *Store) Run(ctx context.Context, id string) (Run, error) {
 	var r Run
 	err := s.DB.QueryRowContext(ctx, "SELECT id,world_id,scenario,provider,model,task,status,step,transcript,fault_operation FROM runs WHERE id=?", id).Scan(&r.ID, &r.WorldID, &r.Scenario, &r.Provider, &r.Model, &r.Task, &r.Status, &r.Step, &r.Transcript, &r.FaultOperation)
 	return r, err
+}
+
+func (s *Store) Lineage(ctx context.Context, childRunID string) (ForkLineage, error) {
+	var lineage ForkLineage
+	var exists int
+	if err := s.DB.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='fork_lineage'").Scan(&exists); err != nil {
+		return lineage, err
+	}
+	if exists == 0 {
+		return lineage, sql.ErrNoRows
+	}
+	err := s.DB.QueryRowContext(ctx, `SELECT child_run_id,parent_run_id,fork_event_seq,checkpoint_id,format_version,manifest_digest,prefix_digest,parent_provider,parent_model FROM fork_lineage WHERE child_run_id=?`, childRunID).Scan(
+		&lineage.ChildRunID, &lineage.ParentRunID, &lineage.ForkEventSeq, &lineage.CheckpointID, &lineage.FormatVersion, &lineage.ManifestDigest, &lineage.PrefixDigest, &lineage.ParentProvider, &lineage.ParentModel)
+	return lineage, err
 }
 
 func (s *Store) Append(ctx context.Context, runID, typ string, payload any) error {

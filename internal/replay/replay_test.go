@@ -12,8 +12,10 @@ import (
 	"testing"
 
 	"twinwright/internal/agent"
+	"twinwright/internal/checkpoint"
 	"twinwright/internal/compiler"
 	"twinwright/internal/dispatch"
+	"twinwright/internal/fork"
 	"twinwright/internal/store"
 )
 
@@ -88,6 +90,128 @@ func TestVerifyCompletedRunWith503AndPause(t *testing.T) {
 	if len(after) != len(before) {
 		t.Fatalf("source ledger changed: %d to %d", len(before), len(after))
 	}
+}
+
+func completedFork(t *testing.T) (*store.Store, store.Run, store.Run, compiler.Manifest) {
+	t.Helper()
+	ctx := context.Background()
+	source, parent, manifest := completedRun(t)
+	points, err := checkpoint.List(ctx, source, parent.ID, manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var selected checkpoint.Checkpoint
+	for _, point := range points {
+		if point.EventType == "model.response" {
+			selected = point
+			break
+		}
+	}
+	if selected.ID == "" {
+		t.Fatal("model response checkpoint missing")
+	}
+	fault := ""
+	created, err := fork.Create(ctx, source, source, selected, manifest, fork.Options{Model: "alternative-fixture", FaultOperation: &fault})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := agent.Runner{Store: source, Dispatch: &dispatch.Dispatcher{Store: source, Manifest: manifest}, Manifest: manifest, Provider: agent.ScriptedProvider{}}
+	child, err := runner.Execute(ctx, created.Run.ID, 20)
+	if err != nil || child.Status != "completed" {
+		t.Fatalf("child=%+v err=%v", child, err)
+	}
+	return source, parent, child, manifest
+}
+
+func TestVerifyCompletedForkWithChangedModelAndFault(t *testing.T) {
+	source, _, child, manifest := completedFork(t)
+	report, err := Verify(context.Background(), source, child.ID, manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Verified || report.ToolCalls == 0 || report.ModelTurns == 0 {
+		t.Fatalf("fork replay=%+v", report)
+	}
+}
+
+func TestVerifyForkFromCompletionWithoutNewModelTurn(t *testing.T) {
+	ctx := context.Background()
+	source, parent, manifest := completedRun(t)
+	points, err := checkpoint.List(ctx, source, parent.ID, manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected := points[len(points)-1]
+	if selected.EventType != "execution.completed" {
+		t.Fatalf("last checkpoint=%+v", selected)
+	}
+	created, err := fork.Create(ctx, source, source, selected, manifest, fork.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := agent.Runner{Store: source, Dispatch: &dispatch.Dispatcher{Store: source, Manifest: manifest}, Manifest: manifest, Provider: agent.ScriptedProvider{}}
+	child, err := runner.Execute(ctx, created.Run.ID, 1)
+	if err != nil || child.Status != "completed" {
+		t.Fatalf("child=%+v err=%v", child, err)
+	}
+	report, err := Verify(ctx, source, child.ID, manifest)
+	if err != nil || !report.Verified || report.ModelTurns != 0 {
+		t.Fatalf("fork replay=%+v err=%v", report, err)
+	}
+}
+
+func TestVerifyForkCopiesOnlyPrefixToolResults(t *testing.T) {
+	ctx := context.Background()
+	source, parent, manifest := completedRun(t)
+	points, err := checkpoint.List(ctx, source, parent.ID, manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var selected checkpoint.Checkpoint
+	for _, point := range points {
+		if point.EventType == "tool.response" {
+			selected = point
+			break
+		}
+	}
+	if selected.ID == "" {
+		t.Fatal("tool checkpoint missing")
+	}
+	created, err := fork.Create(ctx, source, source, selected, manifest, fork.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := agent.Runner{Store: source, Dispatch: &dispatch.Dispatcher{Store: source, Manifest: manifest}, Manifest: manifest, Provider: agent.ScriptedProvider{}}
+	child, err := runner.Execute(ctx, created.Run.ID, 20)
+	if err != nil || child.Status != "completed" {
+		t.Fatalf("child=%+v err=%v", child, err)
+	}
+	report, err := Verify(ctx, source, child.ID, manifest)
+	if err != nil || !report.Verified {
+		t.Fatalf("fork replay=%+v err=%v", report, err)
+	}
+}
+
+func TestVerifyForkRejectsTamperedLineageAndParentPrefix(t *testing.T) {
+	ctx := context.Background()
+	t.Run("lineage", func(t *testing.T) {
+		source, _, child, manifest := completedFork(t)
+		if _, err := source.DB.ExecContext(ctx, "UPDATE fork_lineage SET prefix_digest='tampered' WHERE child_run_id=?", child.ID); err != nil {
+			t.Fatal(err)
+		}
+		if report, err := Verify(ctx, source, child.ID, manifest); err == nil && report.Verified {
+			t.Fatal("tampered lineage accepted")
+		}
+	})
+	t.Run("parent prefix", func(t *testing.T) {
+		source, parent, child, manifest := completedFork(t)
+		if _, err := source.DB.ExecContext(ctx, "UPDATE events SET payload='{}' WHERE run_id=? AND seq=1", parent.ID); err != nil {
+			t.Fatal(err)
+		}
+		if report, err := Verify(ctx, source, child.ID, manifest); err == nil && report.Verified {
+			t.Fatal("tampered parent accepted")
+		}
+	})
 }
 
 func TestVerifyDetectsTamperedToolResponse(t *testing.T) {
