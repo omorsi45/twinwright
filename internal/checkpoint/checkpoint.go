@@ -113,7 +113,7 @@ func List(ctx context.Context, s *store.Store, runID string, manifest compiler.M
 				return nil, fmt.Errorf("invalid tool request at event %d", event.Seq)
 			}
 			toolOpen, toolCallID, toolOperation = true, request.CallID, request.OperationID
-		case "state.mutation", "retry":
+		case "state.mutation", "retry", "chaos.injected", "chaos.actor_mutation":
 			if !toolOpen {
 				return nil, fmt.Errorf("%s without tool request at event %d", event.Type, event.Seq)
 			}

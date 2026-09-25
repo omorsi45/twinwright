@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -12,6 +13,7 @@ import (
 	"testing"
 
 	"twinwright/internal/agent"
+	"twinwright/internal/chaos"
 	"twinwright/internal/checkpoint"
 	"twinwright/internal/compiler"
 	"twinwright/internal/dispatch"
@@ -89,6 +91,248 @@ func TestVerifyCompletedRunWith503AndPause(t *testing.T) {
 	}
 	if len(after) != len(before) {
 		t.Fatalf("source ledger changed: %d to %d", len(before), len(after))
+	}
+}
+
+func completedChaosRun(t *testing.T) (*store.Store, store.Run, compiler.Manifest) {
+	t.Helper()
+	ctx := context.Background()
+	source, _, manifest := completedRun(t)
+	world, err := source.Seed(ctx, 42, manifest.Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := chaos.Parse([]byte("version: 1\nrules:\n  - id: temporary-billing-failure\n    type: http_error\n    operations: [listCharges]\n    status: 503\n    times: 1\n"), manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := policy.CanonicalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := source.CreateRunWithChaos(ctx, world.ID, "duplicate-charge", "scripted", "fixture-v1", "task", "", encoded, policy.Digest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := agent.Runner{Store: source, Dispatch: &dispatch.Dispatcher{Store: source, Manifest: manifest}, Manifest: manifest, Provider: agent.ScriptedProvider{}}
+	done, err := runner.Execute(ctx, run.ID, 20)
+	if err != nil || done.Status != "completed" {
+		t.Fatalf("chaos run=%+v err=%v", done, err)
+	}
+	return source, done, manifest
+}
+
+func TestVerifyChaosRunAndFork(t *testing.T) {
+	ctx := context.Background()
+	source, parent, manifest := completedChaosRun(t)
+	rootReport, err := Verify(ctx, source, parent.ID, manifest)
+	if err != nil || !rootReport.Verified {
+		t.Fatalf("root replay=%+v err=%v", rootReport, err)
+	}
+	points, err := checkpoint.List(ctx, source, parent.ID, manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, eventType := range []string{"model.response", "tool.response"} {
+		t.Run(eventType, func(t *testing.T) {
+			var selected checkpoint.Checkpoint
+			for _, point := range points {
+				if point.EventType == eventType {
+					selected = point
+					break
+				}
+			}
+			if selected.ID == "" {
+				t.Fatalf("no %s checkpoint", eventType)
+			}
+			created, err := fork.Create(ctx, source, source, selected, manifest, fork.Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := source.ChaosPolicy(ctx, created.Run.ID); err != nil {
+				t.Fatalf("child lost chaos policy: %v", err)
+			}
+			runner := agent.Runner{Store: source, Dispatch: &dispatch.Dispatcher{Store: source, Manifest: manifest}, Manifest: manifest, Provider: agent.ScriptedProvider{}}
+			child, err := runner.Execute(ctx, created.Run.ID, 20)
+			if err != nil || child.Status != "completed" {
+				t.Fatalf("child=%+v err=%v", child, err)
+			}
+			childReport, err := Verify(ctx, source, child.ID, manifest)
+			if err != nil || !childReport.Verified {
+				t.Fatalf("child replay=%+v err=%v", childReport, err)
+			}
+		})
+	}
+}
+
+func TestVerifyChaosRejectsTamperedPolicyAndEvent(t *testing.T) {
+	for _, update := range []string{
+		"UPDATE run_chaos SET policy_json='{}' WHERE run_id=?",
+		"UPDATE events SET payload='{}' WHERE run_id=? AND type='chaos.injected'",
+	} {
+		t.Run(update, func(t *testing.T) {
+			source, run, manifest := completedChaosRun(t)
+			if _, err := source.DB.ExecContext(context.Background(), update, run.ID); err != nil {
+				t.Fatal(err)
+			}
+			if report, err := Verify(context.Background(), source, run.ID, manifest); err == nil && report.Verified {
+				t.Fatal("tampered chaos history accepted")
+			}
+		})
+	}
+}
+
+func TestVerifyChaosRejectsTamperedCounter(t *testing.T) {
+	ctx := context.Background()
+	source, run, manifest := completedChaosRun(t)
+	if _, err := source.DB.ExecContext(ctx, "UPDATE chaos_rule_state SET matching_calls=99 WHERE run_id=?", run.ID); err != nil {
+		t.Fatal(err)
+	}
+	report, err := Verify(ctx, source, run.ID, manifest)
+	if err == nil && report.Verified {
+		t.Fatal("tampered chaos counter accepted")
+	}
+}
+
+func TestVerifyLegacyDatabaseWithoutChaosTablesReadOnly(t *testing.T) {
+	ctx := context.Background()
+	source, run, manifest := completedRun(t)
+	for _, table := range []string{"run_chaos", "chaos_rule_state", "chaos_snapshots", "chaos_hidden_outcomes"} {
+		if _, err := source.DB.ExecContext(ctx, "DROP TABLE "+table); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var seq int
+	var name, path string
+	if err := source.DB.QueryRowContext(ctx, "PRAGMA database_list").Scan(&seq, &name, &path); err != nil {
+		t.Fatal(err)
+	}
+	readOnly, err := store.OpenReadOnly(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readOnly.Close()
+	report, err := Verify(ctx, readOnly, run.ID, manifest)
+	if err != nil || !report.Verified {
+		t.Fatalf("legacy replay=%+v err=%v", report, err)
+	}
+}
+
+func TestVerifyAmbiguousCommitFixtures(t *testing.T) {
+	for _, unsafe := range []bool{false, true} {
+		t.Run(fmt.Sprint(unsafe), func(t *testing.T) {
+			ctx := context.Background()
+			s, _, manifest := completedRun(t)
+			world, err := s.SeedScenario(ctx, 43, manifest.Digest, "ambiguous-commit")
+			if err != nil {
+				t.Fatal(err)
+			}
+			policy, err := chaos.Parse([]byte("version: 1\nrules:\n  - id: lost\n    type: timeout_after_commit\n    operations: [createRefund]\n    times: 1\n"), manifest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			encoded, _ := policy.CanonicalJSON()
+			run, err := s.CreateRunWithChaos(ctx, world.ID, "ambiguous-commit", "scripted", "fixture-v1", "task", "", encoded, policy.Digest())
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner := agent.Runner{Store: s, Dispatch: &dispatch.Dispatcher{Store: s, Manifest: manifest}, Manifest: manifest, Provider: agent.AmbiguousScriptedProvider{Unsafe: unsafe}}
+			completed, err := runner.Execute(ctx, run.ID, 8)
+			if err != nil || completed.Status != "completed" {
+				t.Fatalf("run=%+v err=%v", completed, err)
+			}
+			report, err := Verify(ctx, s, run.ID, manifest)
+			if err != nil || !report.Verified {
+				t.Fatalf("replay=%+v err=%v", report, err)
+			}
+			if _, err := s.DB.ExecContext(ctx, "UPDATE chaos_hidden_outcomes SET body='{}' WHERE run_id=?", run.ID); err != nil {
+				t.Fatal(err)
+			}
+			if report, err := Verify(ctx, s, run.ID, manifest); err == nil && report.Verified {
+				t.Fatal("tampered hidden outcome accepted")
+			}
+		})
+	}
+}
+
+type staleReplayProvider struct{}
+
+func (staleReplayProvider) Next(_ context.Context, _ string, history []agent.Message, _ []compiler.Operation) (agent.Message, error) {
+	count := 0
+	for _, message := range history {
+		if message.Role == "tool" {
+			count++
+		}
+	}
+	call := func(id, operation string, args map[string]any) agent.Message {
+		return agent.Message{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: id, OperationID: operation, Arguments: args}}}
+	}
+	switch count {
+	case 0:
+		return call("read-before", "getCharge", map[string]any{"id": "CH-1002"}), nil
+	case 1:
+		return call("refund", "createRefund", map[string]any{"charge_id": "CH-1002", "amount_cents": 500, "reason": "partial"}), nil
+	case 2:
+		return call("read-after", "getCharge", map[string]any{"id": "CH-1002"}), nil
+	default:
+		return agent.Message{Role: "assistant", Content: "Finished."}, nil
+	}
+}
+
+func TestVerifyStaleSnapshotAndForkPrefix(t *testing.T) {
+	ctx := context.Background()
+	s, _, manifest := completedRun(t)
+	world, err := s.SeedScenario(ctx, 43, manifest.Digest, "duplicate-charge")
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := chaos.Parse([]byte("version: 1\nrules:\n  - id: stale\n    type: stale_read\n    operations: [getCharge]\n    after_calls: 1\n"), manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, _ := policy.CanonicalJSON()
+	run, err := s.CreateRunWithChaos(ctx, world.ID, "duplicate-charge", "scripted", "fixture-v1", "task", "", encoded, policy.Digest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := agent.Runner{Store: s, Dispatch: &dispatch.Dispatcher{Store: s, Manifest: manifest}, Manifest: manifest, Provider: staleReplayProvider{}}
+	completed, err := runner.Execute(ctx, run.ID, 8)
+	if err != nil || completed.Status != "completed" {
+		t.Fatalf("run=%+v err=%v", completed, err)
+	}
+	if report, err := Verify(ctx, s, run.ID, manifest); err != nil || !report.Verified {
+		t.Fatalf("replay=%+v err=%v", report, err)
+	}
+	points, err := checkpoint.List(ctx, s, run.ID, manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var selected checkpoint.Checkpoint
+	for _, point := range points {
+		if point.EventType == "tool.response" {
+			selected = point
+			break
+		}
+	}
+	if selected.ID == "" {
+		t.Fatal("missing tool checkpoint")
+	}
+	created, err := fork.Create(ctx, s, s, selected, manifest, fork.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := runner.Execute(ctx, created.Run.ID, 8)
+	if err != nil || child.Status != "completed" {
+		t.Fatalf("child=%+v err=%v", child, err)
+	}
+	if report, err := Verify(ctx, s, child.ID, manifest); err != nil || !report.Verified {
+		t.Fatalf("fork replay=%+v err=%v", report, err)
+	}
+	if _, err := s.DB.ExecContext(ctx, "UPDATE chaos_snapshots SET body='{}' WHERE run_id=?", run.ID); err != nil {
+		t.Fatal(err)
+	}
+	if report, err := Verify(ctx, s, run.ID, manifest); err == nil && report.Verified {
+		t.Fatal("tampered snapshot accepted")
 	}
 }
 

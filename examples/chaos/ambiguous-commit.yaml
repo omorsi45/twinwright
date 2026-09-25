@@ -1,0 +1,6 @@
+version: 1
+rules:
+  - id: refund-response-lost
+    type: timeout_after_commit
+    operations: [createRefund]
+    times: 1

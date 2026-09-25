@@ -14,6 +14,8 @@ func Evaluate(ctx context.Context, s *store.Store, worldID, scenario string) (Re
 	switch scenario {
 	case "duplicate-charge":
 		return DuplicateCharge(ctx, s, worldID)
+	case "ambiguous-commit":
+		return AmbiguousCommit(ctx, s, worldID)
 	case "company-incident", "company-routine", "company-no-duplicate":
 		return company(ctx, s, worldID, scenario)
 	default:

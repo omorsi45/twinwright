@@ -4,7 +4,7 @@
 
 **Executable digital twins for testing autonomous AI agents before production.**
 
-Stateful software worlds, durable execution, deterministic evaluation, replay, and counterfactual forks for agent reliability engineering.
+Stateful software worlds, durable execution, deterministic evaluation, replay, counterfactual forks, and chaos testing for agent reliability engineering.
 
 ![Go](https://img.shields.io/badge/Go-1.27%2B-00ADD8?logo=go&logoColor=white)
 ![License](https://img.shields.io/badge/License-Apache--2.0-blue)
@@ -40,7 +40,8 @@ A run can:
 - record model and tool activity in an ordered event ledger
 - commit local side effects atomically
 - make repeated tool calls idempotent by stable call ID
-- inject controlled failures
+- inject deterministic chaos policies and controlled failures
+- model ambiguous outcomes such as timeout-after-commit
 - pause and resume durable execution
 - evaluate final state against deterministic ground truth
 - replay a completed run in an isolated world
@@ -56,11 +57,12 @@ The project includes a minimal billing world and a multi-service company world s
 flowchart LR
     A[AI Agent] --> R[Durable Agent Runtime]
     R --> D[Tool Dispatcher]
+    D --> H[Deterministic Chaos Engine]
 
-    D --> B[Billing]
-    D --> C[CRM]
-    D --> T[Ticketing]
-    D --> M[Messaging]
+    H --> B[Billing]
+    H --> C[CRM]
+    H --> T[Ticketing]
+    H --> M[Messaging]
 
     B --> S[(World State)]
     C --> S
@@ -69,6 +71,7 @@ flowchart LR
 
     R --> L[(Ordered Event Ledger)]
     D --> L
+    H --> L
 
     S --> E[Deterministic Evaluator]
     L --> P[Replay / Checkpoint / Fork]
@@ -140,7 +143,7 @@ go run ./cmd/twinwright replay <run-id> \
   --db company.db
 ```
 
-`inspect` exposes persisted execution state, ledger events, lineage, and deterministic evaluation results.
+`inspect` exposes persisted execution state, ledger events, lineage, deterministic evaluation results, and run analysis.
 
 `replay` reconstructs the run in an isolated world using the recorded assistant decisions. It makes no model call and does not mutate the source database. Twinwright compares semantic events, saved tool results, transcripts, and final world state to detect divergence.
 
@@ -184,6 +187,43 @@ go run ./cmd/twinwright compare <parent-run-id> <child-run-id> \
 ```
 
 This makes Twinwright useful not only for testing whether an agent failed, but for investigating **how changes in execution conditions alter downstream behavior**.
+
+## Deterministic chaos policies
+
+Use `--chaos` to attach a validated, versioned YAML policy to a new run. The policy is persisted with the run and reused on resume and replay. Forks inherit the policy and its counters at the selected checkpoint, or can replace it for the child.
+
+```bash
+go run ./cmd/twinwright build examples/billing/openapi.yaml
+
+go run ./cmd/twinwright run ambiguous-commit \
+  --agent scripted \
+  --chaos examples/chaos/ambiguous-commit.yaml \
+  --seed 42
+
+go run ./cmd/twinwright inspect <run-id>
+go run ./cmd/twinwright replay <run-id>
+```
+
+The ambiguous-commit scenario models a difficult distributed-systems failure: a write commits successfully, but the response is lost. A safe agent verifies state before retrying. An unsafe agent retries with a new call ID and can duplicate the side effect.
+
+Twinwright separates deterministic evaluation from failure analysis. The run can report infrastructure faults, unsafe retries, recovery success, and agent failure without allowing a later state check to erase evidence of an unsafe action.
+
+Supported policy effects include:
+
+| Rule type | Effect |
+| --- | --- |
+| `http_error` | Return a configured 4xx or 5xx response before execution |
+| `timeout` | Return a transport timeout before execution |
+| `timeout_after_commit` | Commit a write but hide its successful response |
+| `rate_limit` | Return 429 after a configured call gate |
+| `permission_revocation` | Simulate a 403 service denial |
+| `partial_service_outage` | Return 503 across selected operations |
+| `latency` | Record deterministic simulated delay and execute normally |
+| `stale_read` | Return a captured earlier read for matching arguments |
+| `malformed_response` | Replace the visible response while auditing the actual result |
+| `concurrent_mutation` | Execute a validated actor write before the selected agent call |
+
+See `examples/chaos/` and `docs/adr/0008-chaos-engine.md`.
 
 ## Live model execution
 
@@ -232,6 +272,10 @@ A committed tool call can be retried with the same call ID and request without r
 
 Model requests, model responses, tool activity, execution status, and state mutations are persisted so interrupted runs can be inspected and resumed.
 
+### Deterministic chaos
+
+Fault rules and counters are persisted with the run so the same recorded execution can be replayed against the same simulated failure conditions.
+
 ### Ground-truth evaluation
 
 Twinwright evaluates persisted world state. It does not trust an agent simply because the agent claims the task succeeded.
@@ -242,7 +286,7 @@ Verification replay uses an isolated reconstruction and leaves the source run da
 
 ### Explicit capability boundaries
 
-Unsupported schemas, routes, behaviors, manifests, and replay conditions fail explicitly instead of silently falling back to fake behavior.
+Unsupported schemas, routes, behaviors, manifests, chaos rules, and replay conditions fail explicitly instead of silently falling back to fake behavior.
 
 ## Stateful company world
 
@@ -312,7 +356,7 @@ execution.paused
 execution.completed
 ```
 
-Stable event ordering and persisted tool results provide the foundation for recovery, replay, checkpoint reconstruction, forking, and trajectory comparison.
+Stable event ordering and persisted tool results provide the foundation for recovery, replay, checkpoint reconstruction, forking, chaos analysis, and trajectory comparison.
 
 ## Repository layout
 
@@ -328,8 +372,9 @@ internal/
   messaging/          messaging simulation
   compiler/           API and world compilation
   dispatch/           validated tool execution
+  chaos/              deterministic fault policies and state
   store/              SQLite state, ledger, and transactions
-  eval/               deterministic scenario evaluation
+  eval/               deterministic scenario evaluation and run analysis
   replay/             verification replay
   checkpoint/         checkpoint discovery and reconstruction
   fork/               fork execution and trajectory comparison
@@ -337,6 +382,7 @@ internal/
 examples/
   billing/            minimal stateful reference world
   company/            multi-service company world
+  chaos/              deterministic failure policies
 
 docs/adr/             architecture decision records
 ```
@@ -365,6 +411,7 @@ Twinwright is intended as infrastructure for work such as:
 - tool-use evaluation
 - long-horizon workflow testing
 - failure and recovery experiments
+- ambiguous side-effect testing
 - regression testing across model versions
 - cross-service agent evaluation
 - execution replay and debugging
@@ -414,6 +461,7 @@ Major runtime contracts are documented as ADRs under `docs/adr/`, including:
 - multi-service company world
 - versioned world definitions
 - checkpoint reconstruction and execution forks
+- deterministic chaos policies and ambiguous-commit recovery
 
 The ADRs document not only what Twinwright does, but why the implementation makes those tradeoffs.
 
@@ -422,6 +470,8 @@ The ADRs document not only what Twinwright does, but why the implementation make
 Twinwright's included worlds are fictional local simulations.
 
 The project does not require production credentials for its deterministic examples and does not connect to real billing, CRM, ticketing, or messaging systems by default.
+
+The current `permission_revocation` chaos effect simulates a service denial; it is not a principal-based authorization system.
 
 Keep provider credentials outside the repository.
 

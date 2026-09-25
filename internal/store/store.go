@@ -53,6 +53,7 @@ type ForkLineage struct {
 	PrefixDigest   string `json:"prefix_digest"`
 	ParentProvider string `json:"parent_provider"`
 	ParentModel    string `json:"parent_model"`
+	ChaosReplaced  bool   `json:"chaos_replaced"`
 }
 
 func Open(path string) (*Store, error) {
@@ -88,7 +89,11 @@ func Open(path string) (*Store, error) {
 		`CREATE TABLE IF NOT EXISTS events (run_id TEXT NOT NULL, seq INTEGER NOT NULL, id TEXT NOT NULL UNIQUE, recorded_at TEXT NOT NULL, world_at TEXT NOT NULL, type TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(run_id,seq))`,
 		`CREATE TABLE IF NOT EXISTS tool_results (run_id TEXT NOT NULL, call_id TEXT NOT NULL, operation_id TEXT NOT NULL, arguments TEXT NOT NULL, status INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY(run_id,call_id))`,
 		`CREATE TABLE IF NOT EXISTS checkpoints (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, event_seq INTEGER NOT NULL, format_version INTEGER NOT NULL, manifest_digest TEXT NOT NULL, prefix_digest TEXT NOT NULL)`,
-		`CREATE TABLE IF NOT EXISTS fork_lineage (child_run_id TEXT PRIMARY KEY, parent_run_id TEXT NOT NULL, fork_event_seq INTEGER NOT NULL, checkpoint_id TEXT NOT NULL, format_version INTEGER NOT NULL, manifest_digest TEXT NOT NULL, prefix_digest TEXT NOT NULL, parent_provider TEXT NOT NULL, parent_model TEXT NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS fork_lineage (child_run_id TEXT PRIMARY KEY, parent_run_id TEXT NOT NULL, fork_event_seq INTEGER NOT NULL, checkpoint_id TEXT NOT NULL, format_version INTEGER NOT NULL, manifest_digest TEXT NOT NULL, prefix_digest TEXT NOT NULL, parent_provider TEXT NOT NULL, parent_model TEXT NOT NULL, chaos_replaced INTEGER NOT NULL DEFAULT 0)`,
+		`CREATE TABLE IF NOT EXISTS run_chaos (run_id TEXT PRIMARY KEY, policy_json TEXT NOT NULL, digest TEXT NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS chaos_rule_state (run_id TEXT NOT NULL, rule_id TEXT NOT NULL, matching_calls INTEGER NOT NULL DEFAULT 0, injections INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(run_id,rule_id))`,
+		`CREATE TABLE IF NOT EXISTS chaos_snapshots (run_id TEXT NOT NULL, rule_id TEXT NOT NULL, arguments_digest TEXT NOT NULL, status INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY(run_id,rule_id,arguments_digest))`,
+		`CREATE TABLE IF NOT EXISTS chaos_hidden_outcomes (run_id TEXT NOT NULL, call_id TEXT NOT NULL, rule_id TEXT NOT NULL, status INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY(run_id,call_id))`,
 	}
 	for _, stmt := range schema {
 		if _, err = db.Exec(stmt); err != nil {
@@ -100,7 +105,42 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("schema migration: %w", err)
 	}
+	if err = ensureForkChaosColumn(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("schema migration: %w", err)
+	}
 	return &Store{DB: db}, nil
+}
+func ensureForkChaosColumn(db *sql.DB) error {
+	rows, err := db.Query("PRAGMA table_info(fork_lineage)")
+	if err != nil {
+		return err
+	}
+	found := false
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, typ string
+		var defaultValue sql.NullString
+		if err = rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		if name == "chaos_replaced" {
+			found = true
+		}
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err = rows.Close(); err != nil {
+		return err
+	}
+	if found {
+		return nil
+	}
+	_, err = db.Exec("ALTER TABLE fork_lineage ADD COLUMN chaos_replaced INTEGER NOT NULL DEFAULT 0")
+	return err
 }
 func ensureModelColumn(db *sql.DB) error {
 	rows, err := db.Query("PRAGMA table_info(runs)")
@@ -162,7 +202,7 @@ func (s *Store) Seed(ctx context.Context, seed int64, digest string) (World, err
 
 func (s *Store) SeedScenario(ctx context.Context, seed int64, digest, scenario string) (World, error) {
 	switch scenario {
-	case "duplicate-charge", "company-incident", "company-routine", "company-no-duplicate":
+	case "duplicate-charge", "ambiguous-commit", "company-incident", "company-routine", "company-no-duplicate":
 	default:
 		return World{}, fmt.Errorf("unknown scenario %q", scenario)
 	}
@@ -256,6 +296,25 @@ func (s *Store) Snapshot(ctx context.Context, worldID string) (string, error) {
 }
 
 func (s *Store) CreateRun(ctx context.Context, worldID, scenario, provider, model, task, faultOperation string) (Run, error) {
+	return s.createRun(ctx, worldID, scenario, provider, model, task, faultOperation, nil, "")
+}
+
+// CreateRunWithChaos persists a validated policy in the same transaction as the run.
+func (s *Store) CreateRunWithChaos(ctx context.Context, worldID, scenario, provider, model, task, faultOperation string, policyJSON []byte, digest string) (Run, error) {
+	if faultOperation != "" {
+		return Run{}, fmt.Errorf("legacy fault and chaos policy cannot be combined")
+	}
+	if !json.Valid(policyJSON) {
+		return Run{}, fmt.Errorf("invalid chaos policy JSON")
+	}
+	hash := sha256.Sum256(policyJSON)
+	if hex.EncodeToString(hash[:]) != digest {
+		return Run{}, fmt.Errorf("chaos policy digest mismatch")
+	}
+	return s.createRun(ctx, worldID, scenario, provider, model, task, faultOperation, policyJSON, digest)
+}
+
+func (s *Store) createRun(ctx context.Context, worldID, scenario, provider, model, task, faultOperation string, policyJSON []byte, digest string) (Run, error) {
 	var random [12]byte
 	if _, err := crand.Read(random[:]); err != nil {
 		return Run{}, err
@@ -269,6 +328,11 @@ func (s *Store) CreateRun(ctx context.Context, worldID, scenario, provider, mode
 	if _, err = tx.ExecContext(ctx, "INSERT INTO runs(id,world_id,scenario,provider,model,task,status,transcript,fault_operation) VALUES(?,?,?,?,?,?,?,?,?)", r.ID, r.WorldID, r.Scenario, r.Provider, r.Model, r.Task, r.Status, r.Transcript, r.FaultOperation); err != nil {
 		return Run{}, err
 	}
+	if len(policyJSON) > 0 {
+		if _, err = tx.ExecContext(ctx, "INSERT INTO run_chaos(run_id,policy_json,digest) VALUES(?,?,?)", r.ID, string(policyJSON), digest); err != nil {
+			return Run{}, err
+		}
+	}
 	if err = AppendEventTx(ctx, tx, r.ID, "execution.started", map[string]any{"scenario": scenario, "provider": provider, "model": model, "world_id": worldID}); err != nil {
 		return Run{}, err
 	}
@@ -276,6 +340,35 @@ func (s *Store) CreateRun(ctx context.Context, worldID, scenario, provider, mode
 		return Run{}, err
 	}
 	return r, nil
+}
+
+// ChaosPolicy returns sql.ErrNoRows for old databases or runs without a policy.
+func (s *Store) ChaosPolicy(ctx context.Context, runID string) ([]byte, string, error) {
+	var exists int
+	if err := s.DB.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='run_chaos'").Scan(&exists); err != nil {
+		return nil, "", err
+	}
+	if exists == 0 {
+		return nil, "", sql.ErrNoRows
+	}
+	var encoded, digest string
+	if err := s.DB.QueryRowContext(ctx, "SELECT policy_json,digest FROM run_chaos WHERE run_id=?", runID).Scan(&encoded, &digest); err != nil {
+		return nil, "", err
+	}
+	return []byte(encoded), digest, nil
+}
+
+// AttachChaos initializes policy for a replay run before tool execution.
+func (s *Store) AttachChaos(ctx context.Context, runID string, policyJSON []byte, digest string) error {
+	if !json.Valid(policyJSON) {
+		return fmt.Errorf("invalid chaos policy JSON")
+	}
+	hash := sha256.Sum256(policyJSON)
+	if hex.EncodeToString(hash[:]) != digest {
+		return fmt.Errorf("chaos policy digest mismatch")
+	}
+	_, err := s.DB.ExecContext(ctx, "INSERT INTO run_chaos(run_id,policy_json,digest) VALUES(?,?,?)", runID, string(policyJSON), digest)
+	return err
 }
 
 func (s *Store) Run(ctx context.Context, id string) (Run, error) {
@@ -293,8 +386,18 @@ func (s *Store) Lineage(ctx context.Context, childRunID string) (ForkLineage, er
 	if exists == 0 {
 		return lineage, sql.ErrNoRows
 	}
-	err := s.DB.QueryRowContext(ctx, `SELECT child_run_id,parent_run_id,fork_event_seq,checkpoint_id,format_version,manifest_digest,prefix_digest,parent_provider,parent_model FROM fork_lineage WHERE child_run_id=?`, childRunID).Scan(
-		&lineage.ChildRunID, &lineage.ParentRunID, &lineage.ForkEventSeq, &lineage.CheckpointID, &lineage.FormatVersion, &lineage.ManifestDigest, &lineage.PrefixDigest, &lineage.ParentProvider, &lineage.ParentModel)
+	var chaosReplaced int
+	column := "chaos_replaced"
+	var hasColumn int
+	if err := s.DB.QueryRowContext(ctx, "SELECT count(*) FROM pragma_table_info('fork_lineage') WHERE name='chaos_replaced'").Scan(&hasColumn); err != nil {
+		return lineage, err
+	}
+	if hasColumn == 0 {
+		column = "0"
+	}
+	err := s.DB.QueryRowContext(ctx, `SELECT child_run_id,parent_run_id,fork_event_seq,checkpoint_id,format_version,manifest_digest,prefix_digest,parent_provider,parent_model,`+column+` FROM fork_lineage WHERE child_run_id=?`, childRunID).Scan(
+		&lineage.ChildRunID, &lineage.ParentRunID, &lineage.ForkEventSeq, &lineage.CheckpointID, &lineage.FormatVersion, &lineage.ManifestDigest, &lineage.PrefixDigest, &lineage.ParentProvider, &lineage.ParentModel, &chaosReplaced)
+	lineage.ChaosReplaced = chaosReplaced != 0
 	return lineage, err
 }
 
