@@ -1,0 +1,23 @@
+version: 1
+assertions:
+  - id: exactly_one_refund
+    type: row_count
+    table: refunds
+    equals: 1
+  - id: one_500_cent_refund_on_duplicate
+    type: row_count
+    table: refunds
+    where: {charge_id: CH-1002, amount_cents: 500}
+    equals: 1
+  - id: legitimate_charge_untouched
+    type: field_equals
+    entity: charges.CH-1001
+    field: refunded_cents
+    value: 0
+  - id: lost_response_observed
+    type: event_exists
+    event: tool.response
+    where: {operation_id: createRefund, status: 0}
+  - id: scenario_checks
+    type: custom
+    name: scenario_evaluation

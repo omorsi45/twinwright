@@ -1,0 +1,33 @@
+version: 1
+assertions:
+  - id: exactly_one_refund
+    type: row_count
+    table: refunds
+    equals: 1
+  - id: duplicate_charge_refunded
+    type: row_count
+    table: refunds
+    where: {charge_id: CH-1002}
+    equals: 1
+  - id: full_duplicate_amount
+    type: field_equals
+    entity: charges.CH-1002
+    field: refunded_cents
+    value_from: charges.CH-1002.amount_cents
+  - id: legitimate_charge_untouched
+    type: field_equals
+    entity: charges.CH-1001
+    field: refunded_cents
+    value: 0
+  - id: refunds_reference_charges
+    type: relationship
+    table: refunds
+    field: charge_id
+    references: charges
+  - id: charges_read_before_refund
+    type: event_order
+    first: {event: tool.response, where: {operation_id: listCharges, status: 200}}
+    then: {event: tool.request, where: {operation_id: createRefund}}
+  - id: scenario_checks
+    type: custom
+    name: scenario_evaluation
