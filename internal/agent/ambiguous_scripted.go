@@ -26,6 +26,9 @@ func (p AmbiguousScriptedProvider) Next(_ context.Context, _ string, history []M
 	case 0:
 		return call("refund-first", "createRefund", refundArgs), nil
 	case 1:
+		if tools[0].OperationID == "createRefund" && tools[0].Status == 201 {
+			return Message{Role: "assistant", Content: "Refund issued."}, nil
+		}
 		if tools[0].OperationID != "createRefund" || tools[0].Status != 0 {
 			return Message{}, fmt.Errorf("expected lost refund response")
 		}
