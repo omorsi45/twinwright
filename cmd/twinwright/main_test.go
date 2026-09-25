@@ -464,3 +464,42 @@ func TestCompanyScenarioAcceptsRenamedBoundOperation(t *testing.T) {
 		t.Fatalf("renamed bound operation rejected: %v", err)
 	}
 }
+
+func TestCLICheckpointsListsCommittedBoundaries(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join("..", "..", "examples", "billing")
+	manifest := filepath.Join(dir, "manifest.json")
+	db := filepath.Join(dir, "world.db")
+	if err := runCLI([]string{"build", filepath.Join(root, "openapi.yaml"), "--out", manifest}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	var started bytes.Buffer
+	if err := runCLI([]string{"run", "duplicate-charge", "--agent", "scripted", "--manifest", manifest, "--db", db, "--steps", "1"}, &started); err != nil {
+		t.Fatal(err)
+	}
+	var run struct {
+		Run struct {
+			ID string `json:"id"`
+		} `json:"run"`
+	}
+	if err := json.Unmarshal(started.Bytes(), &run); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := runCLI([]string{"checkpoints", run.Run.ID, "--manifest", manifest, "--db", db}, &output); err != nil {
+		t.Fatal(err)
+	}
+	var listed struct {
+		RunID       string `json:"run_id"`
+		Checkpoints []struct {
+			ID       string `json:"id"`
+			EventSeq int    `json:"event_seq"`
+		} `json:"checkpoints"`
+	}
+	if err := json.Unmarshal(output.Bytes(), &listed); err != nil {
+		t.Fatal(err)
+	}
+	if listed.RunID != run.Run.ID || len(listed.Checkpoints) < 2 || listed.Checkpoints[0].ID == "" {
+		t.Fatalf("checkpoints=%s", output.String())
+	}
+}

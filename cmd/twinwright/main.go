@@ -12,6 +12,7 @@ import (
 
 	"twinwright/internal/agent"
 	"twinwright/internal/behavior"
+	"twinwright/internal/checkpoint"
 	"twinwright/internal/compiler"
 	"twinwright/internal/dispatch"
 	"twinwright/internal/eval"
@@ -28,7 +29,7 @@ func main() {
 
 func runCLI(args []string, out io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: twinwright build|build-world|run|resume|inspect|replay ...")
+		return fmt.Errorf("usage: twinwright build|build-world|run|resume|inspect|replay|checkpoints ...")
 	}
 	ctx := context.Background()
 	switch args[0] {
@@ -201,6 +202,31 @@ func runCLI(args []string, out io.Writer) error {
 			return fmt.Errorf("run %s failed: %w", runID, err)
 		}
 		return emitResult(ctx, out, s, result)
+	case "checkpoints":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: twinwright checkpoints <run-id> [--manifest path] [--db path]")
+		}
+		fs := flag.NewFlagSet("checkpoints", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		manifestPath := fs.String("manifest", "twinwright.manifest.json", "compiled manifest")
+		dbPath := fs.String("db", "twinwright.db", "SQLite world database")
+		if err := fs.Parse(args[2:]); err != nil {
+			return err
+		}
+		manifest, err := readManifest(*manifestPath)
+		if err != nil {
+			return err
+		}
+		s, err := store.OpenReadOnly(*dbPath)
+		if err != nil {
+			return err
+		}
+		defer s.Close()
+		points, err := checkpoint.List(ctx, s, args[1], manifest)
+		if err != nil {
+			return err
+		}
+		return emit(out, map[string]any{"run_id": args[1], "checkpoints": points})
 	case "replay":
 		if len(args) < 2 {
 			return fmt.Errorf("usage: twinwright replay <run-id> [--manifest path] [--db path]")
