@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"twinwright/internal/compiler"
 	"twinwright/internal/dispatch"
 	"twinwright/internal/eval"
+	"twinwright/internal/fork"
 	"twinwright/internal/replay"
 	"twinwright/internal/store"
 )
@@ -29,7 +31,7 @@ func main() {
 
 func runCLI(args []string, out io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: twinwright build|build-world|run|resume|inspect|replay|checkpoints ...")
+		return fmt.Errorf("usage: twinwright build|build-world|run|resume|inspect|replay|checkpoints|fork|compare ...")
 	}
 	ctx := context.Background()
 	switch args[0] {
@@ -227,6 +229,112 @@ func runCLI(args []string, out io.Writer) error {
 			return err
 		}
 		return emit(out, map[string]any{"run_id": args[1], "checkpoints": points})
+	case "fork":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: twinwright fork <run-id> --at-event <seq> [options]")
+		}
+		fs := flag.NewFlagSet("fork", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		atEvent := fs.Int("at-event", 0, "committed checkpoint event sequence")
+		manifestPath := fs.String("manifest", "twinwright.manifest.json", "compiled manifest")
+		dbPath := fs.String("db", "twinwright.db", "SQLite world database")
+		providerName := fs.String("agent", "", "child provider override")
+		model := fs.String("model", "", "child model override")
+		fault := fs.String("fault", "", "new one-time fault operation")
+		steps := fs.Int("steps", 0, "model turns to run after fork; zero leaves the child paused")
+		if err := fs.Parse(args[2:]); err != nil {
+			return err
+		}
+		if *atEvent < 1 || *steps < 0 {
+			return fmt.Errorf("fork requires positive --at-event and nonnegative --steps")
+		}
+		manifest, err := readManifest(*manifestPath)
+		if err != nil {
+			return err
+		}
+		source, err := store.OpenReadOnly(*dbPath)
+		if err != nil {
+			return err
+		}
+		defer source.Close()
+		points, err := checkpoint.List(ctx, source, args[1], manifest)
+		if err != nil {
+			return err
+		}
+		selected, err := checkpoint.Select(points, *atEvent)
+		if err != nil {
+			return err
+		}
+		parent, err := source.Run(ctx, args[1])
+		if err != nil {
+			return err
+		}
+		selectedModel := *model
+		if *providerName != "" && *providerName != parent.Provider && selectedModel == "" {
+			selectedModel = resolveRunModel(*providerName, "")
+		}
+		options := fork.Options{Provider: *providerName, Model: selectedModel}
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "fault" {
+				options.FaultOperation = fault
+			}
+		})
+		var provider agent.Provider
+		if *steps > 0 {
+			providerNameForRun, modelForRun := parent.Provider, parent.Model
+			if options.Provider != "" {
+				providerNameForRun = options.Provider
+			}
+			if options.Model != "" {
+				modelForRun = options.Model
+			}
+			provider, err = selectProvider(providerNameForRun, modelForRun, parent.Scenario)
+			if err != nil {
+				return err
+			}
+		}
+		destination, err := store.Open(*dbPath)
+		if err != nil {
+			return err
+		}
+		defer destination.Close()
+		created, err := fork.Create(ctx, source, destination, selected, manifest, options)
+		if err != nil {
+			return err
+		}
+		if *steps == 0 {
+			return emit(out, map[string]any{"fork": created})
+		}
+		runner := agent.Runner{Store: destination, Dispatch: &dispatch.Dispatcher{Store: destination, Manifest: manifest}, Manifest: manifest, Provider: provider}
+		created.Run, err = runner.Execute(ctx, created.Run.ID, *steps)
+		if err != nil {
+			return fmt.Errorf("fork %s failed: %w", created.Run.ID, err)
+		}
+		report, err := eval.Evaluate(ctx, destination, created.Run.WorldID, created.Run.Scenario)
+		if err != nil {
+			return err
+		}
+		return emit(out, map[string]any{"fork": created, "evaluation": report})
+	case "compare":
+		if len(args) < 3 {
+			return fmt.Errorf("usage: twinwright compare <parent-run-id> <child-run-id> [--db path]")
+		}
+		fs := flag.NewFlagSet("compare", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		dbPath := fs.String("db", "twinwright.db", "SQLite world database")
+		if err := fs.Parse(args[3:]); err != nil {
+			return err
+		}
+		s, err := store.OpenReadOnly(*dbPath)
+		if err != nil {
+			return err
+		}
+		defer s.Close()
+		report, err := fork.Compare(ctx, s, args[1], args[2])
+		if err != nil {
+			return err
+		}
+		return emit(out, report)
 	case "replay":
 		if len(args) < 2 {
 			return fmt.Errorf("usage: twinwright replay <run-id> [--manifest path] [--db path]")
@@ -285,7 +393,14 @@ func runCLI(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		return emit(out, map[string]any{"run": run, "events": events, "evaluation": report})
+		result := map[string]any{"run": run, "events": events, "evaluation": report}
+		lineage, err := s.Lineage(ctx, run.ID)
+		if err == nil {
+			result["lineage"] = lineage
+		} else if err != sql.ErrNoRows {
+			return err
+		}
+		return emit(out, result)
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
 	}
