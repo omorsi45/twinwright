@@ -137,6 +137,242 @@ func TestRunRejectsUnknownFaultBeforeCreatingDatabase(t *testing.T) {
 	}
 }
 
+func TestChaosCLIInvalidPolicyDoesNotCreateWorld(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join("..", "..", "examples", "billing")
+	manifest, db, policy := filepath.Join(dir, "manifest.json"), filepath.Join(dir, "world.db"), filepath.Join(dir, "invalid.yaml")
+	if err := runCLI([]string{"build", filepath.Join(root, "openapi.yaml"), "--out", manifest}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(policy, []byte("version: 1\nrules:\n  - {id: bad, type: timeout, operations: [missing], times: 1}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := runCLI([]string{"run", "ambiguous-commit", "--agent", "scripted", "--manifest", manifest, "--db", db, "--chaos", policy}, &bytes.Buffer{}); err == nil {
+		t.Fatal("invalid policy accepted")
+	}
+	if _, err := os.Stat(db); !os.IsNotExist(err) {
+		t.Fatalf("database created: %v", err)
+	}
+}
+
+func TestChaosCLISafeAndUnsafeRuns(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join("..", "..", "examples", "billing")
+	manifest, db, policy := filepath.Join(dir, "manifest.json"), filepath.Join(dir, "world.db"), filepath.Join(dir, "chaos.yaml")
+	if err := runCLI([]string{"build", filepath.Join(root, "openapi.yaml"), "--out", manifest}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(policy, []byte("version: 1\nrules:\n  - id: lost\n    type: timeout_after_commit\n    operations: [createRefund]\n    times: 1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, recovery := range []string{"safe", "unsafe"} {
+		var out bytes.Buffer
+		if err := runCLI([]string{"run", "ambiguous-commit", "--agent", "scripted", "--recovery", recovery, "--manifest", manifest, "--db", db, "--chaos", policy}, &out); err != nil {
+			t.Fatal(err)
+		}
+		var result struct {
+			Run struct {
+				ID     string `json:"id"`
+				Status string `json:"status"`
+			} `json:"run"`
+			Evaluation ReportForTest `json:"evaluation"`
+			Analysis   struct {
+				UnsafeRetry struct {
+					Detected bool `json:"detected"`
+				} `json:"unsafe_retry"`
+			} `json:"analysis"`
+		}
+		if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		if result.Run.Status != "completed" || result.Evaluation.Passed != (recovery == "safe") || result.Analysis.UnsafeRetry.Detected != (recovery == "unsafe") {
+			t.Fatalf("%s: %s", recovery, out.String())
+		}
+		out.Reset()
+		if err := runCLI([]string{"replay", result.Run.ID, "--manifest", manifest, "--db", db}, &out); err != nil {
+			t.Fatalf("replay %s: %v", recovery, err)
+		}
+	}
+}
+
+func TestForkChaosPolicyReplacementStartsClean(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join("..", "..", "examples", "billing")
+	manifest, db := filepath.Join(dir, "manifest.json"), filepath.Join(dir, "world.db")
+	first, replacement := filepath.Join(dir, "first.yaml"), filepath.Join(dir, "replacement.yaml")
+	if err := runCLI([]string{"build", filepath.Join(root, "openapi.yaml"), "--out", manifest}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(first, []byte("version: 1\nrules:\n  - id: lost\n    type: timeout_after_commit\n    operations: [createRefund]\n    times: 1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(replacement, []byte("version: 1\nrules:\n  - id: fresh\n    type: latency\n    operations: [getCharge]\n    duration_ms: 250\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := runCLI([]string{"run", "ambiguous-commit", "--agent", "scripted", "--manifest", manifest, "--db", db, "--chaos", first}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var rootResult struct {
+		Run struct {
+			ID string `json:"id"`
+		} `json:"run"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &rootResult); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := runCLI([]string{"checkpoints", rootResult.Run.ID, "--manifest", manifest, "--db", db}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var points struct {
+		Checkpoints []struct {
+			EventSeq  int    `json:"event_seq"`
+			EventType string `json:"event_type"`
+		} `json:"checkpoints"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &points); err != nil {
+		t.Fatal(err)
+	}
+	seq := 0
+	for _, point := range points.Checkpoints {
+		if point.EventType == "tool.response" {
+			seq = point.EventSeq
+			break
+		}
+	}
+	if seq == 0 {
+		t.Fatal("missing tool response checkpoint")
+	}
+	out.Reset()
+	if err := runCLI([]string{"fork", rootResult.Run.ID, "--at-event", strconv.Itoa(seq), "--manifest", manifest, "--db", db, "--chaos", replacement}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var forkResult struct {
+		Fork struct {
+			Run struct {
+				ID string `json:"id"`
+			} `json:"run"`
+		} `json:"fork"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &forkResult); err != nil {
+		t.Fatal(err)
+	}
+	s, err := store.OpenReadOnly(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	var policyJSON string
+	if err := s.DB.QueryRow("SELECT policy_json FROM run_chaos WHERE run_id=?", forkResult.Fork.Run.ID).Scan(&policyJSON); err != nil || !strings.Contains(policyJSON, "fresh") {
+		t.Fatalf("policy=%s err=%v", policyJSON, err)
+	}
+	var stateRows int
+	if err := s.DB.QueryRow("SELECT count(*) FROM chaos_rule_state WHERE run_id=?", forkResult.Fork.Run.ID).Scan(&stateRows); err != nil || stateRows != 0 {
+		t.Fatalf("state=%d err=%v", stateRows, err)
+	}
+	out.Reset()
+	if err := runCLI([]string{"resume", forkResult.Fork.Run.ID, "--manifest", manifest, "--db", db}, &out); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := runCLI([]string{"replay", forkResult.Fork.Run.ID, "--manifest", manifest, "--db", db}, &out); err != nil {
+		t.Fatalf("replay replaced fork: %v", err)
+	}
+	out.Reset()
+	if err := runCLI([]string{"inspect", forkResult.Fork.Run.ID, "--db", db}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var inspected struct {
+		Analysis struct {
+			SimulatedLatencyMS int `json:"simulated_latency_ms"`
+		} `json:"analysis"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &inspected); err != nil {
+		t.Fatal(err)
+	}
+	if inspected.Analysis.SimulatedLatencyMS != 250 {
+		t.Fatalf("inspect=%s", out.String())
+	}
+	out.Reset()
+	if err := runCLI([]string{"compare", rootResult.Run.ID, forkResult.Fork.Run.ID, "--db", db}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var compared struct {
+		Child struct {
+			Analysis struct {
+				SimulatedLatencyMS int `json:"simulated_latency_ms"`
+			} `json:"analysis"`
+		} `json:"child"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &compared); err != nil {
+		t.Fatal(err)
+	}
+	if compared.Child.Analysis.SimulatedLatencyMS != 250 {
+		t.Fatalf("compare=%s", out.String())
+	}
+	zeroGate := filepath.Join(dir, "zero-gate.yaml")
+	if err := os.WriteFile(zeroGate, []byte("version: 1\nrules:\n  - id: gate\n    type: rate_limit\n    operations: [getCustomer]\n    after_calls: 0\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := runCLI([]string{"fork", rootResult.Run.ID, "--at-event", strconv.Itoa(seq), "--manifest", manifest, "--db", db, "--chaos", zeroGate, "--steps", "5"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var zeroResult struct {
+		Fork struct {
+			Run struct {
+				ID string `json:"id"`
+			} `json:"run"`
+		} `json:"fork"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &zeroResult); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := runCLI([]string{"replay", zeroResult.Fork.Run.ID, "--manifest", manifest, "--db", db}, &out); err != nil {
+		t.Fatalf("zero-gate replacement replay: %v", err)
+	}
+	out.Reset()
+	if err := runCLI([]string{"fork", rootResult.Run.ID, "--at-event", strconv.Itoa(seq), "--manifest", manifest, "--db", db, "--model", "fixture-unsafe-v1", "--steps", "5"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var unsafeFork struct {
+		Fork struct {
+			Run struct {
+				ID string `json:"id"`
+			} `json:"run"`
+		} `json:"fork"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &unsafeFork); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := runCLI([]string{"inspect", unsafeFork.Fork.Run.ID, "--db", db}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var unsafeInspected struct {
+		Analysis struct {
+			UnsafeRetry struct {
+				Detected bool `json:"detected"`
+			} `json:"unsafe_retry"`
+			InfrastructureFault struct {
+				Detected bool `json:"detected"`
+			} `json:"infrastructure_fault"`
+		} `json:"analysis"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &unsafeInspected); err != nil {
+		t.Fatal(err)
+	}
+	if !unsafeInspected.Analysis.UnsafeRetry.Detected || !unsafeInspected.Analysis.InfrastructureFault.Detected {
+		t.Fatalf("unsafe fork analysis=%+v", unsafeInspected.Analysis)
+	}
+}
+
+type ReportForTest struct {
+	Passed bool `json:"passed"`
+}
+
 func TestFailedRunErrorIncludesRecoverableID(t *testing.T) {
 	dir := t.TempDir()
 	root := filepath.Join("..", "..", "examples", "billing")

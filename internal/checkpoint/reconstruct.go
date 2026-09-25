@@ -58,9 +58,13 @@ func Reconstruct(ctx context.Context, source *store.Store, runID string, selecte
 		return nil, store.Run{}, err
 	}
 	policyJSON, policyDigest, policyErr := source.ChaosPolicy(ctx, runID)
-	if policyErr != nil && policyErr != sql.ErrNoRows { return nil, store.Run{}, policyErr }
+	if policyErr != nil && policyErr != sql.ErrNoRows {
+		return nil, store.Run{}, policyErr
+	}
 	if policyErr == nil {
-		if err := target.AttachChaos(ctx, runID, policyJSON, policyDigest); err != nil { return nil, store.Run{}, err }
+		if err := target.AttachChaos(ctx, runID, policyJSON, policyDigest); err != nil {
+			return nil, store.Run{}, err
+		}
 	}
 	d := dispatch.Dispatcher{Store: target, Manifest: manifest}
 	var history []agent.Message

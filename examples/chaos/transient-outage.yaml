@@ -1,0 +1,6 @@
+version: 1
+rules:
+  - id: billing-temporary-outage
+    type: partial_service_outage
+    operations: [listCharges, getCharge]
+    times: 2

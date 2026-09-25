@@ -60,7 +60,7 @@ func Decide(ctx context.Context, tx *sql.Tx, runID, operationID string, argument
 		}
 		active := selected.RuleID == "" && calls > rule.AfterCalls && (rule.Times == 0 || injections < rule.Times)
 		if active && rule.Type == "stale_read" {
-			_, _, snapshotErr := LoadSnapshot(ctx, tx, runID, rule.ID, arguments)
+			_, _, snapshotErr := LoadSnapshot(ctx, tx, runID, rule.ID, operationID, arguments)
 			if snapshotErr == sql.ErrNoRows {
 				active = false
 			} else if snapshotErr != nil {
@@ -78,27 +78,27 @@ func Decide(ctx context.Context, tx *sql.Tx, runID, operationID string, argument
 	return selected, nil
 }
 
-func argumentDigest(arguments []byte) string {
-	hash := sha256.Sum256(arguments)
+func argumentDigest(operationID string, arguments []byte) string {
+	hash := sha256.Sum256(append(append([]byte(operationID), 0), arguments...))
 	return hex.EncodeToString(hash[:])
 }
 
 // SaveSnapshot records the first successful observation for one argument set.
-func SaveSnapshot(ctx context.Context, tx *sql.Tx, runID, ruleID string, arguments []byte, status int, body []byte) error {
+func SaveSnapshot(ctx context.Context, tx *sql.Tx, runID, ruleID, operationID string, arguments []byte, status int, body []byte) error {
 	if !json.Valid(arguments) || !json.Valid(body) {
 		return fmt.Errorf("invalid chaos snapshot JSON")
 	}
 	_, err := tx.ExecContext(ctx, `INSERT INTO chaos_snapshots(run_id,rule_id,arguments_digest,status,body) VALUES(?,?,?,?,?) ON CONFLICT(run_id,rule_id,arguments_digest) DO NOTHING`,
-		runID, ruleID, argumentDigest(arguments), status, string(body))
+		runID, ruleID, argumentDigest(operationID, arguments), status, string(body))
 	return err
 }
 
-func LoadSnapshot(ctx context.Context, tx *sql.Tx, runID, ruleID string, arguments []byte) (int, []byte, error) {
+func LoadSnapshot(ctx context.Context, tx *sql.Tx, runID, ruleID, operationID string, arguments []byte) (int, []byte, error) {
 	if !json.Valid(arguments) {
 		return 0, nil, fmt.Errorf("invalid chaos arguments JSON")
 	}
 	var status int
 	var body string
-	err := tx.QueryRowContext(ctx, "SELECT status,body FROM chaos_snapshots WHERE run_id=? AND rule_id=? AND arguments_digest=?", runID, ruleID, argumentDigest(arguments)).Scan(&status, &body)
+	err := tx.QueryRowContext(ctx, "SELECT status,body FROM chaos_snapshots WHERE run_id=? AND rule_id=? AND arguments_digest=?", runID, ruleID, argumentDigest(operationID, arguments)).Scan(&status, &body)
 	return status, []byte(body), err
 }

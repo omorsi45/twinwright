@@ -250,7 +250,7 @@ func validateArguments(op compiler.Operation, args map[string]any) error {
 		}
 	case "ticket.transitionIssue":
 		value := args["status"].(string)
-		if value != "open" && value != "investigating" && value != "resolved" {
+		if value != "open" && value != "in_progress" && value != "resolved" {
 			return fmt.Errorf("invalid status")
 		}
 	}
@@ -282,4 +282,42 @@ func (p Policy) Digest() string {
 	}
 	digest := sha256.Sum256(encoded)
 	return hex.EncodeToString(digest[:])
+}
+
+// ValidateStored verifies canonical persisted JSON without requiring omitted zero fields in YAML input form.
+func ValidateStored(encoded []byte, digest string, manifest compiler.Manifest) (Policy, error) {
+	var policy Policy
+	if err := json.Unmarshal(encoded, &policy); err != nil {
+		return Policy{}, err
+	}
+	canonical, err := policy.CanonicalJSON()
+	if err != nil || !bytes.Equal(canonical, encoded) || policy.Digest() != digest {
+		return Policy{}, fmt.Errorf("stored chaos policy is not canonical or digest differs")
+	}
+	var document map[string]any
+	if err := json.Unmarshal(encoded, &document); err != nil {
+		return Policy{}, err
+	}
+	if rules, ok := document["rules"].([]any); ok {
+		for _, value := range rules {
+			rule, ok := value.(map[string]any)
+			if !ok {
+				return Policy{}, fmt.Errorf("invalid stored chaos rule")
+			}
+			if rule["type"] == "rate_limit" || rule["type"] == "permission_revocation" {
+				if _, present := rule["after_calls"]; !present {
+					rule["after_calls"] = float64(0)
+				}
+			}
+		}
+	}
+	validatable, err := json.Marshal(document)
+	if err != nil {
+		return Policy{}, err
+	}
+	validated, err := Parse(validatable, manifest)
+	if err != nil || validated.Digest() != digest {
+		return Policy{}, fmt.Errorf("stored chaos policy fails validation")
+	}
+	return policy, nil
 }

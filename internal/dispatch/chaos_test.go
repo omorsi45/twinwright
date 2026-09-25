@@ -211,6 +211,19 @@ func TestStaleReadIsScopedToArguments(t *testing.T) {
 	}
 }
 
+func TestStaleReadIsScopedToOperation(t *testing.T) {
+	d, _, run := chaosRun(t, "type: stale_read\n    operations: [listInvoices, listCharges]\n    after_calls: 1")
+	ctx := context.Background()
+	first, err := d.Invoke(ctx, run.ID, "invoices", "listInvoices", map[string]any{"id": "C-104"})
+	if err != nil || first.Status != 200 {
+		t.Fatalf("first=%+v err=%v", first, err)
+	}
+	second, err := d.Invoke(ctx, run.ID, "charges", "listCharges", map[string]any{"id": "C-104"})
+	if err != nil || second.Status != 200 || string(second.Body) != "[]" {
+		t.Fatalf("cross-operation stale value: first=%s second=%+v err=%v", first.Body, second, err)
+	}
+}
+
 func TestConcurrentActorMutatesBeforeAgentRead(t *testing.T) {
 	d, s, run := chaosRun(t, "type: concurrent_mutation\n    operations: [getCharge]\n    times: 1\n    actor:\n      operation: createRefund\n      arguments: {charge_id: CH-1002, amount_cents: 500, reason: actor}")
 	result, err := d.Invoke(context.Background(), run.ID, "read", "getCharge", map[string]any{"id": "CH-1002"})

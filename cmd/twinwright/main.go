@@ -13,6 +13,7 @@ import (
 
 	"twinwright/internal/agent"
 	"twinwright/internal/behavior"
+	"twinwright/internal/chaos"
 	"twinwright/internal/checkpoint"
 	"twinwright/internal/compiler"
 	"twinwright/internal/dispatch"
@@ -115,6 +116,8 @@ func runCLI(args []string, out io.Writer) error {
 		model := fs.String("model", os.Getenv("OPENAI_MODEL"), "OpenAI model")
 		seed := fs.Int64("seed", 42, "world seed")
 		fault := fs.String("fault", "", "operation ID that returns HTTP 503 once")
+		chaosPath := fs.String("chaos", "", "deterministic chaos policy YAML")
+		recovery := fs.String("recovery", "safe", "scripted ambiguous-commit recovery: safe or unsafe")
 		steps := fs.Int("steps", 20, "maximum model turns in this invocation")
 		if err := fs.Parse(args[2:]); err != nil {
 			return err
@@ -129,7 +132,36 @@ func runCLI(args []string, out io.Writer) error {
 		if *fault != "" && manifest.Operation(*fault) == nil {
 			return fmt.Errorf("unknown fault operation %q", *fault)
 		}
+		if *fault != "" && *chaosPath != "" {
+			return fmt.Errorf("--fault and --chaos cannot be combined")
+		}
+		if *recovery != "safe" && *recovery != "unsafe" {
+			return fmt.Errorf("unknown recovery fixture %q", *recovery)
+		}
+		if *recovery != "safe" && (scenario != "ambiguous-commit" || *providerName != "scripted") {
+			return fmt.Errorf("--recovery requires scripted ambiguous-commit")
+		}
+		var policyJSON []byte
+		var policyDigest string
+		if *chaosPath != "" {
+			raw, err := os.ReadFile(*chaosPath)
+			if err != nil {
+				return err
+			}
+			policy, err := chaos.Parse(raw, manifest)
+			if err != nil {
+				return err
+			}
+			policyJSON, err = policy.CanonicalJSON()
+			if err != nil {
+				return err
+			}
+			policyDigest = policy.Digest()
+		}
 		*model = resolveRunModel(*providerName, *model)
+		if scenario == "ambiguous-commit" && *providerName == "scripted" {
+			*model = "fixture-" + *recovery + "-v1"
+		}
 		provider, err := selectProvider(*providerName, *model, scenario)
 		if err != nil {
 			return err
@@ -143,7 +175,12 @@ func runCLI(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		run, err := s.CreateRun(ctx, world.ID, scenario, *providerName, *model, task, *fault)
+		var run store.Run
+		if len(policyJSON) > 0 {
+			run, err = s.CreateRunWithChaos(ctx, world.ID, scenario, *providerName, *model, task, "", policyJSON, policyDigest)
+		} else {
+			run, err = s.CreateRun(ctx, world.ID, scenario, *providerName, *model, task, *fault)
+		}
 		if err != nil {
 			return err
 		}
@@ -241,6 +278,7 @@ func runCLI(args []string, out io.Writer) error {
 		providerName := fs.String("agent", "", "child provider override")
 		model := fs.String("model", "", "child model override")
 		fault := fs.String("fault", "", "new one-time fault operation")
+		chaosPath := fs.String("chaos", "", "replacement chaos policy YAML for child")
 		steps := fs.Int("steps", 0, "model turns to run after fork; zero leaves the child paused")
 		if err := fs.Parse(args[2:]); err != nil {
 			return err
@@ -279,6 +317,12 @@ func runCLI(args []string, out io.Writer) error {
 				options.FaultOperation = fault
 			}
 		})
+		if *chaosPath != "" {
+			options.ChaosPolicyRaw, err = os.ReadFile(*chaosPath)
+			if err != nil {
+				return err
+			}
+		}
 		if err := fork.ValidateOptions(parent, manifest, options); err != nil {
 			return err
 		}
@@ -403,7 +447,11 @@ func runCLI(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		result := map[string]any{"run": run, "events": events, "evaluation": report}
+		analysis, err := eval.AnalyzeRun(ctx, s, run.ID)
+		if err != nil {
+			return err
+		}
+		result := map[string]any{"run": run, "events": events, "evaluation": report, "analysis": analysis}
 		lineage, err := s.Lineage(ctx, run.ID)
 		if err == nil {
 			result["lineage"] = lineage
@@ -446,6 +494,9 @@ func resolveRunModel(agentName, model string) string {
 func selectProvider(name, model, scenario string) (agent.Provider, error) {
 	switch name {
 	case "scripted":
+		if scenario == "ambiguous-commit" {
+			return agent.AmbiguousScriptedProvider{Unsafe: model == "fixture-unsafe-v1"}, nil
+		}
 		if scenario != "duplicate-charge" {
 			return agent.CompanyScriptedProvider{Scenario: scenario}, nil
 		}
@@ -467,7 +518,11 @@ func emitResult(ctx context.Context, out io.Writer, s *store.Store, run store.Ru
 	if err != nil {
 		return err
 	}
-	return emit(out, map[string]any{"run": run, "evaluation": report})
+	analysis, err := eval.AnalyzeRun(ctx, s, run.ID)
+	if err != nil {
+		return err
+	}
+	return emit(out, map[string]any{"run": run, "evaluation": report, "analysis": analysis})
 }
 func emit(out io.Writer, value any) error { return json.NewEncoder(out).Encode(value) }
 
@@ -475,6 +530,8 @@ func scenarioTask(scenario string) (string, error) {
 	switch scenario {
 	case "duplicate-charge":
 		return "Customer C-104 says they were charged twice. Investigate the account and refund only the duplicate charge if appropriate.", nil
+	case "ambiguous-commit":
+		return "Issue exactly one 500-cent refund on duplicate charge CH-1002. If the write response is lost, verify the charge before deciding whether to retry.", nil
 	case "company-incident":
 		return "Investigate customer C-104 and CRM account A-104. Refund only a duplicate charge. Record the finding in a CRM note. If the account has software incident evidence, create an engineering issue in project PROJ-ENG and notify the support channel in workspace WS-1.", nil
 	case "company-routine":
@@ -488,11 +545,11 @@ func scenarioTask(scenario string) (string, error) {
 
 func checkScenarioManifest(manifest compiler.Manifest, scenario string) error {
 	if manifest.World != nil {
-		if manifest.World.Definition.SeedProfile != "company-v1" || scenario == "duplicate-charge" {
+		if manifest.World.Definition.SeedProfile != "company-v1" || scenario == "duplicate-charge" || scenario == "ambiguous-commit" {
 			return fmt.Errorf("scenario %q is incompatible with world seed profile %q", scenario, manifest.World.Definition.SeedProfile)
 		}
 	}
-	if scenario != "duplicate-charge" {
+	if scenario != "duplicate-charge" && scenario != "ambiguous-commit" {
 		hasAccountLookup := false
 		for _, operation := range manifest.Operations {
 			hasAccountLookup = hasAccountLookup || operation.Behavior == "crm.getAccount"

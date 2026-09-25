@@ -2,6 +2,7 @@ package eval
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 
@@ -30,6 +31,23 @@ func AnalyzeRun(ctx context.Context, s *store.Store, runID string) (RunAnalysis,
 	events, err := s.Events(ctx, runID)
 	if err != nil {
 		return RunAnalysis{}, err
+	}
+	lineage, err := s.Lineage(ctx, runID)
+	if err != nil && err != sql.ErrNoRows {
+		return RunAnalysis{}, err
+	}
+	if err == nil {
+		parentEvents, err := s.Events(ctx, lineage.ParentRunID)
+		if err != nil {
+			return RunAnalysis{}, err
+		}
+		prefix := make([]store.Event, 0, lineage.ForkEventSeq+len(events))
+		for _, event := range parentEvents {
+			if event.Seq <= lineage.ForkEventSeq {
+				prefix = append(prefix, event)
+			}
+		}
+		events = append(prefix, events...)
 	}
 	var analysis RunAnalysis
 	var lostCall, lostEvent, reconciledEvent string
@@ -61,20 +79,28 @@ func AnalyzeRun(ctx context.Context, s *store.Store, runID string) (RunAnalysis,
 				return RunAnalysis{}, err
 			}
 			analysis.SimulatedLatencyMS += effect.DurationMS
+			analysis.InfrastructureFault.Detected = true
+			analysis.InfrastructureFault.EventIDs = append(analysis.InfrastructureFault.EventIDs, event.ID)
 			if effect.Type == "timeout_after_commit" {
-				analysis.InfrastructureFault = Finding{true, append(analysis.InfrastructureFault.EventIDs, event.ID)}
 				lostCall, lostEvent = effect.CallID, event.ID
+				reconciledEvent, pendingReadCall, pendingReadEvent = "", "", ""
 			}
 		case "tool.response":
 			var response struct {
-				CallID string `json:"call_id"`
-				Status int    `json:"status"`
+				CallID string          `json:"call_id"`
+				Status int             `json:"status"`
+				Body   json.RawMessage `json:"body"`
 			}
 			if err := json.Unmarshal(event.Payload, &response); err != nil {
 				return RunAnalysis{}, err
 			}
 			if response.CallID == pendingReadCall && response.Status == 200 {
-				reconciledEvent = pendingReadEvent
+				var charge struct {
+					RefundedCents int `json:"refunded_cents"`
+				}
+				if err := json.Unmarshal(response.Body, &charge); err == nil && charge.RefundedCents >= 500 {
+					reconciledEvent = pendingReadEvent
+				}
 			}
 		}
 	}

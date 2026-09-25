@@ -19,6 +19,7 @@ type Options struct {
 	Provider       string
 	Model          string
 	FaultOperation *string
+	ChaosPolicyRaw []byte
 }
 
 type Result struct {
@@ -31,6 +32,14 @@ type Result struct {
 func ValidateOptions(parent store.Run, manifest compiler.Manifest, options Options) error {
 	if options.FaultOperation != nil && *options.FaultOperation != "" && manifest.Operation(*options.FaultOperation) == nil {
 		return fmt.Errorf("unknown fault operation %q", *options.FaultOperation)
+	}
+	if len(options.ChaosPolicyRaw) > 0 {
+		if options.FaultOperation != nil && *options.FaultOperation != "" {
+			return fmt.Errorf("fork fault and chaos policy cannot be combined")
+		}
+		if _, err := chaos.Parse(options.ChaosPolicyRaw, manifest); err != nil {
+			return err
+		}
 	}
 	if options.Provider != "" && options.Provider != "scripted" && options.Provider != "openai" {
 		return fmt.Errorf("unsupported fork provider %q", options.Provider)
@@ -88,6 +97,9 @@ func Create(ctx context.Context, sourceReadOnly, destination *store.Store, selec
 	if options.FaultOperation != nil {
 		fault = *options.FaultOperation
 	}
+	if len(options.ChaosPolicyRaw) > 0 {
+		fault = ""
+	}
 	var consumed int
 	if err := rebuiltStore.DB.QueryRowContext(ctx, "SELECT fault_consumed FROM runs WHERE id=?", rebuilt.ID).Scan(&consumed); err != nil {
 		return Result{}, err
@@ -133,15 +145,27 @@ func Create(ctx context.Context, sourceReadOnly, destination *store.Store, selec
 	if err := copyToolResults(ctx, rebuiltStore.DB, tx, parent.ID, child.ID); err != nil {
 		return Result{}, err
 	}
-	if err := chaos.CopyRun(ctx, rebuiltStore.DB, tx, parent.ID, child.ID); err != nil {
+	if len(options.ChaosPolicyRaw) > 0 {
+		policy, err := chaos.Parse(options.ChaosPolicyRaw, manifest)
+		if err != nil {
+			return Result{}, err
+		}
+		encoded, err := policy.CanonicalJSON()
+		if err != nil {
+			return Result{}, err
+		}
+		if _, err := tx.ExecContext(ctx, "INSERT INTO run_chaos(run_id,policy_json,digest) VALUES(?,?,?)", child.ID, string(encoded), policy.Digest()); err != nil {
+			return Result{}, err
+		}
+	} else if err := chaos.CopyRun(ctx, rebuiltStore.DB, tx, parent.ID, child.ID); err != nil {
 		return Result{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO checkpoints(id,run_id,event_seq,format_version,manifest_digest,prefix_digest) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`,
 		selected.ID, parent.ID, selected.EventSeq, selected.FormatVersion, selected.ManifestDigest, selected.PrefixDigest); err != nil {
 		return Result{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO fork_lineage(child_run_id,parent_run_id,fork_event_seq,checkpoint_id,format_version,manifest_digest,prefix_digest,parent_provider,parent_model) VALUES(?,?,?,?,?,?,?,?,?)`,
-		child.ID, parent.ID, selected.EventSeq, selected.ID, selected.FormatVersion, selected.ManifestDigest, selected.PrefixDigest, parent.Provider, parent.Model); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO fork_lineage(child_run_id,parent_run_id,fork_event_seq,checkpoint_id,format_version,manifest_digest,prefix_digest,parent_provider,parent_model,chaos_replaced) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		child.ID, parent.ID, selected.EventSeq, selected.ID, selected.FormatVersion, selected.ManifestDigest, selected.PrefixDigest, parent.Provider, parent.Model, len(options.ChaosPolicyRaw) > 0); err != nil {
 		return Result{}, err
 	}
 	if err := store.AppendEventTx(ctx, tx, child.ID, "execution.forked", map[string]any{

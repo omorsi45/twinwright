@@ -77,13 +77,13 @@ func TestSnapshotsAreArgumentScoped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := SaveSnapshot(ctx, tx, "run", "stale", []byte(`{"id":"A"}`), 200, []byte(`{"value":1}`)); err != nil {
+	if err := SaveSnapshot(ctx, tx, "run", "stale", "getCharge", []byte(`{"id":"A"}`), 200, []byte(`{"value":1}`)); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := LoadSnapshot(ctx, tx, "run", "stale", []byte(`{"id":"B"}`)); err != sql.ErrNoRows {
+	if _, _, err := LoadSnapshot(ctx, tx, "run", "stale", "getCharge", []byte(`{"id":"B"}`)); err != sql.ErrNoRows {
 		t.Fatalf("different argument snapshot error=%v", err)
 	}
-	status, body, err := LoadSnapshot(ctx, tx, "run", "stale", []byte(`{"id":"A"}`))
+	status, body, err := LoadSnapshot(ctx, tx, "run", "stale", "getCharge", []byte(`{"id":"A"}`))
 	if err != nil || status != 200 || string(body) != `{"value":1}` {
 		t.Fatalf("snapshot=%d %s err=%v", status, body, err)
 	}

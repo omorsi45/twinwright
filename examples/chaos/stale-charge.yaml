@@ -1,0 +1,6 @@
+version: 1
+rules:
+  - id: charge-snapshot
+    type: stale_read
+    operations: [getCharge]
+    after_calls: 1

@@ -114,6 +114,7 @@ func TestParseUsesBehaviorSemanticsForSearchAndActor(t *testing.T) {
 	for _, rule := range []string{
 		"type: stale_read\n    operations: [crmSearchAccounts]\n    after_calls: 1",
 		"type: timeout\n    operations: [crmSearchAccounts]\n    times: 1\n    after_calls: 2",
+		"type: concurrent_mutation\n    operations: [getCharge]\n    times: 1\n    actor:\n      operation: ticketTransitionIssue\n      arguments: {issue_id: ISSUE-1, status: in_progress}",
 	} {
 		if _, err := Parse([]byte("version: 1\nrules:\n  - id: x\n    "+rule+"\n"), manifest); err != nil {
 			t.Fatalf("valid rule rejected: %v", err)
@@ -123,6 +124,7 @@ func TestParseUsesBehaviorSemanticsForSearchAndActor(t *testing.T) {
 		"type: timeout_after_commit\n    operations: [crmSearchAccounts]\n    times: 1",
 		"type: concurrent_mutation\n    operations: [getCharge]\n    times: 1\n    actor:\n      operation: crmSearchAccounts\n      arguments: {query: Morgan}",
 		"type: concurrent_mutation\n    operations: [getCharge]\n    times: 1\n    actor:\n      operation: crmUpdateAccountStatus\n      arguments: {account_id: A-104, status: bogus}",
+		"type: concurrent_mutation\n    operations: [getCharge]\n    times: 1\n    actor:\n      operation: ticketTransitionIssue\n      arguments: {issue_id: ISSUE-1, status: investigating}",
 	} {
 		if _, err := Parse([]byte("version: 1\nrules:\n  - id: x\n    "+rule+"\n"), manifest); err == nil {
 			t.Fatalf("invalid rule accepted: %s", rule)

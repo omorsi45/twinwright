@@ -90,7 +90,19 @@ func ReconstructForReplay(ctx context.Context, source *store.Store, child store.
 	if _, err := tx.ExecContext(ctx, `INSERT INTO tool_results(run_id,call_id,operation_id,arguments,status,body) SELECT ?,call_id,operation_id,arguments,status,body FROM tool_results WHERE run_id=?`, child.ID, parent.ID); err != nil {
 		return nil, err
 	}
-	if err := chaos.CopyRunInTx(ctx, tx, parent.ID, child.ID); err != nil {
+	if lineage.ChaosReplaced {
+		encoded, digest, err := source.ChaosPolicy(ctx, child.ID)
+		if err != nil {
+			return nil, err
+		}
+		policy, err := chaos.ValidateStored(encoded, digest, manifest)
+		if err != nil || policy.Digest() != digest {
+			return nil, fmt.Errorf("fork replacement chaos policy differs from lineage")
+		}
+		if _, err := tx.ExecContext(ctx, "INSERT INTO run_chaos(run_id,policy_json,digest) VALUES(?,?,?)", child.ID, string(encoded), digest); err != nil {
+			return nil, err
+		}
+	} else if err := chaos.CopyRunInTx(ctx, tx, parent.ID, child.ID); err != nil {
 		return nil, err
 	}
 	if err := store.AppendEventTx(ctx, tx, child.ID, "execution.forked", map[string]any{

@@ -27,6 +27,7 @@ type RunOutcome struct {
 	RunID          string            `json:"run_id"`
 	Status         string            `json:"status"`
 	Evaluation     *eval.Report      `json:"evaluation,omitempty"`
+	Analysis       eval.RunAnalysis  `json:"analysis"`
 	ToolTrajectory []ToolStep        `json:"tool_trajectory"`
 	Mutations      []json.RawMessage `json:"mutations"`
 }
@@ -38,14 +39,15 @@ type StateDifference struct {
 }
 
 type Comparison struct {
-	ParentRunID      string            `json:"parent_run_id"`
-	ChildRunID       string            `json:"child_run_id"`
-	ForkEventSeq     int               `json:"fork_event_seq"`
-	Parent           RunOutcome        `json:"parent"`
-	Child            RunOutcome        `json:"child"`
-	StateDifferences []StateDifference `json:"state_differences"`
-	Latency          Availability      `json:"latency"`
-	ModelUsage       Availability      `json:"model_usage"`
+	ParentRunID        string            `json:"parent_run_id"`
+	ChildRunID         string            `json:"child_run_id"`
+	ForkEventSeq       int               `json:"fork_event_seq"`
+	Parent             RunOutcome        `json:"parent"`
+	Child              RunOutcome        `json:"child"`
+	StateDifferences   []StateDifference `json:"state_differences"`
+	Latency            Availability      `json:"latency"`
+	SimulatedLatencyMS map[string]int    `json:"simulated_latency_ms"`
+	ModelUsage         Availability      `json:"model_usage"`
 }
 
 // Compare reports the parent's suffix and the child's new execution after a fork.
@@ -76,7 +78,8 @@ func Compare(ctx context.Context, s *store.Store, parentRunID, childRunID string
 	report := Comparison{
 		ParentRunID: parentRunID, ChildRunID: childRunID, ForkEventSeq: lineage.ForkEventSeq,
 		Parent: parentOutcome, Child: childOutcome,
-		Latency: Availability{Reason: "latency not recorded"}, ModelUsage: Availability{Reason: "model usage not recorded"},
+		Latency: Availability{Reason: "real latency not measured"}, ModelUsage: Availability{Reason: "model usage not recorded"},
+		SimulatedLatencyMS: map[string]int{"parent": parentOutcome.Analysis.SimulatedLatencyMS, "child": childOutcome.Analysis.SimulatedLatencyMS},
 	}
 	for _, table := range worldTables {
 		parentRows, err := compareRows(ctx, s.DB, table, parent.WorldID)
@@ -97,6 +100,11 @@ func Compare(ctx context.Context, s *store.Store, parentRunID, childRunID string
 
 func outcome(ctx context.Context, s *store.Store, run store.Run, afterSeq int) (RunOutcome, error) {
 	result := RunOutcome{RunID: run.ID, Status: run.Status, ToolTrajectory: []ToolStep{}, Mutations: []json.RawMessage{}}
+	analysis, err := eval.AnalyzeRun(ctx, s, run.ID)
+	if err != nil {
+		return RunOutcome{}, err
+	}
+	result.Analysis = analysis
 	if run.Status == "completed" {
 		report, err := eval.Evaluate(ctx, s, run.WorldID, run.Scenario)
 		if err != nil {

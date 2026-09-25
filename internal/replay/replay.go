@@ -370,9 +370,17 @@ func compareChaosState(ctx context.Context, source, target *sql.DB, runID string
 		{"chaos_hidden_outcomes", "call_id,rule_id,status,body", "call_id"},
 	}
 	for _, table := range tables {
-		left, err := stateRows(ctx, source, table.name, table.columns, table.order, runID)
-		if err != nil {
+		var left [][]string
+		var exists int
+		if err := source.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?", table.name).Scan(&exists); err != nil {
 			return "", err
+		}
+		if exists != 0 {
+			var err error
+			left, err = stateRows(ctx, source, table.name, table.columns, table.order, runID)
+			if err != nil {
+				return "", err
+			}
 		}
 		right, err := stateRows(ctx, target, table.name, table.columns, table.order, runID)
 		if err != nil {

@@ -194,6 +194,30 @@ func TestVerifyChaosRejectsTamperedCounter(t *testing.T) {
 	}
 }
 
+func TestVerifyLegacyDatabaseWithoutChaosTablesReadOnly(t *testing.T) {
+	ctx := context.Background()
+	source, run, manifest := completedRun(t)
+	for _, table := range []string{"run_chaos", "chaos_rule_state", "chaos_snapshots", "chaos_hidden_outcomes"} {
+		if _, err := source.DB.ExecContext(ctx, "DROP TABLE "+table); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var seq int
+	var name, path string
+	if err := source.DB.QueryRowContext(ctx, "PRAGMA database_list").Scan(&seq, &name, &path); err != nil {
+		t.Fatal(err)
+	}
+	readOnly, err := store.OpenReadOnly(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readOnly.Close()
+	report, err := Verify(ctx, readOnly, run.ID, manifest)
+	if err != nil || !report.Verified {
+		t.Fatalf("legacy replay=%+v err=%v", report, err)
+	}
+}
+
 func TestVerifyAmbiguousCommitFixtures(t *testing.T) {
 	for _, unsafe := range []bool{false, true} {
 		t.Run(fmt.Sprint(unsafe), func(t *testing.T) {
@@ -221,7 +245,94 @@ func TestVerifyAmbiguousCommitFixtures(t *testing.T) {
 			if err != nil || !report.Verified {
 				t.Fatalf("replay=%+v err=%v", report, err)
 			}
+			if _, err := s.DB.ExecContext(ctx, "UPDATE chaos_hidden_outcomes SET body='{}' WHERE run_id=?", run.ID); err != nil {
+				t.Fatal(err)
+			}
+			if report, err := Verify(ctx, s, run.ID, manifest); err == nil && report.Verified {
+				t.Fatal("tampered hidden outcome accepted")
+			}
 		})
+	}
+}
+
+type staleReplayProvider struct{}
+
+func (staleReplayProvider) Next(_ context.Context, _ string, history []agent.Message, _ []compiler.Operation) (agent.Message, error) {
+	count := 0
+	for _, message := range history {
+		if message.Role == "tool" {
+			count++
+		}
+	}
+	call := func(id, operation string, args map[string]any) agent.Message {
+		return agent.Message{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: id, OperationID: operation, Arguments: args}}}
+	}
+	switch count {
+	case 0:
+		return call("read-before", "getCharge", map[string]any{"id": "CH-1002"}), nil
+	case 1:
+		return call("refund", "createRefund", map[string]any{"charge_id": "CH-1002", "amount_cents": 500, "reason": "partial"}), nil
+	case 2:
+		return call("read-after", "getCharge", map[string]any{"id": "CH-1002"}), nil
+	default:
+		return agent.Message{Role: "assistant", Content: "Finished."}, nil
+	}
+}
+
+func TestVerifyStaleSnapshotAndForkPrefix(t *testing.T) {
+	ctx := context.Background()
+	s, _, manifest := completedRun(t)
+	world, err := s.SeedScenario(ctx, 43, manifest.Digest, "duplicate-charge")
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := chaos.Parse([]byte("version: 1\nrules:\n  - id: stale\n    type: stale_read\n    operations: [getCharge]\n    after_calls: 1\n"), manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, _ := policy.CanonicalJSON()
+	run, err := s.CreateRunWithChaos(ctx, world.ID, "duplicate-charge", "scripted", "fixture-v1", "task", "", encoded, policy.Digest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := agent.Runner{Store: s, Dispatch: &dispatch.Dispatcher{Store: s, Manifest: manifest}, Manifest: manifest, Provider: staleReplayProvider{}}
+	completed, err := runner.Execute(ctx, run.ID, 8)
+	if err != nil || completed.Status != "completed" {
+		t.Fatalf("run=%+v err=%v", completed, err)
+	}
+	if report, err := Verify(ctx, s, run.ID, manifest); err != nil || !report.Verified {
+		t.Fatalf("replay=%+v err=%v", report, err)
+	}
+	points, err := checkpoint.List(ctx, s, run.ID, manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var selected checkpoint.Checkpoint
+	for _, point := range points {
+		if point.EventType == "tool.response" {
+			selected = point
+			break
+		}
+	}
+	if selected.ID == "" {
+		t.Fatal("missing tool checkpoint")
+	}
+	created, err := fork.Create(ctx, s, s, selected, manifest, fork.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := runner.Execute(ctx, created.Run.ID, 8)
+	if err != nil || child.Status != "completed" {
+		t.Fatalf("child=%+v err=%v", child, err)
+	}
+	if report, err := Verify(ctx, s, child.ID, manifest); err != nil || !report.Verified {
+		t.Fatalf("fork replay=%+v err=%v", report, err)
+	}
+	if _, err := s.DB.ExecContext(ctx, "UPDATE chaos_snapshots SET body='{}' WHERE run_id=?", run.ID); err != nil {
+		t.Fatal(err)
+	}
+	if report, err := Verify(ctx, s, run.ID, manifest); err == nil && report.Verified {
+		t.Fatal("tampered snapshot accepted")
 	}
 }
 

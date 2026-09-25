@@ -53,6 +53,7 @@ type ForkLineage struct {
 	PrefixDigest   string `json:"prefix_digest"`
 	ParentProvider string `json:"parent_provider"`
 	ParentModel    string `json:"parent_model"`
+	ChaosReplaced  bool   `json:"chaos_replaced"`
 }
 
 func Open(path string) (*Store, error) {
@@ -88,7 +89,7 @@ func Open(path string) (*Store, error) {
 		`CREATE TABLE IF NOT EXISTS events (run_id TEXT NOT NULL, seq INTEGER NOT NULL, id TEXT NOT NULL UNIQUE, recorded_at TEXT NOT NULL, world_at TEXT NOT NULL, type TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(run_id,seq))`,
 		`CREATE TABLE IF NOT EXISTS tool_results (run_id TEXT NOT NULL, call_id TEXT NOT NULL, operation_id TEXT NOT NULL, arguments TEXT NOT NULL, status INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY(run_id,call_id))`,
 		`CREATE TABLE IF NOT EXISTS checkpoints (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, event_seq INTEGER NOT NULL, format_version INTEGER NOT NULL, manifest_digest TEXT NOT NULL, prefix_digest TEXT NOT NULL)`,
-		`CREATE TABLE IF NOT EXISTS fork_lineage (child_run_id TEXT PRIMARY KEY, parent_run_id TEXT NOT NULL, fork_event_seq INTEGER NOT NULL, checkpoint_id TEXT NOT NULL, format_version INTEGER NOT NULL, manifest_digest TEXT NOT NULL, prefix_digest TEXT NOT NULL, parent_provider TEXT NOT NULL, parent_model TEXT NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS fork_lineage (child_run_id TEXT PRIMARY KEY, parent_run_id TEXT NOT NULL, fork_event_seq INTEGER NOT NULL, checkpoint_id TEXT NOT NULL, format_version INTEGER NOT NULL, manifest_digest TEXT NOT NULL, prefix_digest TEXT NOT NULL, parent_provider TEXT NOT NULL, parent_model TEXT NOT NULL, chaos_replaced INTEGER NOT NULL DEFAULT 0)`,
 		`CREATE TABLE IF NOT EXISTS run_chaos (run_id TEXT PRIMARY KEY, policy_json TEXT NOT NULL, digest TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS chaos_rule_state (run_id TEXT NOT NULL, rule_id TEXT NOT NULL, matching_calls INTEGER NOT NULL DEFAULT 0, injections INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(run_id,rule_id))`,
 		`CREATE TABLE IF NOT EXISTS chaos_snapshots (run_id TEXT NOT NULL, rule_id TEXT NOT NULL, arguments_digest TEXT NOT NULL, status INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY(run_id,rule_id,arguments_digest))`,
@@ -104,7 +105,42 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("schema migration: %w", err)
 	}
+	if err = ensureForkChaosColumn(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("schema migration: %w", err)
+	}
 	return &Store{DB: db}, nil
+}
+func ensureForkChaosColumn(db *sql.DB) error {
+	rows, err := db.Query("PRAGMA table_info(fork_lineage)")
+	if err != nil {
+		return err
+	}
+	found := false
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, typ string
+		var defaultValue sql.NullString
+		if err = rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		if name == "chaos_replaced" {
+			found = true
+		}
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err = rows.Close(); err != nil {
+		return err
+	}
+	if found {
+		return nil
+	}
+	_, err = db.Exec("ALTER TABLE fork_lineage ADD COLUMN chaos_replaced INTEGER NOT NULL DEFAULT 0")
+	return err
 }
 func ensureModelColumn(db *sql.DB) error {
 	rows, err := db.Query("PRAGMA table_info(runs)")
@@ -350,8 +386,18 @@ func (s *Store) Lineage(ctx context.Context, childRunID string) (ForkLineage, er
 	if exists == 0 {
 		return lineage, sql.ErrNoRows
 	}
-	err := s.DB.QueryRowContext(ctx, `SELECT child_run_id,parent_run_id,fork_event_seq,checkpoint_id,format_version,manifest_digest,prefix_digest,parent_provider,parent_model FROM fork_lineage WHERE child_run_id=?`, childRunID).Scan(
-		&lineage.ChildRunID, &lineage.ParentRunID, &lineage.ForkEventSeq, &lineage.CheckpointID, &lineage.FormatVersion, &lineage.ManifestDigest, &lineage.PrefixDigest, &lineage.ParentProvider, &lineage.ParentModel)
+	var chaosReplaced int
+	column := "chaos_replaced"
+	var hasColumn int
+	if err := s.DB.QueryRowContext(ctx, "SELECT count(*) FROM pragma_table_info('fork_lineage') WHERE name='chaos_replaced'").Scan(&hasColumn); err != nil {
+		return lineage, err
+	}
+	if hasColumn == 0 {
+		column = "0"
+	}
+	err := s.DB.QueryRowContext(ctx, `SELECT child_run_id,parent_run_id,fork_event_seq,checkpoint_id,format_version,manifest_digest,prefix_digest,parent_provider,parent_model,`+column+` FROM fork_lineage WHERE child_run_id=?`, childRunID).Scan(
+		&lineage.ChildRunID, &lineage.ParentRunID, &lineage.ForkEventSeq, &lineage.CheckpointID, &lineage.FormatVersion, &lineage.ManifestDigest, &lineage.PrefixDigest, &lineage.ParentProvider, &lineage.ParentModel, &chaosReplaced)
+	lineage.ChaosReplaced = chaosReplaced != 0
 	return lineage, err
 }
 

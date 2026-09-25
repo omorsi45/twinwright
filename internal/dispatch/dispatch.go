@@ -94,7 +94,7 @@ func (d *Dispatcher) Invoke(ctx context.Context, runID, callID, operationID stri
 				chaosPayload["duration_ms"] = decision.Rule.DurationMS
 			case "stale_read":
 				var staleBody []byte
-				status, staleBody, err = chaos.LoadSnapshot(ctx, tx, runID, decision.RuleID, arguments)
+				status, staleBody, err = chaos.LoadSnapshot(ctx, tx, runID, decision.RuleID, operationID, arguments)
 				if err != nil {
 					return Result{}, err
 				}
@@ -161,7 +161,7 @@ func (d *Dispatcher) Invoke(ctx context.Context, runID, callID, operationID stri
 			return Result{}, marshalErr
 		}
 		for _, ruleID := range decision.CaptureRules {
-			if err := chaos.SaveSnapshot(ctx, tx, runID, ruleID, arguments, status, actual); err != nil {
+			if err := chaos.SaveSnapshot(ctx, tx, runID, ruleID, operationID, arguments, status, actual); err != nil {
 				return Result{}, err
 			}
 		}
@@ -214,7 +214,11 @@ func (d *Dispatcher) Invoke(ctx context.Context, runID, callID, operationID stri
 	if err = json.Unmarshal([]byte(transcript), &messages); err != nil {
 		return Result{}, err
 	}
-	messages = append(messages, map[string]any{"role": "tool", "call_id": callID, "operation_id": operationID, "status": status, "content": string(encoded)})
+	toolMessage := map[string]any{"role": "tool", "call_id": callID, "operation_id": operationID, "content": string(encoded)}
+	if status != 0 {
+		toolMessage["status"] = status
+	}
+	messages = append(messages, toolMessage)
 	next, err := json.Marshal(messages)
 	if err != nil {
 		return Result{}, err
