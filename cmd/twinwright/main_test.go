@@ -210,3 +210,19 @@ func TestCLIReplayCompletedRun(t *testing.T) {
 		t.Fatalf("tampered state accepted: %s", out.String())
 	}
 }
+
+func TestCLIReplayMissingDatabaseDoesNotCreateFile(t *testing.T) {
+	root := filepath.Join("..", "..", "examples", "billing")
+	dir := t.TempDir()
+	manifest := filepath.Join(dir, "manifest.json")
+	db := filepath.Join(dir, "missing.db")
+	if err := runCLI([]string{"build", filepath.Join(root, "openapi.yaml"), "--out", manifest}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := runCLI([]string{"replay", "R-missing", "--manifest", manifest, "--db", db}, &bytes.Buffer{}); err == nil {
+		t.Fatal("missing source database accepted")
+	}
+	if _, err := os.Stat(db); !os.IsNotExist(err) {
+		t.Fatalf("replay created missing database: %v", err)
+	}
+}

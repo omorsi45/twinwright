@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"os"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -210,5 +211,43 @@ func TestCreateReplayRunPreservesIDAndIsolation(t *testing.T) {
 	}
 	if len(events) != 1 || events[0].Type != "execution.started" {
 		t.Fatalf("replay start events=%+v", events)
+	}
+}
+
+func TestOpenReadOnlyDoesNotCreateOrMigrate(t *testing.T) {
+	missing := t.TempDir() + "/missing.db"
+	if s, err := OpenReadOnly(missing); err == nil {
+		s.Close()
+		t.Fatal("missing database opened")
+	}
+	if _, err := os.Stat(missing); !os.IsNotExist(err) {
+		t.Fatalf("missing database created: %v", err)
+	}
+
+	path := t.TempDir() + "/legacy.db"
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = raw.Exec("CREATE TABLE runs (id TEXT PRIMARY KEY)"); err != nil {
+		t.Fatal(err)
+	}
+	if err = raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	source, err := OpenReadOnly(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	if _, err = source.DB.Exec("ALTER TABLE runs ADD COLUMN model TEXT"); err == nil {
+		t.Fatal("read-only database accepted a write")
+	}
+	var columns int
+	if err = source.DB.QueryRow("SELECT count(*) FROM pragma_table_info('runs') WHERE name='model'").Scan(&columns); err != nil {
+		t.Fatal(err)
+	}
+	if columns != 0 {
+		t.Fatal("legacy database migrated during read-only open")
 	}
 }

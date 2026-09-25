@@ -178,7 +178,7 @@ func runCLI(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		s, err := store.Open(*dbPath)
+		s, err := store.OpenReadOnly(*dbPath)
 		if err != nil {
 			return err
 		}

@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"fmt"
 	mrand "math/rand/v2"
+	"net/url"
+	"path/filepath"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -106,6 +108,27 @@ func ensureModelColumn(db *sql.DB) error {
 	}
 	_, err = db.Exec("ALTER TABLE runs ADD COLUMN model TEXT NOT NULL DEFAULT ''")
 	return err
+}
+func OpenReadOnly(path string) (*Store, error) {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
+	uriPath := filepath.ToSlash(absolute)
+	if filepath.VolumeName(absolute) != "" {
+		uriPath = "/" + uriPath
+	}
+	uri := url.URL{Scheme: "file", Path: uriPath, RawQuery: "mode=ro"}
+	db, err := sql.Open("sqlite", uri.String())
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	if err = db.Ping(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return &Store{DB: db}, nil
 }
 func (s *Store) Close() error { return s.DB.Close() }
 

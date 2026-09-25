@@ -62,3 +62,10 @@
 - [ ] Run go test ./cmd/twinwright -run TestCLIReplayCompletedRun -count=1. Expect unknown command replay.
 - [ ] Wire the command to replay.Verify. Add README usage and the ADR's scope and compatibility decision.
 - [ ] Run targeted test, gofmt, go vet ./..., go test -count=1 ./..., then a real CLI smoke replay; commit.
+
+## Review fixes
+
+- [x] Add Store.OpenReadOnly and prove a missing path remains absent, a legacy schema is not migrated, and writes are rejected.
+- [x] Route only the replay CLI path through OpenReadOnly and prove it does not create a missing database.
+- [x] Decode recorded model responses with UseNumber; reproduce and fix divergence from a recorded decimal-form argument.
+- [x] Make negative ledger tests preserve terminal completion, exercise the intended error, and cover a different source world instance ID.

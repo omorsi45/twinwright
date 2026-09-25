@@ -182,7 +182,9 @@ func recordedMessages(run store.Run, events []store.Event) ([]agent.Message, err
 			requests++
 		case "model.response":
 			var message agent.Message
-			if err := json.Unmarshal(event.Payload, &message); err != nil {
+			decoder := json.NewDecoder(bytes.NewReader(event.Payload))
+			decoder.UseNumber()
+			if err := decoder.Decode(&message); err != nil {
 				return nil, fmt.Errorf("model response at sequence %d: %w", event.Seq, err)
 			}
 			if message.Role != "assistant" {
