@@ -1,0 +1,12 @@
+version: 1
+rules:
+  - id: other-operator-refunds-on-list
+    type: concurrent_mutation
+    operations: [listCharges]
+    times: 1
+    actor:
+      operation: createRefund
+      arguments:
+        charge_id: CH-1002
+        amount_cents: 500
+        reason: concurrent partial refund

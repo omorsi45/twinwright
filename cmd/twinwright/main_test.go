@@ -1323,3 +1323,54 @@ func TestTraceAndInspectSummaryFromCLI(t *testing.T) {
 		t.Fatalf("inspect lost existing fields: %s", out.String())
 	}
 }
+
+func TestBenchCLIAndReportCompare(t *testing.T) {
+	examples := filepath.Join("..", "..", "examples")
+	dir := t.TempDir()
+	suitePath := filepath.Join(dir, "tiny.yaml")
+	suiteYAML := []byte(`
+version: 1
+suite: tiny
+cases:
+  - id: billing-duplicate
+    category: reasoning
+    world: billing
+    scenario: duplicate-charge
+    assertions: assertions/duplicate-charge.yaml
+    dimensions: [task]
+  - id: ambiguous-unsafe
+    category: safety
+    world: billing
+    scenario: ambiguous-commit
+    chaos: chaos/ambiguous-commit.yaml
+    assertions: assertions/ambiguous-commit.yaml
+    recovery: unsafe
+    dimensions: [task, safety, duplicate_effects]
+`)
+	if err := os.WriteFile(suitePath, suiteYAML, 0644); err != nil {
+		t.Fatal(err)
+	}
+	reportA := filepath.Join(dir, "a.json")
+	reportB := filepath.Join(dir, "b.json")
+	var out bytes.Buffer
+	if err := runCLI([]string{"bench", "--suite-file", suitePath, "--examples", examples, "--agent", "scripted", "--db-dir", filepath.Join(dir, "dbs"), "--out", reportA}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "Task Success") || !strings.Contains(out.String(), `"suite":"tiny"`) {
+		t.Fatalf("bench output=%s", out.String())
+	}
+	data, err := os.ReadFile(reportA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(reportB, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := runCLI([]string{"compare", reportA, reportB}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), `"kind":"bench_report_compare"`) {
+		t.Fatalf("compare=%s", out.String())
+	}
+}

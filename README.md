@@ -54,6 +54,7 @@ A run can:
 - fork a failed run at candidate events, change one variable per fork, and rank which events the failure was sensitive to
 - summarize a run and render its ledger as a trace, including an OpenTelemetry JSON export
 - drive a run with OpenAI Responses, an OpenAI-compatible chat endpoint, Anthropic Messages, or a scripted fixture
+- run Twinwright Bench, a curated suite with deterministic ground truth and JSON reports
 
 The project includes a minimal billing world and a multi-service company world spanning billing, CRM, ticketing, and messaging.
 
@@ -400,6 +401,30 @@ This is intervention analysis. The counts describe the forks that ran; they are 
 
 See `examples/counterfactual/` and `docs/adr/0011-counterfactual-analysis.md`.
 
+## Twinwright Bench
+
+`twinwright bench` runs a curated suite of serious scenarios with deterministic judges (scenario evaluation or assertion files). The first public suite is `examples/bench/standard.yaml`: 16 cases across reliability, reasoning, safety, security, recovery, and long-horizon categories. It is not a thousand trivial templates.
+
+```bash
+go run ./cmd/twinwright bench \
+  --suite standard \
+  --agent scripted \
+  --examples examples \
+  --out bench-report.json
+```
+
+The command prints a short measurement summary and emits the full JSON report (also to `--out` when set). Rates cover task success, safety compliance, authorization safety, recovery success, and duplicate effects, plus median tool calls and latency. There is no winner language.
+
+Compare two reports:
+
+```bash
+go run ./cmd/twinwright compare bench-a.json bench-b.json
+```
+
+Existing `compare <parent-run-id> <child-run-id>` still compares fork trajectories. Report compare is selected when both arguments are bench JSON files.
+
+Default `--agent` is `scripted` so CI stays deterministic. Live agents are allowed through the same provider flags as `run`. No live provider bench has been verified here. See `docs/adr/0014-twinwright-bench.md`.
+
 ## Agent providers
 
 `--agent` selects the provider. The world, dispatcher, and evaluator do not learn vendor details. Each adapter maps a vendor response into Twinwright's internal message shape and keeps the raw response for the ledger.
@@ -569,6 +594,7 @@ internal/
   assertion/          declarative run assertions
   authz/              principal policies and authorization decisions
   behavior/           behavior registry
+  bench/              suite parser, case runner, and report aggregates
   billing/            billing simulation
   crm/                CRM simulation
   ticketing/          ticketing simulation
@@ -592,6 +618,7 @@ examples/
   security/           principal policies for the prompt-injection scenario
   assertions/         declarative assertions for the example scenarios
   counterfactual/     intervention files for the example failures
+  bench/              Twinwright Bench suite definitions
 
 docs/adr/             architecture decision records
 ```
@@ -676,6 +703,7 @@ Major runtime contracts are documented as ADRs under `docs/adr/`, including:
 - counterfactual intervention analysis and observation overrides
 - ledger traces and provider error redaction
 - multiple agent providers behind one internal message shape
+- Twinwright Bench suite runner and report comparison
 
 The ADRs document not only what Twinwright does, but why the implementation makes those tradeoffs.
 
