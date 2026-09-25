@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"os"
+	"strings"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -249,5 +250,165 @@ func TestOpenReadOnlyDoesNotCreateOrMigrate(t *testing.T) {
 	}
 	if columns != 0 {
 		t.Fatal("legacy database migrated during read-only open")
+	}
+}
+
+func TestSeedCompanyIncident(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(t.TempDir() + "/world.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	w, err := s.SeedScenario(ctx, 42, "digest", "company-incident")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var customer, status, representative string
+	err = s.DB.QueryRowContext(ctx, "SELECT customer_id,status,representative_id FROM crm_accounts WHERE world_id=? AND id='A-104'", w.ID).Scan(&customer, &status, &representative)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if customer != "C-104" || status != "active" || representative == "" {
+		t.Fatalf("account customer=%q status=%q representative=%q", customer, status, representative)
+	}
+	var noteID, body string
+	err = s.DB.QueryRowContext(ctx, "SELECT id,body FROM crm_notes WHERE world_id=? AND account_id='A-104'", w.ID).Scan(&noteID, &body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(noteID, "SEED-") || !strings.Contains(strings.ToLower(body), "retry") {
+		t.Fatalf("incident evidence id=%q body=%q", noteID, body)
+	}
+	for _, query := range []string{
+		"SELECT count(*) FROM subscriptions WHERE world_id=? AND id='SUB-104' AND customer_id='C-104'",
+		"SELECT count(*) FROM crm_contacts WHERE world_id=? AND account_id='A-104'",
+		"SELECT count(*) FROM ticket_projects WHERE world_id=? AND id='PROJ-ENG'",
+		"SELECT count(*) FROM message_workspaces WHERE world_id=? AND id='WS-1'",
+		"SELECT count(*) FROM message_channels WHERE world_id=? AND id='CH-SUPPORT' AND workspace_id='WS-1'",
+		"SELECT count(*) FROM message_members WHERE world_id=? AND channel_id='CH-SUPPORT'",
+	} {
+		var count int
+		if err := s.DB.QueryRowContext(ctx, query, w.ID).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count == 0 {
+			t.Fatalf("missing company fixture: %s", query)
+		}
+	}
+}
+
+func TestSeedCompanyRoutineHasNoIncidentEvidence(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(t.TempDir() + "/world.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	w, err := s.SeedScenario(ctx, 42, "digest", "company-routine")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := s.DB.QueryRowContext(ctx, "SELECT count(*) FROM crm_notes WHERE world_id=? AND id LIKE 'SEED-%'", w.ID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("routine world has %d incident evidence notes", count)
+	}
+	if err := s.DB.QueryRowContext(ctx, "SELECT count(*) FROM charges WHERE world_id=? AND invoice_id='INV-104'", w.ID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("routine world has %d charges for INV-104", count)
+	}
+}
+
+func TestSeedCompanyNoDuplicateOmitsSecondCharge(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(t.TempDir() + "/world.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	w, err := s.SeedScenario(ctx, 42, "digest", "company-no-duplicate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := s.DB.QueryRowContext(ctx, "SELECT count(*) FROM charges WHERE world_id=? AND invoice_id='INV-104'", w.ID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("no-duplicate world has %d charges for INV-104", count)
+	}
+	if err := s.DB.QueryRowContext(ctx, "SELECT count(*) FROM crm_notes WHERE world_id=? AND id LIKE 'SEED-%'", w.ID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("no-duplicate world has %d incident evidence notes", count)
+	}
+}
+
+func TestSeedCompanyRejectsUnknownScenario(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(t.TempDir() + "/world.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err := s.SeedScenario(ctx, 42, "digest", "unknown"); err == nil {
+		t.Fatal("unknown scenario accepted")
+	}
+	var count int
+	if err := s.DB.QueryRowContext(ctx, "SELECT count(*) FROM worlds").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("unknown scenario created %d worlds", count)
+	}
+}
+
+func TestCompanyWorldIsolation(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(t.TempDir() + "/world.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	a, err := s.SeedScenario(ctx, 42, "digest", "company-incident")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := s.SeedScenario(ctx, 42, "digest", "company-incident")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.ID == b.ID {
+		t.Fatal("world IDs overlap")
+	}
+	for _, table := range []string{"subscriptions", "crm_accounts", "crm_contacts", "crm_notes", "ticket_projects", "message_workspaces", "message_channels", "message_members"} {
+		var aCount, bCount int
+		query := "SELECT count(*) FROM " + table + " WHERE world_id=?"
+		if err := s.DB.QueryRowContext(ctx, query, a.ID).Scan(&aCount); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.DB.QueryRowContext(ctx, query, b.ID).Scan(&bCount); err != nil {
+			t.Fatal(err)
+		}
+		if aCount == 0 || aCount != bCount {
+			t.Fatalf("%s counts: %d, %d", table, aCount, bCount)
+		}
+	}
+	if _, err := s.DB.ExecContext(ctx, "UPDATE crm_accounts SET status='escalated' WHERE world_id=? AND id='A-104'", a.ID); err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	if err := s.DB.QueryRowContext(ctx, "SELECT status FROM crm_accounts WHERE world_id=? AND id='A-104'", b.ID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "active" {
+		t.Fatalf("world B status changed to %q", status)
 	}
 }
