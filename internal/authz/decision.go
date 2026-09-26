@@ -140,7 +140,7 @@ func Decide(ctx context.Context, tx *sql.Tx, runID, worldID string, op compiler.
 	if !handlerValid(op.Behavior, args) {
 		return Decision{Enforced: true, Invalid: true, Principal: policy.Principal.ID}, nil
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO auth_state(run_id,call_index) VALUES(?,1) ON CONFLICT(run_id) DO UPDATE SET call_index=call_index+1`, runID); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO auth_state(run_id,call_index) VALUES(?,1) ON CONFLICT(run_id) DO UPDATE SET call_index=auth_state.call_index+1`, runID); err != nil {
 		return Decision{}, err
 	}
 	decision := Decision{Enforced: true, Principal: policy.Principal.ID}

@@ -82,8 +82,12 @@ func Verify(ctx context.Context, source *store.Store, runID string, manifest com
 		}
 	} else {
 		var authTables int
-		if err := source.DB.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='run_auth'").Scan(&authTables); err != nil {
+		authPresent, err := source.HasTable(ctx, "run_auth")
+		if err != nil {
 			return report, err
+		}
+		if authPresent {
+			authTables = 1
 		}
 		allowed := original.PrincipalID == store.UnrestrictedPrincipal || authTables == 0 && original.PrincipalID == store.LegacyPrincipal
 		if !allowed {
@@ -174,7 +178,7 @@ func Verify(ctx context.Context, source *store.Store, runID string, manifest com
 	if difference := compareResults(sourceResults, targetResults); difference != "" {
 		return diverged(report, difference), nil
 	}
-	if difference, err := compareChaosState(ctx, source.DB, target.DB, runID); err != nil {
+	if difference, err := compareChaosState(ctx, source.DB, target.DB, source.Dialect, runID); err != nil {
 		return report, err
 	} else if difference != "" {
 		return diverged(report, difference), nil
@@ -392,7 +396,7 @@ func compareResults(left, right []savedResult) string {
 	return ""
 }
 
-func compareChaosState(ctx context.Context, source, target *sql.DB, runID string) (string, error) {
+func compareChaosState(ctx context.Context, source, target *sql.DB, dialect store.Dialect, runID string) (string, error) {
 	tables := []struct{ name, columns, order string }{
 		{"run_chaos", "policy_json,digest", "run_id"},
 		{"chaos_rule_state", "rule_id,matching_calls,injections", "rule_id"},
@@ -403,11 +407,11 @@ func compareChaosState(ctx context.Context, source, target *sql.DB, runID string
 	}
 	for _, table := range tables {
 		var left [][]string
-		var exists int
-		if err := source.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?", table.name).Scan(&exists); err != nil {
+		exists, err := store.TableExists(ctx, source, dialect, table.name)
+		if err != nil {
 			return "", err
 		}
-		if exists != 0 {
+		if exists {
 			var err error
 			left, err = stateRows(ctx, source, table.name, table.columns, table.order, runID)
 			if err != nil {

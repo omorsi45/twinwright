@@ -1,0 +1,30 @@
+# Minimal OpenTelemetry collector for local development.
+#
+# It accepts OTLP/HTTP on 4318 and prints what it receives, which is enough to
+# confirm that `twinwright trace --format otlp --otlp-endpoint …` really
+# delivered spans rather than merely formatting them. Point the exporters at
+# your own backend to keep them.
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 1s
+
+exporters:
+  debug:
+    verbosity: detailed
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug]
+  telemetry:
+    logs:
+      level: info
