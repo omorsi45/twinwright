@@ -517,6 +517,22 @@ func (s *Store) Events(ctx context.Context, runID string) ([]Event, error) {
 	return out, rows.Err()
 }
 
+// LastEvent returns the newest ledger event for a run, or sql.ErrNoRows when
+// the run has none. Resume logic uses it to recognise an attempt that was
+// persisted but never answered.
+func (s *Store) LastEvent(ctx context.Context, runID string) (Event, error) {
+	var e Event
+	var payload string
+	err := s.DB.QueryRowContext(ctx,
+		"SELECT id,run_id,seq,recorded_at,world_at,type,payload FROM events WHERE run_id=? ORDER BY seq DESC LIMIT 1", runID).
+		Scan(&e.ID, &e.RunID, &e.Seq, &e.RecordedAt, &e.WorldAt, &e.Type, &payload)
+	if err != nil {
+		return Event{}, err
+	}
+	e.Payload = json.RawMessage(payload)
+	return e, nil
+}
+
 func (s *Store) StartModelCall(ctx context.Context, runID string, request any) error {
 	return s.Append(ctx, runID, "model.request", request)
 }

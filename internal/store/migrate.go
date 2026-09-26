@@ -22,7 +22,7 @@ const (
 // CurrentSchemaVersion is the highest migration this build knows how to apply.
 // A database recording a HIGHER version was written by a newer Twinwright and
 // is refused rather than silently downgraded.
-const CurrentSchemaVersion = 1
+const CurrentSchemaVersion = 2
 
 // intType keeps integer widths honest per backend. SQLite's INTEGER is a
 // 64-bit signed value; PostgreSQL's INTEGER is 32-bit, which would overflow
@@ -110,7 +110,75 @@ var migrations = []migration{{
 		{table: "fork_lineage", column: "chaos_replaced", definition: "%INT% NOT NULL DEFAULT 0"},
 		{table: "fork_lineage", column: "auth_replaced", definition: "%INT% NOT NULL DEFAULT 0"},
 	},
+}, {
+	version:    2,
+	name:       "distributed runtime leases and work queue",
+	statements: distributedSchema,
 }}
+
+// distributedSchema adds the multi-worker runtime's own tables: fenced run
+// ownership and the work queue workers claim from.
+//
+// Leases live in the same database as the runs they own, which is the point.
+// A lease in a separate store cannot be checked in the same transaction as the
+// state transition it protects, so a stale worker could pass the check and then
+// commit anyway. Co-locating them makes the fence check and the write atomic.
+func distributedSchema(d Dialect) []string {
+	tables := []string{
+		`CREATE TABLE IF NOT EXISTS run_leases (
+  run_id TEXT PRIMARY KEY,
+  owner TEXT NOT NULL,
+  fence %INT% NOT NULL,
+  committed_fence %INT% NOT NULL DEFAULT 0,
+  expires_at TEXT NOT NULL,
+  acquired_at TEXT NOT NULL,
+  heartbeat_at TEXT NOT NULL
+)`,
+		`CREATE TABLE IF NOT EXISTS work_queue (
+  run_id TEXT PRIMARY KEY,
+  state TEXT NOT NULL,
+  max_steps %INT% NOT NULL,
+  attempts %INT% NOT NULL DEFAULT 0,
+  enqueued_at TEXT NOT NULL,
+  available_at TEXT NOT NULL,
+  last_error TEXT NOT NULL DEFAULT ''
+)`,
+		`CREATE INDEX IF NOT EXISTS work_queue_claimable ON work_queue(state, available_at)`,
+		`CREATE TABLE IF NOT EXISTS workers (
+  id TEXT PRIMARY KEY,
+  host TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL,
+  claims %INT% NOT NULL DEFAULT 0
+)`,
+		// Ownership history is deliberately NOT in the run ledger.
+		//
+		// Fork lineage and checkpoint reconstruction digest the run's event
+		// prefix. If ownership transitions lived there, an identical agent
+		// trajectory would produce a different prefix digest depending on
+		// which worker happened to execute it and how many times a lease
+		// changed hands, and replay would have to special-case events that
+		// cannot be regenerated. Keeping ownership in its own append-only
+		// audit table leaves the ledger a pure record of what the agent did,
+		// so a distributed run and a single-node replay of the same
+		// trajectory produce byte-identical ledgers.
+		`CREATE TABLE IF NOT EXISTS run_ownership_log (
+  run_id TEXT NOT NULL,
+  seq %INT% NOT NULL,
+  at TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  owner TEXT NOT NULL,
+  fence %INT% NOT NULL,
+  detail TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY(run_id,seq)
+)`,
+	}
+	out := make([]string, 0, len(tables))
+	for _, stmt := range tables {
+		out = append(out, strings.ReplaceAll(stmt, "%INT%", intType(d)))
+	}
+	return out
+}
 
 const migrationTable = `CREATE TABLE IF NOT EXISTS schema_migrations (version %INT% PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)`
 

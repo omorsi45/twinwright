@@ -24,6 +24,12 @@ type Dispatcher struct {
 	Store    *store.Store
 	Manifest compiler.Manifest
 	Registry *behavior.Registry
+	// Fence, when set, makes the whole tool-call transaction conditional on
+	// this worker still owning the run: the ownership check and the tool
+	// effect commit together or not at all. A nil Fence is the single-node
+	// local path. Clock is for deterministic lease-expiry tests.
+	Fence *store.Fence
+	Clock store.Clock
 }
 
 func (d *Dispatcher) Invoke(ctx context.Context, runID, callID, operationID string, args map[string]any) (Result, error) {
@@ -32,6 +38,14 @@ func (d *Dispatcher) Invoke(ctx context.Context, runID, callID, operationID stri
 		return Result{}, err
 	}
 	defer tx.Rollback()
+	// Ownership is proved before anything else in this transaction, including
+	// the idempotency lookup, so a fenced-out worker cannot even observe the
+	// run's saved results, let alone add to them.
+	if d.Fence != nil {
+		if err = store.GuardFenceTx(ctx, tx, d.Store.Dialect, *d.Fence, d.Clock.Now()); err != nil {
+			return Result{}, err
+		}
+	}
 	arguments, err := json.Marshal(args)
 	if err != nil {
 		return Result{}, err
