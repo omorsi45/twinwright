@@ -1,0 +1,72 @@
+name: Integration
+
+# The expensive lane: a real PostgreSQL server and a container runtime. Kept
+# separate from CI so an infrastructure hiccup here cannot block a merge on
+# work it has nothing to do with, and so the fast lane stays fast.
+#
+# Nothing in this workflow calls a model provider. Live-provider tests are
+# opt-in and only run where credentials exist, which is not here.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: integration-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  postgres:
+    name: postgres ${{ matrix.postgres }} storage and distributed runtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # Two majors: the storage layer must not depend on a single server
+        # version's tolerance for a query.
+        postgres: ["16", "17"]
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres }}-alpine
+        env:
+          POSTGRES_USER: twinwright
+          POSTGRES_PASSWORD: twinwright
+          POSTGRES_DB: twinwright
+        ports:
+          - 5432:5432
+        # Waiting on pg_isready rather than sleeping is what keeps this job
+        # from being the flaky one.
+        options: >-
+          --health-cmd "pg_isready -U twinwright"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      TWINWRIGHT_TEST_POSTGRES_DSN: postgres://twinwright:twinwright@127.0.0.1:5432/twinwright?sslmode=disable
+      OPENAI_API_KEY: ""
+      ANTHROPIC_API_KEY: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: migrations, storage parity and runtime
+        # The whole suite runs with a DSN present, so every PostgreSQL-gated
+        # test participates instead of only the ones someone remembered to list.
+        run: go test -count=1 ./...
+
+      - name: distributed runtime under race detection
+        # Fencing and takeover are concurrency properties; PostgreSQL is where
+        # workers hold genuinely parallel connections.
+        run: go test -race -count=1 ./internal/worker/ ./internal/store/
+
+      - name: end-to-end against postgres
+        run: ./scripts/e2e.sh "$TWINWRIGHT_TEST_POSTGRES_DSN"

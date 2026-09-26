@@ -40,10 +40,14 @@ func main() {
 
 func runCLI(args []string, out io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: twinwright build|build-world|run|resume|worker|enqueue|queue|inspect|trace|replay|checkpoints|fork|compare|evaluate|counterfactual|bench|shadow|container ...")
+		return fmt.Errorf("usage: twinwright version|doctor|build|build-world|run|resume|worker|enqueue|queue|inspect|trace|replay|checkpoints|fork|compare|evaluate|counterfactual|bench|shadow|container ...")
 	}
 	ctx := context.Background()
 	switch args[0] {
+	case "version", "--version", "-v":
+		return versionCommand(out)
+	case "doctor":
+		return doctorCommand(ctx, args, out)
 	case "worker":
 		return workerCommand(ctx, args, out)
 	case "enqueue":
@@ -302,7 +306,7 @@ func runCLI(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		s, err := store.OpenReadOnly(*dbPath)
+		s, err := store.OpenReadOnlyDSN(ctx, *dbPath)
 		if err != nil {
 			return err
 		}
@@ -338,7 +342,7 @@ func runCLI(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		source, err := store.OpenReadOnly(*dbPath)
+		source, err := store.OpenReadOnlyDSN(ctx, *dbPath)
 		if err != nil {
 			return err
 		}
@@ -400,7 +404,7 @@ func runCLI(args []string, out io.Writer) error {
 		if err := rebuilt.Close(); err != nil {
 			return err
 		}
-		destination, err := store.Open(*dbPath)
+		destination, err := store.OpenDSN(ctx, *dbPath)
 		if err != nil {
 			return err
 		}
@@ -455,7 +459,7 @@ func runCLI(args []string, out io.Writer) error {
 		if err := fs.Parse(args[3:]); err != nil {
 			return err
 		}
-		s, err := store.OpenReadOnly(*dbPath)
+		s, err := store.OpenReadOnlyDSN(ctx, *dbPath)
 		if err != nil {
 			return err
 		}
@@ -480,7 +484,7 @@ func runCLI(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		s, err := store.OpenReadOnly(*dbPath)
+		s, err := store.OpenReadOnlyDSN(ctx, *dbPath)
 		if err != nil {
 			return err
 		}
@@ -523,7 +527,7 @@ func runCLI(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		s, err := store.OpenReadOnly(*dbPath)
+		s, err := store.OpenReadOnlyDSN(ctx, *dbPath)
 		if err != nil {
 			return err
 		}
@@ -593,7 +597,7 @@ func runCLI(args []string, out io.Writer) error {
 			}
 			judge = counterfactual.AssertionJudge(assertions)
 		}
-		source, err := store.OpenReadOnly(*dbPath)
+		source, err := store.OpenReadOnlyDSN(ctx, *dbPath)
 		if err != nil {
 			return err
 		}
@@ -604,7 +608,7 @@ func runCLI(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		destination, err := store.Open(*dbPath)
+		destination, err := store.OpenDSN(ctx, *dbPath)
 		if err != nil {
 			return err
 		}
@@ -806,12 +810,14 @@ func runCLI(args []string, out io.Writer) error {
 		}
 	case "trace":
 		if len(args) < 2 {
-			return fmt.Errorf("usage: twinwright trace <run-id> [--format json|text|otlp] [--db path]")
+			return fmt.Errorf("usage: twinwright trace <run-id> [--format json|text|otlp] [--otlp-endpoint url] [--db path]")
 		}
 		fs := flag.NewFlagSet("trace", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
 		dbPath := fs.String("db", "twinwright.db", "SQLite path or postgres:// DSN")
 		format := fs.String("format", "json", "json, text, or otlp")
+		otlpEndpoint := fs.String("otlp-endpoint", os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"), "POST the spans to this OpenTelemetry collector instead of printing them")
+		otlpHeader := fs.String("otlp-header", "", "extra request header for the collector, as Name: value")
 		if err := fs.Parse(args[2:]); err != nil {
 			return err
 		}
@@ -820,7 +826,7 @@ func runCLI(args []string, out io.Writer) error {
 		default:
 			return fmt.Errorf("unknown trace format %q", *format)
 		}
-		s, err := store.OpenReadOnly(*dbPath)
+		s, err := store.OpenReadOnlyDSN(ctx, *dbPath)
 		if err != nil {
 			return err
 		}
@@ -834,6 +840,23 @@ func runCLI(args []string, out io.Writer) error {
 			_, err = io.WriteString(out, trace.Text(built))
 			return err
 		case "otlp":
+			if *otlpEndpoint != "" {
+				// Delivering the spans, not just formatting them: the
+				// collector's status code is what makes the export verifiable.
+				exporter := trace.Exporter{Endpoint: *otlpEndpoint}
+				if *otlpHeader != "" {
+					name, value, found := strings.Cut(*otlpHeader, ":")
+					if !found {
+						return fmt.Errorf("--otlp-header must be \"Name: value\"")
+					}
+					exporter.Headers = map[string]string{strings.TrimSpace(name): strings.TrimSpace(value)}
+				}
+				delivery, err := exporter.Export(ctx, built)
+				if err != nil {
+					return err
+				}
+				return emit(out, delivery)
+			}
 			encoded, err := trace.OTLP(built)
 			if err != nil {
 				return err

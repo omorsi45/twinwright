@@ -88,6 +88,40 @@ func OpenPostgres(ctx context.Context, dsn string) (*Store, error) {
 	return s, nil
 }
 
+// OpenReadOnlyDSN opens a store for reading only, from either backend.
+//
+// Replay, evaluation, tracing and inspection must not be able to change the run
+// they are examining. On SQLite that is the file opened with mode=ro; on
+// PostgreSQL it is `default_transaction_read_only=on`, which makes the SERVER
+// reject a write rather than relying on this process to not attempt one. Neither
+// path migrates: a read must never alter the schema of the history it is reading.
+func OpenReadOnlyDSN(ctx context.Context, dsn string) (*Store, error) {
+	if !IsPostgresDSN(dsn) {
+		if idx := strings.Index(dsn, "://"); idx > 0 {
+			return nil, fmt.Errorf("unsupported storage backend %q: Twinwright supports postgres:// URLs and local SQLite file paths", dsn[:idx])
+		}
+		return OpenReadOnly(dsn)
+	}
+	pgsql.Register()
+	parsed, err := url.Parse(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("parse postgres DSN: %w", err)
+	}
+	query := parsed.Query()
+	query.Set("default_transaction_read_only", "on")
+	parsed.RawQuery = query.Encode()
+	db, err := sql.Open(pgsql.DriverName, parsed.String())
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(defaultPostgresMaxConns)
+	if err = db.PingContext(ctx); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("connect to postgres: %w", err)
+	}
+	return &Store{DB: db, Dialect: DialectPostgres}, nil
+}
+
 // searchPathSchema extracts and validates the schema the DSN asks for.
 func searchPathSchema(dsn string) (string, error) {
 	parsed, err := url.Parse(dsn)

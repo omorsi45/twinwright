@@ -14,6 +14,7 @@ import (
 
 	"twinwright/internal/agent"
 	"twinwright/internal/dispatch"
+	"twinwright/internal/metrics"
 	"twinwright/internal/store"
 	"twinwright/internal/worker"
 )
@@ -120,6 +121,7 @@ func workerCommand(ctx context.Context, args []string, out io.Writer) error {
 	attempts := fs.Int("max-attempts", worker.DefaultMaxAttempts, "attempts before a run is marked failed")
 	maxRuns := fs.Int("max-runs", 0, "exit after this many claims (0 means serve until interrupted)")
 	drain := fs.Bool("drain", false, "exit as soon as the queue is empty instead of polling")
+	metricsAddr := fs.String("metrics-addr", "", "serve Prometheus metrics on this address, for example 127.0.0.1:9095 (unauthenticated: bind loopback)")
 	baseURL := fs.String("base-url", os.Getenv("OPENAI_BASE_URL"), "base URL for openai-compatible providers")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
@@ -164,11 +166,36 @@ func workerCommand(ctx context.Context, args []string, out io.Writer) error {
 		MaxAttempts:  *attempts,
 	})
 
+	// Per-process event counters. Queue depth, run statuses and the
+	// ledger-derived gauges are read from the database at scrape time instead,
+	// so they cannot drift from the ledger.
+	counters := metrics.NewCounters()
+	w.Observer = func(outcome worker.Outcome) {
+		counters.Add(metrics.WorkerClaims, "", 1)
+		counters.Add(metrics.WorkerDispositions, string(outcome.Disposition), 1)
+		counters.Add(metrics.WorkerRunSeconds, "", outcome.Duration.Seconds())
+		if outcome.Takeover {
+			counters.Add(metrics.WorkerTakeovers, "", 1)
+		}
+		if outcome.Disposition == worker.Fenced {
+			counters.Add(metrics.WorkerFencingRejections, "", 1)
+		}
+	}
+
 	// Ctrl-C and SIGTERM cancel the context. An in-flight run is abandoned
 	// rather than force-committed; its lease lapses and another worker picks it
 	// up, which is the same path as a crash and is already tested.
 	signalCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	if *metricsAddr != "" {
+		collector := metrics.Collector{Store: s, Counters: counters, WorkerID: w.ID()}
+		go func() {
+			if err := metrics.Serve(signalCtx, *metricsAddr, collector); err != nil {
+				fmt.Fprintf(os.Stderr, "twinwright: metrics endpoint stopped: %v\n", err)
+			}
+		}()
+	}
 
 	if *maxRuns == 0 && !*drain {
 		if err = w.Serve(signalCtx); err != nil {
