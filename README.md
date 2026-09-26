@@ -57,6 +57,7 @@ A run can:
 - run Twinwright Bench, a curated suite with deterministic ground truth and JSON reports
 - experimentally observe recorded actions, simulate proposed local tool calls, and compare them without production writes
 - optionally start experimental local or Docker sidecars when a scenario needs process isolation
+- acquire experimental lease ownership with fencing tokens for future multi-worker coordination (at-least-once delivery, not exactly-once)
 
 The project includes a minimal billing world and a multi-service company world spanning billing, CRM, ticketing, and messaging.
 
