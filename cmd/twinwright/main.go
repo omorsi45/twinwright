@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"twinwright/internal/agent"
 	"twinwright/internal/assertion"
@@ -24,6 +25,7 @@ import (
 	"twinwright/internal/dispatch"
 	"twinwright/internal/eval"
 	"twinwright/internal/fork"
+	"twinwright/internal/lease"
 	"twinwright/internal/replay"
 	"twinwright/internal/shadow"
 	"twinwright/internal/store"
@@ -39,7 +41,7 @@ func main() {
 
 func runCLI(args []string, out io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: twinwright build|build-world|run|resume|inspect|trace|replay|checkpoints|fork|compare|evaluate|counterfactual|bench|shadow|container ...")
+		return fmt.Errorf("usage: twinwright build|build-world|run|resume|inspect|trace|replay|checkpoints|fork|compare|evaluate|counterfactual|bench|shadow|container|lease ...")
 	}
 	ctx := context.Background()
 	switch args[0] {
@@ -780,6 +782,66 @@ func runCLI(args []string, out io.Writer) error {
 			return emit(out, map[string]any{"experimental": true, "action": "status", "handle": handle})
 		default:
 			return fmt.Errorf("unknown container action %q", action)
+		}
+	case "lease":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: twinwright lease acquire|renew|release|status --name <id> --owner <id> [--db path] [--token n] [--ttl duration]")
+		}
+		action := args[1]
+		fs := flag.NewFlagSet("lease", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		dbPath := fs.String("db", "twinwright.leases.db", "SQLite lease database")
+		name := fs.String("name", "", "lease name, for example run/R-1")
+		owner := fs.String("owner", "", "worker identity")
+		token := fs.Int64("token", 0, "fencing token for renew/release")
+		ttl := fs.Duration("ttl", time.Minute, "lease lifetime for acquire/renew")
+		if err := fs.Parse(args[2:]); err != nil {
+			return err
+		}
+		if *name == "" {
+			return fmt.Errorf("lease requires --name")
+		}
+		store, err := lease.Open(*dbPath)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		now := time.Now().UTC()
+		switch action {
+		case "acquire":
+			if *owner == "" {
+				return fmt.Errorf("lease acquire requires --owner")
+			}
+			held, err := store.Acquire(ctx, *name, *owner, *ttl, now)
+			if err != nil {
+				return err
+			}
+			return emit(out, map[string]any{"experimental": true, "delivery": "at_least_once", "action": "acquire", "lease": held})
+		case "renew":
+			if *owner == "" || *token < 1 {
+				return fmt.Errorf("lease renew requires --owner and --token")
+			}
+			held, err := store.Renew(ctx, *name, *owner, *token, *ttl, now)
+			if err != nil {
+				return err
+			}
+			return emit(out, map[string]any{"experimental": true, "delivery": "at_least_once", "action": "renew", "lease": held})
+		case "release":
+			if *owner == "" || *token < 1 {
+				return fmt.Errorf("lease release requires --owner and --token")
+			}
+			if err := store.Release(ctx, *name, *owner, *token, now); err != nil {
+				return err
+			}
+			return emit(out, map[string]any{"experimental": true, "delivery": "at_least_once", "action": "release", "name": *name})
+		case "status":
+			held, err := store.Get(ctx, *name)
+			if err != nil {
+				return err
+			}
+			return emit(out, map[string]any{"experimental": true, "delivery": "at_least_once", "action": "status", "lease": held})
+		default:
+			return fmt.Errorf("unknown lease action %q", action)
 		}
 	case "trace":
 		if len(args) < 2 {

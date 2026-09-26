@@ -1,6 +1,6 @@
 # ADR 0017: Distributed runtime is not claimed yet
 
-Status: accepted, 2026-09-25
+Status: accepted, 2026-09-25; superseded in part by ADR 0018
 
 Single-node Twinwright on SQLite now covers compile, run, resume, chaos, authorization, assertions, counterfactuals, traces, providers, bench, shadow observe-only, and optional containers. The roadmap's distributed runtime (PostgreSQL, workers, leases) must not be claimed until consistency, delivery, idempotency, lease ownership, and recovery are defined and implemented.
 
@@ -13,4 +13,4 @@ This ADR freezes the current single-node guarantees that any later distributed d
 - Runs without chaos or auth policies keep identical ledgers across versions that claim compatibility.
 - Delivery in a future multi-worker system will be described as at-least-once with idempotent handlers, not exactly-once.
 
-No distributed implementation ships with this ADR. A later change that introduces Postgres or workers needs a new ADR that maps each guarantee above onto the new storage and lease model before claiming production readiness.
+No full distributed implementation ships with this ADR. ADR 0018 adds SQLite lease ownership with fencing tokens as the first foundation piece. A later change that introduces Postgres or multi-node workers needs a new ADR that maps each guarantee above onto the new storage and lease model before claiming production readiness.
