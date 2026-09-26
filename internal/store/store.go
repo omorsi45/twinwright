@@ -16,7 +16,12 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-type Store struct{ DB *sql.DB }
+type Store struct {
+	DB *sql.DB
+	// Dialect is the backend this handle talks to. Runtime SQL is written
+	// once in `?`-placeholder form; the PostgreSQL driver translates it.
+	Dialect Dialect
+}
 type World struct {
 	ID     string `json:"id"`
 	Seed   int64  `json:"seed"`
@@ -73,11 +78,16 @@ type Observation struct {
 	Body   json.RawMessage `json:"body"`
 }
 
+// Open opens (or creates) a local SQLite world database and migrates it to the
+// current schema version. SQLite remains the default for local development,
+// deterministic examples, replay and evaluation.
 func Open(path string) (*Store, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, err
 	}
+	// One writer keeps SQLite's single-writer model explicit rather than
+	// relying on busy-timeout retries to paper over contention.
 	db.SetMaxOpenConns(1)
 	for _, stmt := range []string{"PRAGMA foreign_keys=ON", "PRAGMA busy_timeout=5000", "PRAGMA journal_mode=WAL"} {
 		if _, err = db.Exec(stmt); err != nil {
@@ -85,130 +95,29 @@ func Open(path string) (*Store, error) {
 			return nil, err
 		}
 	}
-	schema := []string{
-		`CREATE TABLE IF NOT EXISTS worlds (id TEXT PRIMARY KEY, seed INTEGER NOT NULL, digest TEXT NOT NULL, base_at TEXT NOT NULL)`,
-		`CREATE TABLE IF NOT EXISTS customers (world_id TEXT NOT NULL, id TEXT NOT NULL, name TEXT NOT NULL, PRIMARY KEY(world_id,id))`,
-		`CREATE TABLE IF NOT EXISTS invoices (world_id TEXT NOT NULL, id TEXT NOT NULL, customer_id TEXT NOT NULL, amount_cents INTEGER NOT NULL, subscription_id TEXT NOT NULL, PRIMARY KEY(world_id,id))`,
-		`CREATE TABLE IF NOT EXISTS charges (world_id TEXT NOT NULL, id TEXT NOT NULL, invoice_id TEXT NOT NULL, amount_cents INTEGER NOT NULL, refunded_cents INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, PRIMARY KEY(world_id,id))`,
-		`CREATE TABLE IF NOT EXISTS refunds (world_id TEXT NOT NULL, id TEXT NOT NULL, charge_id TEXT NOT NULL, amount_cents INTEGER NOT NULL, reason TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(world_id,id))`,
-		`CREATE TABLE IF NOT EXISTS subscriptions (world_id TEXT NOT NULL, id TEXT NOT NULL, customer_id TEXT NOT NULL, status TEXT NOT NULL, plan TEXT NOT NULL, PRIMARY KEY(world_id,id))`,
-		`CREATE TABLE IF NOT EXISTS crm_accounts (world_id TEXT NOT NULL, id TEXT NOT NULL, customer_id TEXT NOT NULL, status TEXT NOT NULL, representative_id TEXT NOT NULL, PRIMARY KEY(world_id,id))`,
-		`CREATE TABLE IF NOT EXISTS crm_contacts (world_id TEXT NOT NULL, id TEXT NOT NULL, account_id TEXT NOT NULL, name TEXT NOT NULL, email TEXT NOT NULL, PRIMARY KEY(world_id,id))`,
-		`CREATE TABLE IF NOT EXISTS crm_notes (world_id TEXT NOT NULL, id TEXT NOT NULL, account_id TEXT NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(world_id,id))`,
-		`CREATE TABLE IF NOT EXISTS ticket_projects (world_id TEXT NOT NULL, id TEXT NOT NULL, key TEXT NOT NULL, name TEXT NOT NULL, PRIMARY KEY(world_id,id))`,
-		`CREATE TABLE IF NOT EXISTS ticket_issues (world_id TEXT NOT NULL, id TEXT NOT NULL, project_id TEXT NOT NULL, account_id TEXT NOT NULL, title TEXT NOT NULL, status TEXT NOT NULL, priority TEXT NOT NULL, PRIMARY KEY(world_id,id))`,
-		`CREATE TABLE IF NOT EXISTS ticket_comments (world_id TEXT NOT NULL, id TEXT NOT NULL, issue_id TEXT NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(world_id,id))`,
-		`CREATE TABLE IF NOT EXISTS message_workspaces (world_id TEXT NOT NULL, id TEXT NOT NULL, name TEXT NOT NULL, PRIMARY KEY(world_id,id))`,
-		`CREATE TABLE IF NOT EXISTS message_channels (world_id TEXT NOT NULL, id TEXT NOT NULL, workspace_id TEXT NOT NULL, name TEXT NOT NULL, PRIMARY KEY(world_id,id))`,
-		`CREATE TABLE IF NOT EXISTS message_members (world_id TEXT NOT NULL, channel_id TEXT NOT NULL, principal_id TEXT NOT NULL, PRIMARY KEY(world_id,channel_id,principal_id))`,
-		`CREATE TABLE IF NOT EXISTS message_messages (world_id TEXT NOT NULL, id TEXT NOT NULL, channel_id TEXT NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(world_id,id))`,
-		`CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, world_id TEXT NOT NULL, scenario TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, task TEXT NOT NULL, status TEXT NOT NULL, step INTEGER NOT NULL DEFAULT 0, transcript TEXT NOT NULL DEFAULT '[]', fault_operation TEXT NOT NULL DEFAULT '', fault_consumed INTEGER NOT NULL DEFAULT 0)`,
-		`CREATE TABLE IF NOT EXISTS events (run_id TEXT NOT NULL, seq INTEGER NOT NULL, id TEXT NOT NULL UNIQUE, recorded_at TEXT NOT NULL, world_at TEXT NOT NULL, type TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(run_id,seq))`,
-		`CREATE TABLE IF NOT EXISTS tool_results (run_id TEXT NOT NULL, call_id TEXT NOT NULL, operation_id TEXT NOT NULL, arguments TEXT NOT NULL, status INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY(run_id,call_id))`,
-		`CREATE TABLE IF NOT EXISTS checkpoints (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, event_seq INTEGER NOT NULL, format_version INTEGER NOT NULL, manifest_digest TEXT NOT NULL, prefix_digest TEXT NOT NULL)`,
-		`CREATE TABLE IF NOT EXISTS fork_lineage (child_run_id TEXT PRIMARY KEY, parent_run_id TEXT NOT NULL, fork_event_seq INTEGER NOT NULL, checkpoint_id TEXT NOT NULL, format_version INTEGER NOT NULL, manifest_digest TEXT NOT NULL, prefix_digest TEXT NOT NULL, parent_provider TEXT NOT NULL, parent_model TEXT NOT NULL, chaos_replaced INTEGER NOT NULL DEFAULT 0)`,
-		`CREATE TABLE IF NOT EXISTS run_chaos (run_id TEXT PRIMARY KEY, policy_json TEXT NOT NULL, digest TEXT NOT NULL)`,
-		`CREATE TABLE IF NOT EXISTS chaos_rule_state (run_id TEXT NOT NULL, rule_id TEXT NOT NULL, matching_calls INTEGER NOT NULL DEFAULT 0, injections INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(run_id,rule_id))`,
-		`CREATE TABLE IF NOT EXISTS chaos_snapshots (run_id TEXT NOT NULL, rule_id TEXT NOT NULL, arguments_digest TEXT NOT NULL, status INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY(run_id,rule_id,arguments_digest))`,
-		`CREATE TABLE IF NOT EXISTS chaos_hidden_outcomes (run_id TEXT NOT NULL, call_id TEXT NOT NULL, rule_id TEXT NOT NULL, status INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY(run_id,call_id))`,
-		`CREATE TABLE IF NOT EXISTS run_auth (run_id TEXT PRIMARY KEY, policy_json TEXT NOT NULL, digest TEXT NOT NULL)`,
-		`CREATE TABLE IF NOT EXISTS auth_state (run_id TEXT PRIMARY KEY, call_index INTEGER NOT NULL DEFAULT 0)`,
-		`CREATE TABLE IF NOT EXISTS fork_observations (child_run_id TEXT PRIMARY KEY, call_id TEXT NOT NULL, status INTEGER NOT NULL, body TEXT NOT NULL)`,
-	}
-	for _, stmt := range schema {
-		if _, err = db.Exec(stmt); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("schema: %w", err)
-		}
-	}
-	if err = ensureModelColumn(db); err != nil {
+	s := &Store{DB: db, Dialect: DialectSQLite}
+	if err = s.migrate(context.Background()); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("schema migration: %w", err)
+		return nil, err
 	}
-	if err = ensureForkChaosColumn(db); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("schema migration: %w", err)
-	}
-	for _, migration := range []struct{ table, column, stmt string }{
-		{"runs", "principal_id", "ALTER TABLE runs ADD COLUMN principal_id TEXT NOT NULL DEFAULT '" + LegacyPrincipal + "'"},
-		{"fork_lineage", "auth_replaced", "ALTER TABLE fork_lineage ADD COLUMN auth_replaced INTEGER NOT NULL DEFAULT 0"},
-	} {
-		if !hasColumn(db, migration.table, migration.column) {
-			if _, err = db.Exec(migration.stmt); err != nil {
-				db.Close()
-				return nil, fmt.Errorf("schema migration: %w", err)
-			}
-		}
-	}
-	return &Store{DB: db}, nil
+	return s, nil
 }
 
-func hasColumn(db *sql.DB, table, column string) bool {
-	var count int
-	err := db.QueryRow("SELECT count(*) FROM pragma_table_info(?) WHERE name=?", table, column).Scan(&count)
-	return err == nil && count > 0
-}
-func ensureForkChaosColumn(db *sql.DB) error {
-	rows, err := db.Query("PRAGMA table_info(fork_lineage)")
+// migrate applies pending migrations and refuses a database written by a newer
+// build. Silently operating on an unknown future schema is how runtime history
+// gets corrupted, so this fails closed.
+func (s *Store) migrate(ctx context.Context) error {
+	version, err := s.SchemaVersion(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("schema version: %w", err)
 	}
-	found := false
-	for rows.Next() {
-		var cid, notNull, pk int
-		var name, typ string
-		var defaultValue sql.NullString
-		if err = rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
-			rows.Close()
-			return err
-		}
-		if name == "chaos_replaced" {
-			found = true
-		}
+	if version > CurrentSchemaVersion {
+		return fmt.Errorf("database schema version %d is newer than this build supports (%d); upgrade Twinwright instead of downgrading the database", version, CurrentSchemaVersion)
 	}
-	if err = rows.Err(); err != nil {
-		rows.Close()
-		return err
+	if err := applyMigrations(ctx, s.DB, s.Dialect, migrations); err != nil {
+		return fmt.Errorf("schema migration: %w", err)
 	}
-	if err = rows.Close(); err != nil {
-		return err
-	}
-	if found {
-		return nil
-	}
-	_, err = db.Exec("ALTER TABLE fork_lineage ADD COLUMN chaos_replaced INTEGER NOT NULL DEFAULT 0")
-	return err
-}
-func ensureModelColumn(db *sql.DB) error {
-	rows, err := db.Query("PRAGMA table_info(runs)")
-	if err != nil {
-		return err
-	}
-	hasModel := false
-	for rows.Next() {
-		var cid, notNull, pk int
-		var name, typ string
-		var defaultValue sql.NullString
-		if err = rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
-			rows.Close()
-			return err
-		}
-		if name == "model" {
-			hasModel = true
-		}
-	}
-	if err = rows.Err(); err != nil {
-		rows.Close()
-		return err
-	}
-	if err = rows.Close(); err != nil {
-		return err
-	}
-	if hasModel {
-		return nil
-	}
-	_, err = db.Exec("ALTER TABLE runs ADD COLUMN model TEXT NOT NULL DEFAULT ''")
-	return err
+	return nil
 }
 func OpenReadOnly(path string) (*Store, error) {
 	absolute, err := filepath.Abs(path)
@@ -229,7 +138,7 @@ func OpenReadOnly(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	return &Store{DB: db}, nil
+	return &Store{DB: db, Dialect: DialectSQLite}, nil
 }
 func (s *Store) Close() error { return s.DB.Close() }
 
@@ -436,11 +345,11 @@ func (s *Store) CreateRunConfigured(ctx context.Context, worldID, scenario, prov
 
 // ChaosPolicy returns sql.ErrNoRows for old databases or runs without a policy.
 func (s *Store) ChaosPolicy(ctx context.Context, runID string) ([]byte, string, error) {
-	var exists int
-	if err := s.DB.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='run_chaos'").Scan(&exists); err != nil {
+	present, err := s.HasTable(ctx, "run_chaos")
+	if err != nil {
 		return nil, "", err
 	}
-	if exists == 0 {
+	if !present {
 		return nil, "", sql.ErrNoRows
 	}
 	var encoded, digest string
@@ -452,11 +361,11 @@ func (s *Store) ChaosPolicy(ctx context.Context, runID string) ([]byte, string, 
 
 // AuthPolicy returns sql.ErrNoRows for old databases or unrestricted runs.
 func (s *Store) AuthPolicy(ctx context.Context, runID string) ([]byte, string, error) {
-	var exists int
-	if err := s.DB.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='run_auth'").Scan(&exists); err != nil {
+	present, err := s.HasTable(ctx, "run_auth")
+	if err != nil {
 		return nil, "", err
 	}
-	if exists == 0 {
+	if !present {
 		return nil, "", sql.ErrNoRows
 	}
 	var encoded, digest string
@@ -468,11 +377,11 @@ func (s *Store) AuthPolicy(ctx context.Context, runID string) ([]byte, string, e
 
 // ObservationOverride returns sql.ErrNoRows for old databases or forks without an override.
 func (s *Store) ObservationOverride(ctx context.Context, childRunID string) (Observation, error) {
-	var exists int
-	if err := s.DB.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='fork_observations'").Scan(&exists); err != nil {
+	present, err := s.HasTable(ctx, "fork_observations")
+	if err != nil {
 		return Observation{}, err
 	}
-	if exists == 0 {
+	if !present {
 		return Observation{}, sql.ErrNoRows
 	}
 	var observation Observation
@@ -509,37 +418,45 @@ func (s *Store) AttachAuth(ctx context.Context, runID string, policyJSON []byte,
 func (s *Store) Run(ctx context.Context, id string) (Run, error) {
 	var r Run
 	principal := "principal_id"
-	if !hasColumn(s.DB, "runs", "principal_id") {
+	present, err := s.HasColumn(ctx, "runs", "principal_id")
+	if err != nil {
+		return r, err
+	}
+	if !present {
 		principal = "'" + LegacyPrincipal + "'"
 	}
-	err := s.DB.QueryRowContext(ctx, "SELECT id,world_id,scenario,provider,model,task,status,step,transcript,fault_operation,"+principal+" FROM runs WHERE id=?", id).Scan(&r.ID, &r.WorldID, &r.Scenario, &r.Provider, &r.Model, &r.Task, &r.Status, &r.Step, &r.Transcript, &r.FaultOperation, &r.PrincipalID)
+	err = s.DB.QueryRowContext(ctx, "SELECT id,world_id,scenario,provider,model,task,status,step,transcript,fault_operation,"+principal+" FROM runs WHERE id=?", id).Scan(&r.ID, &r.WorldID, &r.Scenario, &r.Provider, &r.Model, &r.Task, &r.Status, &r.Step, &r.Transcript, &r.FaultOperation, &r.PrincipalID)
 	return r, err
 }
 
 func (s *Store) Lineage(ctx context.Context, childRunID string) (ForkLineage, error) {
 	var lineage ForkLineage
-	var exists int
-	if err := s.DB.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='fork_lineage'").Scan(&exists); err != nil {
+	present, err := s.HasTable(ctx, "fork_lineage")
+	if err != nil {
 		return lineage, err
 	}
-	if exists == 0 {
+	if !present {
 		return lineage, sql.ErrNoRows
 	}
 	var chaosReplaced int
 	column := "chaos_replaced"
-	var chaosColumns int
-	if err := s.DB.QueryRowContext(ctx, "SELECT count(*) FROM pragma_table_info('fork_lineage') WHERE name='chaos_replaced'").Scan(&chaosColumns); err != nil {
+	chaosPresent, err := s.HasColumn(ctx, "fork_lineage", "chaos_replaced")
+	if err != nil {
 		return lineage, err
 	}
-	if chaosColumns == 0 {
+	if !chaosPresent {
 		column = "0"
 	}
 	authColumn := "auth_replaced"
-	if !hasColumn(s.DB, "fork_lineage", "auth_replaced") {
+	authPresent, err := s.HasColumn(ctx, "fork_lineage", "auth_replaced")
+	if err != nil {
+		return lineage, err
+	}
+	if !authPresent {
 		authColumn = "0"
 	}
 	var authReplaced int
-	err := s.DB.QueryRowContext(ctx, `SELECT child_run_id,parent_run_id,fork_event_seq,checkpoint_id,format_version,manifest_digest,prefix_digest,parent_provider,parent_model,`+column+`,`+authColumn+` FROM fork_lineage WHERE child_run_id=?`, childRunID).Scan(
+	err = s.DB.QueryRowContext(ctx, `SELECT child_run_id,parent_run_id,fork_event_seq,checkpoint_id,format_version,manifest_digest,prefix_digest,parent_provider,parent_model,`+column+`,`+authColumn+` FROM fork_lineage WHERE child_run_id=?`, childRunID).Scan(
 		&lineage.ChildRunID, &lineage.ParentRunID, &lineage.ForkEventSeq, &lineage.CheckpointID, &lineage.FormatVersion, &lineage.ManifestDigest, &lineage.PrefixDigest, &lineage.ParentProvider, &lineage.ParentModel, &chaosReplaced, &authReplaced)
 	lineage.ChaosReplaced = chaosReplaced != 0
 	lineage.AuthReplaced = authReplaced != 0
@@ -565,7 +482,11 @@ func AppendEventTx(ctx context.Context, tx *sql.Tx, runID, typ string, payload a
 	}
 	var seq int
 	var base string
-	err = tx.QueryRowContext(ctx, "SELECT COALESCE(MAX(e.seq),0)+1,w.base_at FROM runs r JOIN worlds w ON w.id=r.world_id LEFT JOIN events e ON e.run_id=r.id WHERE r.id=?", runID).Scan(&seq, &base)
+	// GROUP BY w.base_at is required by PostgreSQL, which rejects a bare
+	// column beside an aggregate. SQLite tolerates its absence, so the
+	// grouped form is the portable one and behaves identically: the join
+	// yields at most one world row per run.
+	err = tx.QueryRowContext(ctx, "SELECT COALESCE(MAX(e.seq),0)+1,w.base_at FROM runs r JOIN worlds w ON w.id=r.world_id LEFT JOIN events e ON e.run_id=r.id WHERE r.id=? GROUP BY w.base_at", runID).Scan(&seq, &base)
 	if err != nil {
 		return err
 	}
