@@ -6,6 +6,8 @@
 
 Stateful software worlds, durable execution, deterministic evaluation, replay, counterfactual forks, and chaos testing for agent reliability engineering.
 
+[![CI](https://github.com/omorsi45/twinwright/actions/workflows/ci.yml/badge.svg)](https://github.com/omorsi45/twinwright/actions/workflows/ci.yml)
+[![Integration](https://github.com/omorsi45/twinwright/actions/workflows/integration.yml/badge.svg)](https://github.com/omorsi45/twinwright/actions/workflows/integration.yml)
 ![Go](https://img.shields.io/badge/Go-1.27%2B-00ADD8?logo=go&logoColor=white)
 ![License](https://img.shields.io/badge/License-Apache--2.0-blue)
 ![Focus](https://img.shields.io/badge/Focus-Agent%20Infrastructure-black)
@@ -57,7 +59,9 @@ A run can:
 - run Twinwright Bench, a curated suite with deterministic ground truth and JSON reports
 - experimentally observe recorded actions, simulate proposed local tool calls, and compare them without production writes
 - optionally start experimental local or Docker sidecars when a scenario needs process isolation
-- acquire experimental lease ownership with fencing tokens for future multi-worker coordination (at-least-once delivery, not exactly-once)
+- store runs, ledgers and runtime state in SQLite for local work or PostgreSQL for a fleet, under versioned migrations
+- execute queued runs on several worker processes that own a run under a fenced lease, take over a crashed worker's run, and cannot commit once fenced out (at-least-once delivery with idempotent handlers, never exactly-once)
+- post ledger-derived spans to an OpenTelemetry collector, and serve Prometheus metrics from a worker
 
 The project includes a minimal billing world and a multi-service company world spanning billing, CRM, ticketing, and messaging.
 
@@ -416,18 +420,109 @@ go run ./cmd/twinwright container stop --config examples/container/local.yaml
 
 `runtime: local` is a no-op handle for in-process work. `runtime: docker` shells to the docker CLI and requires a running daemon. Secrets belong in a relative `--env-file`, never on the command line. Kubernetes is not supported. See `docs/adr/0016-optional-containers.md`. A live docker start has not been verified on this host when the daemon was stopped.
 
-## Lease ownership
+## Distributed runtime
 
-**Experimental.** Twinwright does not claim a multi-node cluster yet. It does ship a SQLite lease store with fencing tokens so a future worker can own a named resource without exactly-once delivery myths.
+Twinwright runs on one process with SQLite by default. For a fleet, point it at
+PostgreSQL and run workers.
 
 ```bash
-go run ./cmd/twinwright lease acquire --name run/R-1 --owner worker-a --ttl 1m
-go run ./cmd/twinwright lease renew --name run/R-1 --owner worker-a --token 1 --ttl 1m
-go run ./cmd/twinwright lease status --name run/R-1
-go run ./cmd/twinwright lease release --name run/R-1 --owner worker-a --token 1
+docker compose up -d                    # PostgreSQL on 127.0.0.1:5432
+export TW_DSN='postgres://twinwright:twinwright@127.0.0.1:5432/twinwright?sslmode=disable'
+
+go run ./cmd/twinwright build examples/billing/openapi.yaml \
+  --bindings examples/billing/bindings.yaml --out twinwright.manifest.json
+
+# Create a run and queue it instead of executing it here.
+go run ./cmd/twinwright run duplicate-charge --db "$TW_DSN" --agent scripted --enqueue --steps 10
+
+# Run one or more workers. Each claims queued runs under a fenced lease.
+go run ./cmd/twinwright worker --db "$TW_DSN" --lease-ttl 30s --metrics-addr 127.0.0.1:9095
+
+go run ./cmd/twinwright queue --db "$TW_DSN"                 # depth and fleet
+go run ./cmd/twinwright queue --db "$TW_DSN" --run <run-id>   # ownership history
 ```
 
-JSON responses set `experimental: true` and `delivery: at_least_once`. Renew and release require the current fencing token. Expired leases can be reclaimed. The lease database defaults to `twinwright.leases.db` and is separate from the world store. See `docs/adr/0018-lease-fencing.md`. Full Postgres world storage and multi-worker orchestration remain deferred; see `docs/adr/0017-distributed-runtime-deferred.md`.
+`--drain` exits when the queue empties, which is what CI uses. The same database
+also serves `replay`, `evaluate`, `trace` and `inspect`, so a distributed run is
+as auditable as a local one.
+
+### Semantics
+
+Delivery is **at-least-once**. A crashed worker's run is taken over and the same
+work is attempted again. Exactly-once delivery is not claimed anywhere, because
+it is not achievable across a process boundary and a database. Duplicates are
+safe for two independent reasons:
+
+- **Idempotency by call ID.** A repeated tool call returns the result recorded
+  the first time and commits nothing. The same call ID with different arguments
+  is refused rather than answered from the cache.
+- **Fencing.** Every durable write proves, inside the same transaction as the
+  write, that this worker still owns the run. A worker that stalled past its
+  lease cannot commit after a newer worker took over.
+
+Every lease acquisition raises the fence, including re-acquisition by the same
+owner, so a worker that lost contact and reconnected cannot reuse an old token.
+The check rejects both a token below the highest that has committed - which needs
+no clock and is therefore immune to clock skew - and a lease that has expired.
+Losing a renewal cancels execution immediately rather than spending model calls
+on work the worker can no longer commit.
+
+A run is claimable when it is runnable, or marked leased with an expired lease,
+which is what a killed process leaves behind. Recovery needs no janitor process.
+On PostgreSQL the candidate row is taken with `FOR UPDATE ... SKIP LOCKED`, so
+simultaneous pollers take different runs.
+
+Ownership history is recorded in `run_ownership_log`, **not** in the run ledger.
+Fork lineage and checkpoint reconstruction digest the ledger prefix, so putting
+ownership there would make an identical agent trajectory digest differently
+depending on which worker ran it. Keeping the ledger purely about the agent is
+what lets every recovered run still replay, which the crash-recovery tests
+assert by replaying each one.
+
+See `docs/adr/0019-postgres-storage.md` and
+`docs/adr/0020-multi-worker-runtime.md`. ADR 0020 supersedes ADR 0018: the
+standalone lease store it described lived in a separate database, where a fence
+cannot be checked in the same transaction as the write it protects.
+
+### Storage
+
+```bash
+go run ./cmd/twinwright doctor --db "$TW_DSN"   # backend, schema version, queue depth
+go run ./cmd/twinwright version                  # includes the schema version this build writes
+```
+
+Schema state is versioned in `schema_migrations`. Each migration commits with its
+own bookkeeping row, so a failed migration leaves neither a partial schema nor a
+false record of success. A database written before migration tracking is adopted
+in place; a database recording a newer version is refused rather than downgraded.
+Timestamps are stored as RFC 3339 text on both backends so replay comparisons
+stay byte-identical.
+
+## Observability
+
+Traces are derived from the durable ledger, so they can be produced long after a
+run finished and identically on any machine holding the database.
+
+```bash
+go run ./cmd/twinwright trace <run-id> --db twinwright.db                       # JSON
+go run ./cmd/twinwright trace <run-id> --format text --db twinwright.db         # tree
+go run ./cmd/twinwright trace <run-id> --format otlp --db twinwright.db         # OTLP document
+go run ./cmd/twinwright trace <run-id> --format otlp \
+  --otlp-endpoint http://127.0.0.1:4318 --db twinwright.db                      # deliver it
+```
+
+The endpoint form POSTs to the collector and reports its status code; a rejection
+is an error, not a silent success. `docker compose up -d` starts a collector that
+prints what it receives.
+
+A worker exposes Prometheus metrics with `--metrics-addr`: in-process counters
+for claims, dispositions, takeovers, fencing rejections and execution seconds,
+plus gauges read from the database at scrape time for queue depth, run statuses,
+tool calls, retries, authorization denials, chaos injections and ownership
+transitions. The ledger-derived gauges are queried rather than separately
+maintained, so they cannot disagree with the ledger. **The endpoint is
+unauthenticated and off by default: bind it to loopback.** See
+`docs/adr/0021-otlp-and-metrics.md`.
 
 ## Experimental shadow mode
 
@@ -654,7 +749,10 @@ internal/
   counterfactual/     intervention analysis over forks
   shadow/             experimental observe-only shadow simulation
   container/          optional local or Docker sidecar executor
-  lease/              time-bounded ownership with fencing tokens
+  worker/             multi-worker claim, lease renewal and takeover loop
+metrics/            Prometheus exposition from counters and the ledger
+pgsql/              PostgreSQL driver wrapper and placeholder translation
+pgtest/             shared PostgreSQL test-support helpers
   redact/             secret redaction before storage or display
   trace/              ledger traces, text trees, and OTLP export
 
@@ -707,11 +805,28 @@ Capabilities are versioned with the runtime and world manifest. The CLI and ADRs
 
 ## Development
 
-Run tests:
+```bash
+git clone https://github.com/omorsi45/twinwright
+cd twinwright
+go test ./...        # hermetic: no network, no API key, no container runtime
+./scripts/e2e.sh     # the whole documented pipeline, with scripted fixtures
+```
+
+`make help` lists the rest. The gate CI runs:
 
 ```bash
-go test ./...
+make verify          # gofmt, vet, build, tests, end-to-end
+make test-race       # the worker runtime is concurrent
+docker compose up -d && make verify-full   # adds the PostgreSQL integration tests
 ```
+
+PostgreSQL tests are opt-in behind `TWINWRIGHT_TEST_POSTGRES_DSN` and skip when
+it is unset, so the default suite stays hermetic. They run against a real server
+rather than a mock: the dialect differences they exist to catch - integer widths,
+aggregate grouping, type strictness, upsert column ambiguity - do not appear
+against a fake.
+
+`CONTRIBUTING.md` describes what a change is expected to prove.
 
 Run the original billing reference example:
 
@@ -756,7 +871,9 @@ Major runtime contracts are documented as ADRs under `docs/adr/`, including:
 - experimental observe-only shadow mode
 - optional local or Docker sidecars
 - distributed runtime deferred with single-node guarantees frozen
-- lease ownership with fencing tokens (at-least-once foundation)
+- PostgreSQL-backed storage with versioned migrations
+- multi-worker execution with fenced run ownership and crash recovery
+- OTLP delivery to a collector, and metrics split between in-process counters and ledger-derived gauges
 
 The ADRs document not only what Twinwright does, but why the implementation makes those tradeoffs.
 
@@ -769,6 +886,35 @@ The project does not require production credentials for its deterministic exampl
 Principals and permissions are local, deterministic simulations with no external identity provider. The `permission_revocation` chaos effect is a simulated service denial, separate from principal authorization.
 
 Keep provider credentials outside the repository.
+
+## Current limitations
+
+Stated plainly, because a testing harness that overstates itself is worse than
+one that admits a gap.
+
+- **Live provider runs are unverified in this repository.** The OpenAI,
+  OpenAI-compatible and Anthropic adapters are exercised against deterministic
+  local HTTP servers. No test here has called a paid API, so no claim is made
+  about live-provider behaviour beyond adapter conformance.
+- **Container execution is experimental and not covered by a live daemon test.**
+  The executor is unit-tested against an injected runner. Lifecycle hardening -
+  health checks, startup timeouts, resource limits, deterministic shutdown - is
+  not done.
+- **Shadow mode reads a JSONL observation log only.** There is no connector for a
+  webhook stream, recorded HTTP interactions or audit logs, and write mode is
+  rejected by design. No live external integration has been tested.
+- **The distributed runtime is a multi-worker fleet over one database.** It is not
+  multi-region, has no broker, and does not shard. A worker is a process that
+  needs a DSN; how it is scheduled is an operational choice.
+- **Delivery is at-least-once.** Exactly-once is never claimed. Duplicate
+  deliveries are made safe by call-ID idempotency and fencing, not prevented.
+- **The metrics endpoint is unauthenticated** and off by default. Bind it to
+  loopback.
+- **No performance numbers are published.** The repository contains no benchmark
+  figures because none have been measured on a documented machine.
+- **Read-only opens of a SQLite database in WAL mode create `-wal` and `-shm`
+  sidecars**, so `replay`, `trace` and `evaluate` need a writable directory even
+  though they never write to the database itself.
 
 ## License
 

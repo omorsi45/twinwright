@@ -1,0 +1,45 @@
+name: Capability or scenario request
+description: A failure mode Twinwright cannot yet simulate, or a capability the runtime lacks.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The most useful requests here describe a **failure mode of real agents**
+        that Twinwright cannot currently reproduce. That is the project's reason
+        to exist, and it is a better starting point than a feature name.
+
+  - type: textarea
+    id: failure
+    attributes:
+      label: The failure mode
+      description: What does an agent get wrong in production that you cannot reproduce here today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: shape
+    attributes:
+      label: What a test for it would look like
+      description: |
+        Which world state, which fault, and what would count as the agent
+        passing or failing. If it fits an existing chaos rule, assertion type or
+        benchmark category, say which.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you tried
+      description: Which existing chaos rules, policies or assertions came closest, and where they fell short.
+
+  - type: checkboxes
+    id: constraints
+    attributes:
+      label: Constraints this project holds
+      description: Confirming these helps keep the discussion productive.
+      options:
+        - label: This does not require claiming exactly-once delivery.
+        - label: This can be exercised deterministically, without a paid API.
+        - label: This does not need a new external dependency, or I have said which and why it earns its place.

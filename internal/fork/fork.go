@@ -217,8 +217,13 @@ func Create(ctx context.Context, sourceReadOnly, destination *store.Store, selec
 		selected.ID, parent.ID, selected.EventSeq, selected.FormatVersion, selected.ManifestDigest, selected.PrefixDigest); err != nil {
 		return Result{}, err
 	}
+	// chaos_replaced and auth_replaced are integer columns on both backends.
+	// SQLite silently accepts a Go bool there; PostgreSQL refuses to encode one
+	// into BIGINT, so the flag is converted explicitly rather than relying on
+	// one driver's leniency.
 	if _, err := tx.ExecContext(ctx, `INSERT INTO fork_lineage(child_run_id,parent_run_id,fork_event_seq,checkpoint_id,format_version,manifest_digest,prefix_digest,parent_provider,parent_model,chaos_replaced,auth_replaced) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
-		child.ID, parent.ID, selected.EventSeq, selected.ID, selected.FormatVersion, selected.ManifestDigest, selected.PrefixDigest, parent.Provider, parent.Model, len(options.ChaosPolicyRaw) > 0, len(options.AuthPolicyRaw) > 0); err != nil {
+		child.ID, parent.ID, selected.EventSeq, selected.ID, selected.FormatVersion, selected.ManifestDigest, selected.PrefixDigest, parent.Provider, parent.Model,
+		flagInt(len(options.ChaosPolicyRaw) > 0), flagInt(len(options.AuthPolicyRaw) > 0)); err != nil {
 		return Result{}, err
 	}
 	if err := store.AppendEventTx(ctx, tx, child.ID, "execution.forked", map[string]any{
@@ -362,4 +367,13 @@ func copyToolResults(ctx context.Context, source *sql.DB, target *sql.Tx, parent
 		}
 	}
 	return rows.Err()
+}
+
+// flagInt renders a boolean for an integer column. Both backends store these
+// flags as integers; only SQLite would accept a Go bool for one.
+func flagInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
 }

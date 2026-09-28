@@ -51,7 +51,7 @@ func Decide(ctx context.Context, tx *sql.Tx, runID, operationID string, argument
 		if rule.Type == "stale_read" {
 			captureRules = append(captureRules, rule.ID)
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO chaos_rule_state(run_id,rule_id,matching_calls,injections) VALUES(?,?,1,0) ON CONFLICT(run_id,rule_id) DO UPDATE SET matching_calls=matching_calls+1`, runID, rule.ID); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO chaos_rule_state(run_id,rule_id,matching_calls,injections) VALUES(?,?,1,0) ON CONFLICT(run_id,rule_id) DO UPDATE SET matching_calls=chaos_rule_state.matching_calls+1`, runID, rule.ID); err != nil {
 			return Decision{}, err
 		}
 		var calls, injections int

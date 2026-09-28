@@ -1,0 +1,20 @@
+# Go tooling (gofmt, go vet) and CI on Linux both assume LF. Without this,
+# a Windows checkout with core.autocrlf=true produces CRLF working files that
+# `gofmt -l` reports as unformatted even though the committed bytes are fine.
+* text=auto eol=lf
+
+*.go text eol=lf
+*.md text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.json text eol=lf
+*.sql text eol=lf
+*.sh text eol=lf
+*.jsonl text eol=lf
+go.mod text eol=lf
+go.sum text eol=lf
+
+*.db binary
+*.png binary
+*.jpg binary
+*.gif binary

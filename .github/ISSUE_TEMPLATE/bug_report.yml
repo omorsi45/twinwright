@@ -1,0 +1,77 @@
+name: Bug report
+description: Something in the runtime, replay, evaluation or distributed path behaves incorrectly.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Twinwright runs are deterministic from a seed plus a manifest, so a bug
+        is usually reproducible from the exact commands and the seed. Including
+        both turns a report into a test case.
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `twinwright version`.
+      placeholder: '{"version":"v0.5.0","go":"go1.27.1","schema_version":2,...}'
+    validations:
+      required: true
+
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Storage backend
+      options:
+        - SQLite
+        - PostgreSQL
+        - both
+    validations:
+      required: true
+
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Execution mode
+      options:
+        - single-node (run / resume)
+        - distributed (enqueue / worker)
+        - replay, evaluate or trace only
+        - benchmark
+    validations:
+      required: true
+
+  - type: textarea
+    id: commands
+    attributes:
+      label: Commands
+      description: The exact commands, including the seed, manifest and any chaos or authorization policy.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected, and what happened
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: |
+        Whatever you have: the run's ledger (`twinwright inspect <run-id>`), its
+        trace (`twinwright trace <run-id>`), the replay report, or for a
+        distributed issue `twinwright queue --run <run-id>`, which includes the
+        ownership history. Redact anything sensitive - traces already redact
+        configured secrets, but check.
+      render: shell
+
+  - type: input
+    id: provider
+    attributes:
+      label: Provider
+      description: scripted, openai, openai-compatible or anthropic. Say so if the bug only appears with a live provider.
+      placeholder: scripted

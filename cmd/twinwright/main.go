@@ -25,7 +25,6 @@ import (
 	"twinwright/internal/dispatch"
 	"twinwright/internal/eval"
 	"twinwright/internal/fork"
-	"twinwright/internal/lease"
 	"twinwright/internal/replay"
 	"twinwright/internal/shadow"
 	"twinwright/internal/store"
@@ -41,10 +40,20 @@ func main() {
 
 func runCLI(args []string, out io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: twinwright build|build-world|run|resume|inspect|trace|replay|checkpoints|fork|compare|evaluate|counterfactual|bench|shadow|container|lease ...")
+		return fmt.Errorf("usage: twinwright version|doctor|build|build-world|run|resume|worker|enqueue|queue|inspect|trace|replay|checkpoints|fork|compare|evaluate|counterfactual|bench|shadow|container ...")
 	}
 	ctx := context.Background()
 	switch args[0] {
+	case "version", "--version", "-v":
+		return versionCommand(out)
+	case "doctor":
+		return doctorCommand(ctx, args, out)
+	case "worker":
+		return workerCommand(ctx, args, out)
+	case "enqueue":
+		return enqueueCommand(ctx, args, out)
+	case "queue":
+		return queueCommand(ctx, args, out)
 	case "build":
 		if len(args) < 2 {
 			return fmt.Errorf("usage: twinwright build <openapi.yaml> [--bindings path] [--out path]")
@@ -120,7 +129,7 @@ func runCLI(args []string, out io.Writer) error {
 		fs := flag.NewFlagSet("run", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
 		manifestPath := fs.String("manifest", "twinwright.manifest.json", "compiled manifest")
-		dbPath := fs.String("db", "twinwright.db", "SQLite world database")
+		dbPath := fs.String("db", "twinwright.db", "SQLite path or postgres:// DSN")
 		providerName := fs.String("agent", "openai", "scripted, openai, openai-compatible, or anthropic")
 		model := fs.String("model", "", "provider model; defaults depend on the agent")
 		baseURL := fs.String("base-url", os.Getenv("OPENAI_BASE_URL"), "base URL for openai-compatible")
@@ -130,6 +139,7 @@ func runCLI(args []string, out io.Writer) error {
 		authPath := fs.String("auth", "", "principal authorization policy YAML")
 		recovery := fs.String("recovery", "safe", "scripted ambiguous-commit recovery: safe or unsafe")
 		steps := fs.Int("steps", 20, "maximum model turns in this invocation")
+		enqueue := fs.Bool("enqueue", false, "create the run and queue it for a worker instead of executing it here")
 		if err := fs.Parse(args[2:]); err != nil {
 			return err
 		}
@@ -195,7 +205,7 @@ func runCLI(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		s, err := store.Open(*dbPath)
+		s, err := store.OpenDSN(ctx, *dbPath)
 		if err != nil {
 			return err
 		}
@@ -207,6 +217,21 @@ func runCLI(args []string, out io.Writer) error {
 		run, err := s.CreateRunConfigured(ctx, world.ID, scenario, *providerName, *model, task, options)
 		if err != nil {
 			return err
+		}
+		if *enqueue {
+			// Distributed mode: hand the run to the queue instead of executing
+			// it here, so a worker claims it under a fenced lease.
+			if err = s.Enqueue(ctx, run.ID, *steps, time.Now().UTC()); err != nil {
+				return err
+			}
+			return writeJSON(out, map[string]any{
+				"run_id":   run.ID,
+				"world_id": world.ID,
+				"state":    store.QueueRunnable,
+				"steps":    *steps,
+				"delivery": "at_least_once",
+				"backend":  string(s.Dialect),
+			})
 		}
 		runner := agent.Runner{Store: s, Dispatch: &dispatch.Dispatcher{Store: s, Manifest: manifest}, Manifest: manifest, Provider: provider}
 		result, err := runner.Execute(ctx, run.ID, *steps)
@@ -222,7 +247,7 @@ func runCLI(args []string, out io.Writer) error {
 		fs := flag.NewFlagSet("resume", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
 		manifestPath := fs.String("manifest", "twinwright.manifest.json", "compiled manifest")
-		dbPath := fs.String("db", "twinwright.db", "SQLite world database")
+		dbPath := fs.String("db", "twinwright.db", "SQLite path or postgres:// DSN")
 		providerName := fs.String("agent", "", "run's provider")
 		model := fs.String("model", "", "use the model saved with the run")
 		baseURL := fs.String("base-url", os.Getenv("OPENAI_BASE_URL"), "base URL for openai-compatible")
@@ -234,7 +259,7 @@ func runCLI(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		s, err := store.Open(*dbPath)
+		s, err := store.OpenDSN(ctx, *dbPath)
 		if err != nil {
 			return err
 		}
@@ -273,7 +298,7 @@ func runCLI(args []string, out io.Writer) error {
 		fs := flag.NewFlagSet("checkpoints", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
 		manifestPath := fs.String("manifest", "twinwright.manifest.json", "compiled manifest")
-		dbPath := fs.String("db", "twinwright.db", "SQLite world database")
+		dbPath := fs.String("db", "twinwright.db", "SQLite path or postgres:// DSN")
 		if err := fs.Parse(args[2:]); err != nil {
 			return err
 		}
@@ -281,7 +306,7 @@ func runCLI(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		s, err := store.OpenReadOnly(*dbPath)
+		s, err := store.OpenReadOnlyDSN(ctx, *dbPath)
 		if err != nil {
 			return err
 		}
@@ -299,7 +324,7 @@ func runCLI(args []string, out io.Writer) error {
 		fs.SetOutput(io.Discard)
 		atEvent := fs.Int("at-event", 0, "committed checkpoint event sequence")
 		manifestPath := fs.String("manifest", "twinwright.manifest.json", "compiled manifest")
-		dbPath := fs.String("db", "twinwright.db", "SQLite world database")
+		dbPath := fs.String("db", "twinwright.db", "SQLite path or postgres:// DSN")
 		providerName := fs.String("agent", "", "child provider override")
 		model := fs.String("model", "", "child model override")
 		fault := fs.String("fault", "", "new one-time fault operation")
@@ -317,7 +342,7 @@ func runCLI(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		source, err := store.OpenReadOnly(*dbPath)
+		source, err := store.OpenReadOnlyDSN(ctx, *dbPath)
 		if err != nil {
 			return err
 		}
@@ -379,7 +404,7 @@ func runCLI(args []string, out io.Writer) error {
 		if err := rebuilt.Close(); err != nil {
 			return err
 		}
-		destination, err := store.Open(*dbPath)
+		destination, err := store.OpenDSN(ctx, *dbPath)
 		if err != nil {
 			return err
 		}
@@ -430,11 +455,11 @@ func runCLI(args []string, out io.Writer) error {
 		}
 		fs := flag.NewFlagSet("compare", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
-		dbPath := fs.String("db", "twinwright.db", "SQLite world database")
+		dbPath := fs.String("db", "twinwright.db", "SQLite path or postgres:// DSN")
 		if err := fs.Parse(args[3:]); err != nil {
 			return err
 		}
-		s, err := store.OpenReadOnly(*dbPath)
+		s, err := store.OpenReadOnlyDSN(ctx, *dbPath)
 		if err != nil {
 			return err
 		}
@@ -451,7 +476,7 @@ func runCLI(args []string, out io.Writer) error {
 		fs := flag.NewFlagSet("replay", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
 		manifestPath := fs.String("manifest", "twinwright.manifest.json", "compiled manifest")
-		dbPath := fs.String("db", "twinwright.db", "SQLite world database")
+		dbPath := fs.String("db", "twinwright.db", "SQLite path or postgres:// DSN")
 		if err := fs.Parse(args[2:]); err != nil {
 			return err
 		}
@@ -459,7 +484,7 @@ func runCLI(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		s, err := store.OpenReadOnly(*dbPath)
+		s, err := store.OpenReadOnlyDSN(ctx, *dbPath)
 		if err != nil {
 			return err
 		}
@@ -482,7 +507,7 @@ func runCLI(args []string, out io.Writer) error {
 		fs := flag.NewFlagSet("evaluate", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
 		manifestPath := fs.String("manifest", "twinwright.manifest.json", "compiled manifest")
-		dbPath := fs.String("db", "twinwright.db", "SQLite world database")
+		dbPath := fs.String("db", "twinwright.db", "SQLite path or postgres:// DSN")
 		assertionsPath := fs.String("assertions", "", "assertion YAML file")
 		if err := fs.Parse(args[2:]); err != nil {
 			return err
@@ -502,7 +527,7 @@ func runCLI(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		s, err := store.OpenReadOnly(*dbPath)
+		s, err := store.OpenReadOnlyDSN(ctx, *dbPath)
 		if err != nil {
 			return err
 		}
@@ -536,7 +561,7 @@ func runCLI(args []string, out io.Writer) error {
 		fs := flag.NewFlagSet("counterfactual", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
 		manifestPath := fs.String("manifest", "twinwright.manifest.json", "compiled manifest")
-		dbPath := fs.String("db", "twinwright.db", "SQLite world database")
+		dbPath := fs.String("db", "twinwright.db", "SQLite path or postgres:// DSN")
 		interventionsPath := fs.String("interventions", "", "intervention YAML file")
 		assertionsPath := fs.String("assertions", "", "assertion YAML file defining success; defaults to the scenario evaluation")
 		trials := fs.Int("trials", 1, "forks per candidate and intervention")
@@ -572,7 +597,7 @@ func runCLI(args []string, out io.Writer) error {
 			}
 			judge = counterfactual.AssertionJudge(assertions)
 		}
-		source, err := store.OpenReadOnly(*dbPath)
+		source, err := store.OpenReadOnlyDSN(ctx, *dbPath)
 		if err != nil {
 			return err
 		}
@@ -583,7 +608,7 @@ func runCLI(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		destination, err := store.Open(*dbPath)
+		destination, err := store.OpenDSN(ctx, *dbPath)
 		if err != nil {
 			return err
 		}
@@ -783,74 +808,16 @@ func runCLI(args []string, out io.Writer) error {
 		default:
 			return fmt.Errorf("unknown container action %q", action)
 		}
-	case "lease":
-		if len(args) < 2 {
-			return fmt.Errorf("usage: twinwright lease acquire|renew|release|status --name <id> --owner <id> [--db path] [--token n] [--ttl duration]")
-		}
-		action := args[1]
-		fs := flag.NewFlagSet("lease", flag.ContinueOnError)
-		fs.SetOutput(io.Discard)
-		dbPath := fs.String("db", "twinwright.leases.db", "SQLite lease database")
-		name := fs.String("name", "", "lease name, for example run/R-1")
-		owner := fs.String("owner", "", "worker identity")
-		token := fs.Int64("token", 0, "fencing token for renew/release")
-		ttl := fs.Duration("ttl", time.Minute, "lease lifetime for acquire/renew")
-		if err := fs.Parse(args[2:]); err != nil {
-			return err
-		}
-		if *name == "" {
-			return fmt.Errorf("lease requires --name")
-		}
-		store, err := lease.Open(*dbPath)
-		if err != nil {
-			return err
-		}
-		defer store.Close()
-		now := time.Now().UTC()
-		switch action {
-		case "acquire":
-			if *owner == "" {
-				return fmt.Errorf("lease acquire requires --owner")
-			}
-			held, err := store.Acquire(ctx, *name, *owner, *ttl, now)
-			if err != nil {
-				return err
-			}
-			return emit(out, map[string]any{"experimental": true, "delivery": "at_least_once", "action": "acquire", "lease": held})
-		case "renew":
-			if *owner == "" || *token < 1 {
-				return fmt.Errorf("lease renew requires --owner and --token")
-			}
-			held, err := store.Renew(ctx, *name, *owner, *token, *ttl, now)
-			if err != nil {
-				return err
-			}
-			return emit(out, map[string]any{"experimental": true, "delivery": "at_least_once", "action": "renew", "lease": held})
-		case "release":
-			if *owner == "" || *token < 1 {
-				return fmt.Errorf("lease release requires --owner and --token")
-			}
-			if err := store.Release(ctx, *name, *owner, *token, now); err != nil {
-				return err
-			}
-			return emit(out, map[string]any{"experimental": true, "delivery": "at_least_once", "action": "release", "name": *name})
-		case "status":
-			held, err := store.Get(ctx, *name)
-			if err != nil {
-				return err
-			}
-			return emit(out, map[string]any{"experimental": true, "delivery": "at_least_once", "action": "status", "lease": held})
-		default:
-			return fmt.Errorf("unknown lease action %q", action)
-		}
 	case "trace":
 		if len(args) < 2 {
-			return fmt.Errorf("usage: twinwright trace <run-id> [--format json|text|otlp] [--db path]")
+			return fmt.Errorf("usage: twinwright trace <run-id> [--format json|text|otlp] [--otlp-endpoint url] [--db path]")
 		}
 		fs := flag.NewFlagSet("trace", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
-		dbPath := fs.String("db", "twinwright.db", "SQLite world database")
+		dbPath := fs.String("db", "twinwright.db", "SQLite path or postgres:// DSN")
 		format := fs.String("format", "json", "json, text, or otlp")
+		otlpEndpoint := fs.String("otlp-endpoint", os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"), "POST the spans to this OpenTelemetry collector instead of printing them")
+		otlpHeader := fs.String("otlp-header", "", "extra request header for the collector, as Name: value")
 		if err := fs.Parse(args[2:]); err != nil {
 			return err
 		}
@@ -859,7 +826,7 @@ func runCLI(args []string, out io.Writer) error {
 		default:
 			return fmt.Errorf("unknown trace format %q", *format)
 		}
-		s, err := store.OpenReadOnly(*dbPath)
+		s, err := store.OpenReadOnlyDSN(ctx, *dbPath)
 		if err != nil {
 			return err
 		}
@@ -873,6 +840,23 @@ func runCLI(args []string, out io.Writer) error {
 			_, err = io.WriteString(out, trace.Text(built))
 			return err
 		case "otlp":
+			if *otlpEndpoint != "" {
+				// Delivering the spans, not just formatting them: the
+				// collector's status code is what makes the export verifiable.
+				exporter := trace.Exporter{Endpoint: *otlpEndpoint}
+				if *otlpHeader != "" {
+					name, value, found := strings.Cut(*otlpHeader, ":")
+					if !found {
+						return fmt.Errorf("--otlp-header must be \"Name: value\"")
+					}
+					exporter.Headers = map[string]string{strings.TrimSpace(name): strings.TrimSpace(value)}
+				}
+				delivery, err := exporter.Export(ctx, built)
+				if err != nil {
+					return err
+				}
+				return emit(out, delivery)
+			}
 			encoded, err := trace.OTLP(built)
 			if err != nil {
 				return err
@@ -890,12 +874,12 @@ func runCLI(args []string, out io.Writer) error {
 		}
 		fs := flag.NewFlagSet("inspect", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
-		dbPath := fs.String("db", "twinwright.db", "SQLite world database")
+		dbPath := fs.String("db", "twinwright.db", "SQLite path or postgres:// DSN")
 		manifestPath := fs.String("manifest", "twinwright.manifest.json", "compiled manifest, needed for security analysis")
 		if err := fs.Parse(args[2:]); err != nil {
 			return err
 		}
-		s, err := store.Open(*dbPath)
+		s, err := store.OpenDSN(ctx, *dbPath)
 		if err != nil {
 			return err
 		}
