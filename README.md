@@ -870,7 +870,7 @@ Major runtime contracts are documented as ADRs under `docs/adr/`, including:
 - Twinwright Bench suite runner and report comparison
 - experimental observe-only shadow mode
 - optional local or Docker sidecars
-- distributed runtime deferred with single-node guarantees frozen
+- single-node guarantees frozen as the contract a distributed runtime had to preserve
 - PostgreSQL-backed storage with versioned migrations
 - multi-worker execution with fenced run ownership and crash recovery
 - OTLP delivery to a collector, and metrics split between in-process counters and ledger-derived gauges

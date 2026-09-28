@@ -1,6 +1,14 @@
 # ADR 0018: Lease ownership with fencing tokens
 
-Status: accepted, 2026-09-25
+Status: accepted, 2026-09-25; superseded by ADR 0020
+
+ADR 0020 replaced the design below. The standalone lease store described here
+lived in a database separate from the world store, which makes fencing
+unenforceable: there is no transaction spanning both, so the ownership check
+cannot commit atomically with the write it protects. Run ownership now lives in
+the world store, and the `twinwright lease` command this ADR introduced is
+removed. Read this ADR for the reasoning that led there, not as a description of
+the current runtime.
 
 ADR 0017 froze single-node guarantees and rejected claiming a multi-worker runtime before leases, delivery semantics, and recovery were defined. This ADR introduces the first piece of that foundation: time-bounded lease ownership with fencing tokens, without rewriting the world store onto Postgres or claiming a full distributed cluster.
 
