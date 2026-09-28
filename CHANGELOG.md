@@ -13,6 +13,34 @@ database written by a newer build is refused rather than downgraded.
 
 ### Added
 
+- **Shadow observation connectors.** A `Connector` boundary decodes a recorded
+  external format into observations, so shadow evaluation no longer requires
+  hand-transforming an export into Twinwright's own shape first. Three
+  implementations ship: `file`/`jsonl` (native), `audit_log` (sanitized audit
+  export) and `recorded_http` (captured HTTP interactions), selected by a
+  config's `source.type`. Decoding is a pure function of bytes, so no connector
+  opens a socket or holds a credential. Confinement under the examples root is
+  enforced in the loader as well as at config parse time, sources are capped at
+  8 MiB, and unknown fields are rejected rather than silently dropped. An attempt
+  that did not take effect (a denied audit entry, a 4xx or 5xx response) is not
+  counted as an observed action. No connector has been tested against a live
+  external system; shadow output carries `live_external: false`. (ADR 0022)
+
+### Fixed
+
+- **Shadow comparison is now deterministic.** `Compare` built its matched and
+  residual lists by ranging over maps, so Go's randomised iteration order decided
+  the order of a report meant to serve as evidence: two comparisons over
+  byte-identical input disagreed, which made a report impossible to diff between
+  runs or commit as a fixture. Output is sorted by operation and then canonical
+  arguments.
+- **Superseded ADRs now say so.** ADR 0018 still read as current after ADR 0020
+  replaced its design and removed the `twinwright lease` command, so a reader
+  landing there first would implement a lease store that no longer exists and
+  cannot enforce fencing. ADR 0017 now credits the two ADRs that completed it,
+  and the README capability list no longer advertises the distributed runtime as
+  deferred two bullets above the ones describing it as shipped.
+
 - **PostgreSQL storage backend.** `store.OpenDSN` accepts a `postgres://` URL or
   a SQLite path. Runtime SQL is written once with `?` placeholders and translated
   to `$N` by a `database/sql` driver wrapping pgx. SQLite remains the default for

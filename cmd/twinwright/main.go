@@ -743,7 +743,7 @@ func runCLI(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		observed, err := shadow.LoadObservations(*examplesRoot, cfg.Source.Path)
+		observed, err := shadow.Load(*examplesRoot, cfg.Source)
 		if err != nil {
 			return err
 		}
@@ -756,6 +756,8 @@ func runCLI(args []string, out io.Writer) error {
 			"label":         cfg.Label,
 			"mode":          cfg.Mode,
 			"config_digest": cfg.Digest(),
+			"connector":     cfg.Source.Type,
+			"live_external": false,
 			"run_id":        runID,
 			"proposed":      proposed,
 			"observed":      observed,

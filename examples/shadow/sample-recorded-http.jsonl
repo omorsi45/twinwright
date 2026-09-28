@@ -1,0 +1,4 @@
+{"at":"2026-09-25T12:00:00Z","method":"GET","path":"/customers/C-104","operation_id":"getCustomer","query":{"id":"C-104"},"status":200,"actor":"support-console"}
+{"at":"2026-09-25T12:01:00Z","method":"GET","path":"/customers/C-104/invoices","operation_id":"listInvoices","query":{"id":"C-104"},"status":200,"actor":"support-console"}
+{"at":"2026-09-25T12:01:40Z","method":"POST","path":"/refunds","operation_id":"createRefund","body":{"charge_id":"CH-9999","amount_cents":5905,"reason":"duplicate charge"},"status":422,"actor":"support-console"}
+{"at":"2026-09-25T12:02:00Z","method":"POST","path":"/refunds","operation_id":"createRefund","body":{"charge_id":"CH-1002","amount_cents":5905,"reason":"duplicate charge"},"status":201,"actor":"support-console"}

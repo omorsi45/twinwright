@@ -526,7 +526,7 @@ unauthenticated and off by default: bind it to loopback.** See
 
 ## Experimental shadow mode
 
-**Experimental.** Shadow mode does not connect to production systems. It reads an observe-only config, loads a JSONL observation log, simulates what an agent would do in a local Twinwright world, and compares proposed tool calls to observed human actions. Write mode and production adapters are rejected.
+**Experimental.** Shadow mode does not connect to production systems. It reads an observe-only config, decodes a recorded observation source through a connector, simulates what an agent would do in a local Twinwright world, and compares proposed tool calls to observed human and system actions. Write mode and production adapters are rejected.
 
 ```bash
 go run ./cmd/twinwright build examples/billing/openapi.yaml --out twinwright.manifest.json
@@ -538,7 +538,40 @@ go run ./cmd/twinwright shadow \
   --agent scripted
 ```
 
-The JSON output always sets `experimental: true`. Secret env names listed in the config are never printed. See `docs/adr/0015-shadow-mode.md`.
+### Observation connectors
+
+A connector adapts a recorded external format into Twinwright observations, so
+shadow evaluation does not require hand-transforming an export first. The
+config's `source.type` selects one:
+
+| `source.type` | Reads |
+| --- | --- |
+| `file`, `jsonl` | Twinwright's native observation JSONL: `kind`, `at`, `operation_id`, `arguments`, `actor` |
+| `audit_log` | a sanitized audit export: `timestamp`, `actor`, `action`, `parameters`, `outcome` |
+| `recorded_http` | captured HTTP interactions: `at`, `method`, `path`, `operation_id`, `query`, `body`, `status`, `actor` |
+
+Decoding is a pure function of bytes. A connector opens no socket, resolves no
+host and holds no credential, so a crafted observation file cannot turn shadow
+mode into a request forwarder. The transport is a file confined under the
+examples root, enforced on both the config path and the loader, and capped at
+8 MiB. Unknown fields are rejected rather than ignored, because a misspelled key
+would drop real observed behaviour and leave a report looking clean.
+
+An attempt that did not take effect is not an observed action: a denied audit
+entry and a 4xx or 5xx response are dropped, so the comparison cannot accuse the
+agent of missing a step that never happened. `recorded_http` requires an explicit
+`operation_id` and will not infer one from method and path, because a report that
+names the wrong operation is worse than one that refuses to load.
+
+**No connector has been tested against a live external system.** Every test runs
+against fixture bytes, and the JSON output carries `live_external: false` so a
+report cannot be mistaken for evidence of one. A webhook or event-stream
+transport is deliberately absent: a listening socket taking unauthenticated
+input is a different security posture from reading a file and needs its own ADR.
+
+The JSON output always sets `experimental: true` and names the `connector` that
+produced the observations. Secret env names listed in the config are never
+printed. See `docs/adr/0015-shadow-mode.md` and `docs/adr/0022-shadow-connectors.md`.
 
 ## Twinwright Bench
 
@@ -874,6 +907,7 @@ Major runtime contracts are documented as ADRs under `docs/adr/`, including:
 - PostgreSQL-backed storage with versioned migrations
 - multi-worker execution with fenced run ownership and crash recovery
 - OTLP delivery to a collector, and metrics split between in-process counters and ledger-derived gauges
+- shadow observation connectors for recorded external formats
 
 The ADRs document not only what Twinwright does, but why the implementation makes those tradeoffs.
 
