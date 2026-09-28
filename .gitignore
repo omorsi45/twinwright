@@ -4,3 +4,6 @@
 *.db-shm
 *.db-wal
 bin/
+# CI and the contributor workflow build the CLI at the repository root.
+/twinwright
+/twinwright.exe
