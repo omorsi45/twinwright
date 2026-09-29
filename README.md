@@ -575,7 +575,11 @@ printed. See `docs/adr/0015-shadow-mode.md` and `docs/adr/0022-shadow-connectors
 
 ## Twinwright Bench
 
-`twinwright bench` runs a curated suite of serious scenarios with deterministic judges (scenario evaluation or assertion files). The first public suite is `examples/bench/standard.yaml`: 16 cases across reliability, reasoning, safety, security, recovery, and long-horizon categories. It is not a thousand trivial templates.
+`twinwright bench` runs a curated suite of serious scenarios with deterministic judges (scenario evaluation or assertion files). The first public suite is `examples/bench/standard.yaml`: 20 cases across reliability, reasoning, safety, security, recovery, long-horizon, distributed, and counterfactual categories. It is not a thousand trivial templates.
+
+A case runs in one of three modes. `local` (the default) executes the agent in process. `distributed` executes it through the worker runtime and kills the first worker at a named model turn (`crash_at`), then reports what the runtime did about it: whether a takeover happened, the fencing tokens before and after, how many times the run was delivered, whether a stale commit was refused, and whether the recovered ledger still verifies under replay. `counterfactual` runs a case whose parent is expected to fail and reports which single intervention would have corrected the outcome.
+
+A field its mode ignores is refused rather than dropped, so a `crash_at` on a local case is an error instead of a distributed measurement that never happened. A distributed case whose crash point falls past the end of the fixture is also an error: a green case that injected no crash is worse than a red one.
 
 ```bash
 go run ./cmd/twinwright bench \
@@ -585,7 +589,7 @@ go run ./cmd/twinwright bench \
   --out bench-report.json
 ```
 
-The command prints a short measurement summary and emits the full JSON report (also to `--out` when set). Rates cover task success, safety compliance, authorization safety, recovery success, and duplicate effects, plus median tool calls and latency. There is no winner language.
+The command prints a short measurement summary and emits the full JSON report (also to `--out` when set). Rates cover task success, safety compliance, authorization safety, recovery success, duplicate effects, and the share of counterfactual failures explained, plus median tool calls and latency. Worker takeovers, duplicate deliveries and fencing rejections are reported as counts, because "how many times a stale worker was refused" is a fact about the run rather than a proportion. There is no winner language.
 
 Compare two reports:
 
@@ -801,6 +805,7 @@ examples/
   container/          experimental sidecar configs
 
 docs/adr/             architecture decision records
+docs/performance.md   measured runtime figures and the machine that produced them
 ```
 
 ## Design philosophy
@@ -908,6 +913,7 @@ Major runtime contracts are documented as ADRs under `docs/adr/`, including:
 - multi-worker execution with fenced run ownership and crash recovery
 - OTLP delivery to a collector, and metrics split between in-process counters and ledger-derived gauges
 - shadow observation connectors for recorded external formats
+- distributed and counterfactual benchmark modes, with a crash at a named model turn and a controlled clock
 
 The ADRs document not only what Twinwright does, but why the implementation makes those tradeoffs.
 
@@ -934,9 +940,15 @@ one that admits a gap.
   The executor is unit-tested against an injected runner. Lifecycle hardening -
   health checks, startup timeouts, resource limits, deterministic shutdown - is
   not done.
-- **Shadow mode reads a JSONL observation log only.** There is no connector for a
-  webhook stream, recorded HTTP interactions or audit logs, and write mode is
-  rejected by design. No live external integration has been tested.
+- **Shadow mode reads recorded files only.** Three connectors decode native
+  JSONL, sanitized audit logs and recorded HTTP interactions, all as pure
+  functions of bytes. There is deliberately no webhook or event-stream
+  transport: a listening socket taking unauthenticated input is a different
+  threat model, not another registry entry. Write mode is rejected by design, and
+  no live external integration has been tested, which the CLI reports as
+  `live_external: false`. Comparison is exact-match on operation and arguments;
+  semantic argument divergence, timing and policy violations are not yet
+  computed.
 - **The distributed runtime is a multi-worker fleet over one database.** It is not
   multi-region, has no broker, and does not shard. A worker is a process that
   needs a DSN; how it is scheduled is an operational choice.
@@ -944,8 +956,13 @@ one that admits a gap.
   deliveries are made safe by call-ID idempotency and fencing, not prevented.
 - **The metrics endpoint is unauthenticated** and off by default. Bind it to
   loopback.
-- **No performance numbers are published.** The repository contains no benchmark
-  figures because none have been measured on a documented machine.
+- **Published performance numbers cover one machine, and three benchmarks have
+  no figure at all.** `docs/performance.md` reports what a Windows laptop
+  measured stably and names the three benchmarks whose wall clock moved while
+  their allocation counts stayed identical, which means the measurement described
+  the host rather than the code. No PostgreSQL figures exist yet: the measurement
+  host had no container runtime. Nothing has been optimised on the strength of
+  these numbers; they are a baseline.
 - **Read-only opens of a SQLite database in WAL mode create `-wal` and `-shm`
   sidecars**, so `replay`, `trace` and `evaluate` need a writable directory even
   though they never write to the database itself.

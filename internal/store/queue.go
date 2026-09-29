@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -62,6 +63,14 @@ ON CONFLICT(run_id) DO UPDATE SET state=excluded.state, max_steps=excluded.max_s
 // picks the run up, and the fence it gets is strictly higher than the dead
 // worker's, so the dead worker cannot commit if it ever wakes up.
 //
+// A run whose lease is still held by another worker is never claimable, even
+// when the queue row says runnable. That combination is reachable: Enqueue resets
+// the state without touching the lease, so an operator retrying a run that is
+// currently being worked on produces exactly it. Losing that race is contention,
+// not a failure, so such a run is skipped and the next candidate is tried. A
+// worker that reported an error here would stop over one busy run while other
+// runs sat claimable.
+//
 // On PostgreSQL the candidate row is locked with FOR UPDATE ... SKIP LOCKED, so
 // several workers polling at the same instant each take a different run instead
 // of serialising or colliding. SQLite has one writer, so the transaction itself
@@ -70,6 +79,33 @@ func (s *Store) ClaimRun(ctx context.Context, owner string, ttl time.Duration, n
 	if owner == "" {
 		return RunLease{}, QueueEntry{}, fmt.Errorf("worker owner is required")
 	}
+	// The SQL below already excludes a live foreign lease. This loop covers the
+	// residual case where the row looked claimable when it was selected and the
+	// lease turned out to be held anyway: on PostgreSQL a concurrent claim that
+	// commits mid-statement can be re-checked against the selecting snapshot, so
+	// the row can pass the filter and still be taken. Skipping the run by id
+	// rather than retrying blindly is what keeps the poll making progress.
+	var skip []string
+	for attempt := 0; attempt < maxClaimAttempts; attempt++ {
+		lease, entry, err := s.claimOnce(ctx, owner, ttl, now, skip)
+		if errors.Is(err, ErrLeaseHeld) {
+			skip = append(skip, entry.RunID)
+			continue
+		}
+		return lease, entry, err
+	}
+	// Every candidate this poll could see is held by someone else, which is an
+	// idle tick rather than a problem.
+	return RunLease{}, QueueEntry{}, ErrNoWork
+}
+
+// maxClaimAttempts bounds how many contended runs one poll will skip before
+// reporting no work. A poll is cheap and runs again shortly, so there is no value
+// in walking a long queue of busy runs inside a single call.
+const maxClaimAttempts = 8
+
+// claimOnce selects one candidate and leases it, skipping the given run ids.
+func (s *Store) claimOnce(ctx context.Context, owner string, ttl time.Duration, now time.Time, skip []string) (RunLease, QueueEntry, error) {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return RunLease{}, QueueEntry{}, err
@@ -84,6 +120,17 @@ func (s *Store) ClaimRun(ctx context.Context, owner string, ttl time.Duration, n
 		lock = " FOR UPDATE OF q SKIP LOCKED"
 	}
 	stamp := now.UTC().Format(time.RFC3339Nano)
+	args := []any{stamp, stamp, owner, stamp}
+	// Placeholders are generated; the ids themselves are always bound values.
+	exclude := ""
+	if len(skip) > 0 {
+		marks := make([]string, len(skip))
+		for i, id := range skip {
+			marks[i] = "?"
+			args = append(args, id)
+		}
+		exclude = "\n  AND q.run_id NOT IN (" + strings.Join(marks, ",") + ")"
+	}
 	var entry QueueEntry
 	err = tx.QueryRowContext(ctx, `
 SELECT q.run_id, q.state, q.max_steps, q.attempts, q.enqueued_at, q.available_at
@@ -92,8 +139,9 @@ LEFT JOIN run_leases l ON l.run_id = q.run_id
 WHERE q.available_at <= ?
   AND ( q.state = '`+QueueRunnable+`'
         OR ( q.state = '`+QueueLeased+`' AND (l.run_id IS NULL OR l.expires_at <= ?) ) )
+  AND ( l.run_id IS NULL OR l.owner = '' OR l.owner = ? OR l.expires_at <= ? )`+exclude+`
 ORDER BY q.enqueued_at, q.run_id
-LIMIT 1`+lock, stamp, stamp).
+LIMIT 1`+lock, args...).
 		Scan(&entry.RunID, &entry.State, &entry.MaxSteps, &entry.Attempts, &entry.EnqueuedAt, &entry.AvailableAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return RunLease{}, QueueEntry{}, ErrNoWork
@@ -105,7 +153,9 @@ LIMIT 1`+lock, stamp, stamp).
 	takeover := entry.State == QueueLeased
 	lease, err := acquireRunLeaseTx(ctx, tx, s.Dialect, entry.RunID, owner, ttl, now, takeover)
 	if err != nil {
-		return RunLease{}, QueueEntry{}, err
+		// entry carries the run id so the caller can skip this run and look at
+		// the next candidate rather than selecting it again.
+		return RunLease{}, entry, err
 	}
 	if _, err = tx.ExecContext(ctx, "UPDATE work_queue SET state=?, attempts=attempts+1 WHERE run_id=?", QueueLeased, entry.RunID); err != nil {
 		return RunLease{}, QueueEntry{}, err

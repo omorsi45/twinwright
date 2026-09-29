@@ -13,6 +13,12 @@ import (
 // than as a retryable failure: retrying cannot help, because the run has moved.
 var ErrFenced = errors.New("fenced out: this worker no longer owns the run")
 
+// ErrLeaseHeld means another worker holds a live lease on the run. It is
+// contention rather than a failure: a claimer that meets it has lost a race and
+// should look for other work, not report a problem. Distinguishing the two is
+// what keeps one busy run from stopping a worker that had other runs to take.
+var ErrLeaseHeld = errors.New("run is leased by another worker")
+
 // RunLease is time-bounded, fenced ownership of one run's execution.
 //
 // Delivery in the multi-worker runtime is at-least-once: a crashed worker's run
@@ -115,7 +121,7 @@ func acquireRunLeaseTx(ctx context.Context, tx *sql.Tx, dialect Dialect, runID, 
 			return RunLease{}, fmt.Errorf("lease expiry for %s: %w", runID, parseErr)
 		}
 		if currentOwner != "" && currentOwner != owner && expires.After(now) {
-			return RunLease{}, fmt.Errorf("run %s is leased by %q until %s", runID, currentOwner, expires.UTC().Format(time.RFC3339Nano))
+			return RunLease{}, fmt.Errorf("%w: run %s is leased by %q until %s", ErrLeaseHeld, runID, currentOwner, expires.UTC().Format(time.RFC3339Nano))
 		}
 	}
 

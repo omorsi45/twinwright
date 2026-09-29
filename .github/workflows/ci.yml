@@ -61,6 +61,14 @@ jobs:
       - name: go test
         run: go test -count=1 ./...
 
+      # One iteration of every benchmark. This is a correctness guard, not a
+      # measurement: a shared runner cannot produce a figure worth publishing,
+      # and docs/performance.md says where the real numbers come from. `go test`
+      # compiles a benchmark body but never runs it, so without this a benchmark
+      # can keep compiling long after the behaviour it sets up has broken.
+      - name: benchmark smoke
+        run: make bench-smoke
+
       - name: tidy check
         run: |
           cp go.mod go.mod.orig

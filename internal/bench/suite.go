@@ -38,7 +38,24 @@ type Case struct {
 	Resume     bool
 	ResumeAt   int
 	Dimensions []string
+
+	// Mode selects how the case executes: local (default) runs it in process,
+	// distributed runs it through the worker runtime with an injected crash, and
+	// counterfactual runs it locally and then explains its failure.
+	Mode string
+	// CrashAt is the model turn at which the first worker dies. Distributed mode
+	// only.
+	CrashAt int
+	// Interventions is the intervention set applied by a counterfactual case.
+	Interventions string
 }
+
+// Execution modes.
+const (
+	ModeLocal          = "local"
+	ModeDistributed    = "distributed"
+	ModeCounterfactual = "counterfactual"
+)
 
 type rawSuite struct {
 	Version int       `yaml:"version"`
@@ -47,19 +64,22 @@ type rawSuite struct {
 }
 
 type rawCase struct {
-	ID         string   `yaml:"id"`
-	Category   string   `yaml:"category"`
-	World      string   `yaml:"world"`
-	Scenario   string   `yaml:"scenario"`
-	Chaos      string   `yaml:"chaos"`
-	Auth       string   `yaml:"auth"`
-	Assertions string   `yaml:"assertions"`
-	Recovery   string   `yaml:"recovery"`
-	Fault      string   `yaml:"fault"`
-	Steps      *int     `yaml:"steps"`
-	Resume     *bool    `yaml:"resume"`
-	ResumeAt   *int     `yaml:"resume_at"`
-	Dimensions []string `yaml:"dimensions"`
+	ID            string   `yaml:"id"`
+	Category      string   `yaml:"category"`
+	World         string   `yaml:"world"`
+	Scenario      string   `yaml:"scenario"`
+	Chaos         string   `yaml:"chaos"`
+	Auth          string   `yaml:"auth"`
+	Assertions    string   `yaml:"assertions"`
+	Recovery      string   `yaml:"recovery"`
+	Fault         string   `yaml:"fault"`
+	Steps         *int     `yaml:"steps"`
+	Resume        *bool    `yaml:"resume"`
+	ResumeAt      *int     `yaml:"resume_at"`
+	Dimensions    []string `yaml:"dimensions"`
+	Mode          string   `yaml:"mode"`
+	CrashAt       *int     `yaml:"crash_at"`
+	Interventions string   `yaml:"interventions"`
 }
 
 var (
@@ -67,11 +87,13 @@ var (
 	categories = map[string]bool{
 		"reliability": true, "reasoning": true, "safety": true,
 		"security": true, "recovery": true, "long_horizon": true,
+		"distributed": true, "counterfactual": true,
 	}
+	modes  = map[string]bool{ModeLocal: true, ModeDistributed: true, ModeCounterfactual: true}
 	worlds = map[string]bool{"billing": true, "company": true}
 	dims   = map[string]bool{
 		"task": true, "safety": true, "authorization": true,
-		"recovery": true, "duplicate_effects": true,
+		"recovery": true, "duplicate_effects": true, "explanation": true,
 	}
 )
 
@@ -185,6 +207,38 @@ func parseCase(input rawCase, root string, index int) (Case, error) {
 	if !resume && resumeAt != 0 {
 		return Case{}, fmt.Errorf("case %q: resume_at requires resume", input.ID)
 	}
+	mode := input.Mode
+	if mode == "" {
+		mode = ModeLocal
+	}
+	if !modes[mode] {
+		return Case{}, fmt.Errorf("case %q: unknown mode %q", input.ID, input.Mode)
+	}
+	// A field that its mode ignores is refused rather than dropped. A silently
+	// ignored crash_at would leave the report claiming a distributed measurement
+	// that never took place.
+	crashAt := 0
+	if input.CrashAt != nil {
+		if mode != ModeDistributed {
+			return Case{}, fmt.Errorf("case %q: crash_at requires mode distributed", input.ID)
+		}
+		if *input.CrashAt < 1 {
+			return Case{}, fmt.Errorf("case %q: crash_at must be positive", input.ID)
+		}
+		crashAt = *input.CrashAt
+	}
+	if mode == ModeDistributed && crashAt == 0 {
+		return Case{}, fmt.Errorf("case %q: mode distributed requires crash_at", input.ID)
+	}
+	if mode == ModeDistributed && resume {
+		return Case{}, fmt.Errorf("case %q: resume cannot be combined with mode distributed; a crash and takeover is already a second delivery", input.ID)
+	}
+	if input.Interventions != "" && mode != ModeCounterfactual {
+		return Case{}, fmt.Errorf("case %q: interventions requires mode counterfactual", input.ID)
+	}
+	if mode == ModeCounterfactual && input.Interventions == "" {
+		return Case{}, fmt.Errorf("case %q: mode counterfactual requires interventions", input.ID)
+	}
 	if len(input.Dimensions) == 0 {
 		return Case{}, fmt.Errorf("case %q: at least one dimension is required", input.ID)
 	}
@@ -213,6 +267,10 @@ func parseCase(input rawCase, root string, index int) (Case, error) {
 	if err != nil {
 		return Case{}, fmt.Errorf("case %q assertions: %w", input.ID, err)
 	}
+	interventions, err := checkPath(root, input.Interventions)
+	if err != nil {
+		return Case{}, fmt.Errorf("case %q interventions: %w", input.ID, err)
+	}
 	if input.Fault != "" && chaos != "" {
 		return Case{}, fmt.Errorf("case %q: fault and chaos cannot both be set", input.ID)
 	}
@@ -220,6 +278,7 @@ func parseCase(input rawCase, root string, index int) (Case, error) {
 		ID: input.ID, Category: input.Category, World: input.World, Scenario: input.Scenario,
 		Chaos: chaos, Auth: auth, Assertions: assertions, Recovery: recovery, Fault: input.Fault,
 		Steps: steps, Resume: resume, ResumeAt: resumeAt, Dimensions: dimensions,
+		Mode: mode, CrashAt: crashAt, Interventions: interventions,
 	}, nil
 }
 

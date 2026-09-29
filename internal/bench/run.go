@@ -209,30 +209,69 @@ func runCase(ctx context.Context, c Case, manifests worldManifests, options Opti
 		result.WallMS = time.Since(start).Milliseconds()
 		return result
 	}
-	runner := agent.Runner{Store: s, Dispatch: &dispatch.Dispatcher{Store: s, Manifest: manifest}, Manifest: manifest, Provider: provider}
-	steps := c.Steps
-	if c.Resume {
-		steps = c.ResumeAt
-	}
-	run, err = runner.Execute(ctx, run.ID, steps)
-	if err != nil && run.Status != "paused" && run.Status != "completed" {
-		result.Error = err.Error()
+	if c.Mode == ModeDistributed {
+		var measured DistributedResult
+		run, measured, err = runDistributed(ctx, s, c, manifest, provider, run)
+		result.Distributed = &measured
 		result.RunID = run.ID
-		result.WallMS = time.Since(start).Milliseconds()
-		return result
-	}
-	if c.Resume {
-		run, err = runner.Execute(ctx, run.ID, c.Steps)
-		if err != nil && run.Status != "completed" && run.Status != "paused" {
+		if err != nil {
+			result.Error = err.Error()
+			result.WallMS = time.Since(start).Milliseconds()
+			return result
+		}
+	} else {
+		runner := agent.Runner{Store: s, Dispatch: &dispatch.Dispatcher{Store: s, Manifest: manifest}, Manifest: manifest, Provider: provider}
+		steps := c.Steps
+		if c.Resume {
+			steps = c.ResumeAt
+		}
+		run, err = runner.Execute(ctx, run.ID, steps)
+		if err != nil && run.Status != "paused" && run.Status != "completed" {
 			result.Error = err.Error()
 			result.RunID = run.ID
 			result.WallMS = time.Since(start).Milliseconds()
 			return result
 		}
+		if c.Resume {
+			run, err = runner.Execute(ctx, run.ID, c.Steps)
+			if err != nil && run.Status != "completed" && run.Status != "paused" {
+				result.Error = err.Error()
+				result.RunID = run.ID
+				result.WallMS = time.Since(start).Milliseconds()
+				return result
+			}
+		}
 	}
 	result.RunID = run.ID
 	result.ModelTurns = run.Step
 	result.ToolCalls = countToolCalls(run.Transcript)
+
+	// A counterfactual case is judged on whether the analysis explains the
+	// parent's failure, not on whether the parent passed: the parent is required
+	// to fail, and Prepare refuses the case if it does not.
+	if c.Mode == ModeCounterfactual {
+		measured, cfErr := runCounterfactual(ctx, s, c, manifest, options, run)
+		result.Counterfactual = &measured
+		if cfErr != nil {
+			result.Error = cfErr.Error()
+			result.WallMS = time.Since(start).Milliseconds()
+			return result
+		}
+		result.Passed = measured.Explained
+		if result.Passed {
+			result.Status = "passed"
+		} else {
+			result.Status = "failed"
+			result.FailedChecks = []string{"no_intervention_explained_the_failure"}
+		}
+		result.DuplicateRefunds = countRefunds(ctx, s, run.WorldID)
+		if analysis, err := eval.AnalyzeRun(ctx, s, run.ID); err == nil {
+			result.UnsafeRetry = analysis.UnsafeRetry.Detected
+		}
+		result.WallMS = time.Since(start).Milliseconds()
+		return result
+	}
+
 	passed, failed, judgeErr := judge(ctx, s, run, manifest, c, options.ExamplesRoot)
 	if judgeErr != nil {
 		result.Error = judgeErr.Error()
@@ -249,11 +288,18 @@ func runCase(ctx context.Context, c Case, manifests worldManifests, options Opti
 	if analysis, err := eval.AnalyzeRun(ctx, s, run.ID); err == nil {
 		result.UnsafeRetry = analysis.UnsafeRetry.Detected
 	}
-	var refunds int
-	_ = s.DB.QueryRowContext(ctx, "SELECT count(*) FROM refunds WHERE world_id=?", run.WorldID).Scan(&refunds)
-	result.DuplicateRefunds = refunds
+	result.DuplicateRefunds = countRefunds(ctx, s, run.WorldID)
 	result.WallMS = time.Since(start).Milliseconds()
 	return result
+}
+
+// countRefunds reads committed refunds for a world. It is the effect that must
+// not duplicate when a run is delivered twice, so it is read back from the
+// database rather than inferred from the transcript.
+func countRefunds(ctx context.Context, s *store.Store, worldID string) int {
+	var refunds int
+	_ = s.DB.QueryRowContext(ctx, "SELECT count(*) FROM refunds WHERE world_id=?", worldID).Scan(&refunds)
+	return refunds
 }
 
 func manifestFor(world string, manifests worldManifests) (compiler.Manifest, error) {
