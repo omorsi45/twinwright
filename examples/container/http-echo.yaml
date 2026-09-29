@@ -7,11 +7,15 @@ image: hashicorp/http-echo:1.0
 # rather than a runtime surprise.
 network: bridge
 publish: ["18080:5678"]
-# Readiness, not just creation. Start does not return until this probe succeeds
-# inside the container, so the published address is listening when you get the
-# handle back.
+# Readiness, not just creation. Start does not return until this probe succeeds,
+# so the published address is serving when you get the handle back.
+#
+# http_path probes from the host rather than with `docker exec`, which is the only
+# form that works here: this image is built on scratch, so it contains no shell and
+# no client and an exec probe fails with exit 127 however healthy the server is.
+# Use health.command instead when the image carries the tool you want to run.
 health:
-  command: ["wget", "-qO-", "http://127.0.0.1:5678/"]
+  http_path: /
   interval: 500ms
   retries: 20
 startup_timeout: 30s

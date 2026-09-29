@@ -31,14 +31,39 @@ container's own output, which was never read.
 ### Readiness is part of starting
 
 `Start` does not return until the container is ready, or until it has been
-cleaned up. With a `health` block configured, readiness means a probe executed
-inside the container succeeded. Without one, readiness means docker still reports
-the container running, which is weaker evidence and is documented as weaker
-rather than presented as a health check.
+cleaned up. With a `health` block configured, readiness means a probe succeeded.
+Without one, readiness means docker still reports the container running, which is
+weaker evidence and is documented as weaker rather than presented as a health
+check.
 
-The probe runs via `docker exec` rather than relying on the image's own
-`HEALTHCHECK`, because most images declare none. `Status` still reports the
-image's declared health when there is one.
+There are two probe forms, and the second exists because the first does not work
+for a large class of images.
+
+`health.command` runs inside the container with `docker exec`. It suits an image
+that carries the tool it needs, and it can check something more specific than a
+socket.
+
+`health.http_path` is requested from the host against the first published port.
+This form was added after the first CI run against a real daemon failed: the
+shipped example uses `hashicorp/http-echo`, which is built on scratch, so it
+contains no shell and no HTTP client. The exec probe failed with exit 127 twenty
+times while the container's own logs read `server is listening on :5678`. No
+amount of retrying fixes a missing binary, and a distroless or scratch image is a
+normal choice for a sidecar, so exec-only health checking was a dead end for
+exactly the images most likely to be used.
+
+The host-side form also tests what a caller actually cares about, which is that
+the published address answers. Any status below 500 counts as ready: the question
+is whether the service is listening and serving, not whether that path means
+anything to it.
+
+An exec probe that fails with exit 127 now says so and points at `http_path`,
+because the container logs in that situation show a perfectly healthy service and
+a reader would otherwise blame it.
+
+The probe runs instead of relying on the image's own `HEALTHCHECK`, because most
+images declare none. `Status` still reports the image's declared health when there
+is one.
 
 Between probes the executor re-checks that the container is running, so a
 container that exits immediately fails in one probe instead of spending every

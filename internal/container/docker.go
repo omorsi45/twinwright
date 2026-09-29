@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"net/http"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -110,7 +112,7 @@ func (d *Docker) waitReady(ctx context.Context, cfg Config) error {
 	deadline, cancel := context.WithTimeout(ctx, cfg.StartupTimeout)
 	defer cancel()
 
-	if len(cfg.Health.Command) == 0 {
+	if len(cfg.Health.Command) == 0 && cfg.Health.HTTPPath == "" {
 		running, err := d.running(deadline, cfg.Name)
 		if err != nil {
 			return err
@@ -121,7 +123,7 @@ func (d *Docker) waitReady(ctx context.Context, cfg Config) error {
 		return nil
 	}
 
-	probe := append([]string{"exec", cfg.Name}, cfg.Health.Command...)
+	probe := d.probeFunc(cfg)
 	var lastErr error
 	for attempt := 1; attempt <= cfg.Health.Retries; attempt++ {
 		// A container that has exited will never become healthy, so the loop
@@ -133,11 +135,10 @@ func (d *Docker) waitReady(ctx context.Context, cfg Config) error {
 		if !running {
 			return fmt.Errorf("container %s exited during startup after %d health probe(s)", cfg.Name, attempt-1)
 		}
-		_, stderr, err := d.Run(deadline, "docker", probe...)
-		if err == nil {
+		if err = probe(deadline); err == nil {
 			return nil
 		}
-		lastErr = fmt.Errorf("%s", message(stderr, err))
+		lastErr = err
 		select {
 		case <-deadline.Done():
 			return fmt.Errorf("container %s did not become healthy within %s (timeout): last probe error: %v",
@@ -148,6 +149,57 @@ func (d *Docker) waitReady(ctx context.Context, cfg Config) error {
 	return fmt.Errorf("container %s did not become healthy after %d probes: last probe error: %v",
 		cfg.Name, cfg.Health.Retries, lastErr)
 }
+
+// probeFunc returns the configured readiness probe.
+func (d *Docker) probeFunc(cfg Config) func(context.Context) error {
+	if cfg.Health.HTTPPath != "" {
+		return func(ctx context.Context) error { return d.probeHTTP(ctx, cfg) }
+	}
+	argv := append([]string{"exec", cfg.Name}, cfg.Health.Command...)
+	return func(ctx context.Context) error {
+		_, stderr, err := d.Run(ctx, "docker", argv...)
+		if err == nil {
+			return nil
+		}
+		// Exit 127 from an exec probe means the image does not contain the
+		// command, which no amount of retrying will fix. Saying so here saves
+		// the reader from concluding the service is broken.
+		detail := message(stderr, err)
+		if strings.Contains(detail, "127") {
+			detail += " (exit 127 usually means the image does not contain that command; a scratch or distroless image has no shell, so use health.http_path instead)"
+		}
+		return fmt.Errorf("%s", detail)
+	}
+}
+
+// probeHTTP requests the published port from the host. Any response below 500
+// counts as ready: the question is whether the service is listening and serving,
+// not whether this particular path is meaningful to it.
+func (d *Docker) probeHTTP(ctx context.Context, cfg Config) error {
+	port, err := hostPort(cfg.Publish[0])
+	if err != nil {
+		return err
+	}
+	url := "http://127.0.0.1:" + port + cfg.Health.HTTPPath
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	response, err := probeClient.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	_, _ = io.Copy(io.Discard, response.Body)
+	if response.StatusCode >= 500 {
+		return fmt.Errorf("%s answered %d", url, response.StatusCode)
+	}
+	return nil
+}
+
+// probeClient is deliberately short-tempered: a probe that hangs would eat the
+// startup budget one attempt at a time.
+var probeClient = &http.Client{Timeout: 5 * time.Second}
 
 // running reports whether docker still considers the container running. A failed
 // inspect during startup means the container is gone, which is an answer rather

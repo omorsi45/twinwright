@@ -41,9 +41,19 @@ type Config struct {
 	Resources Resources
 }
 
-// Health is a readiness probe executed inside the container.
+// Health is a readiness probe.
+//
+// Exactly one form is used. Command runs inside the container with `docker exec`,
+// which suits an image that carries the tool it needs. HTTPPath is requested from
+// the host against the first published port, which is the only form available for
+// a distroless or scratch image: those contain no shell and no client, so an exec
+// probe there fails with exit 127 no matter how healthy the process is.
+//
+// The host-side form also tests the thing a caller actually cares about, which is
+// that the published address answers.
 type Health struct {
 	Command  []string
+	HTTPPath string
 	Interval time.Duration
 	Retries  int
 }
@@ -73,6 +83,7 @@ type rawConfig struct {
 
 type rawHealth struct {
 	Command  []string `yaml:"command"`
+	HTTPPath string   `yaml:"http_path"`
 	Interval string   `yaml:"interval"`
 	Retries  *int     `yaml:"retries"`
 }
@@ -179,7 +190,7 @@ func Parse(raw []byte) (Config, error) {
 	if cfg.StopTimeout, err = parseDuration("stop_timeout", input.StopTimeout, DefaultStopTimeout, maxStopTimeout); err != nil {
 		return Config{}, err
 	}
-	if cfg.Health, err = parseHealth(input.Health); err != nil {
+	if cfg.Health, err = parseHealth(input.Health, cfg.Publish); err != nil {
 		return Config{}, err
 	}
 	if cfg.Resources, err = parseResources(input.Resources); err != nil {
@@ -227,23 +238,43 @@ func parseDuration(field, value string, fallback, max time.Duration) (time.Durat
 	return parsed, nil
 }
 
-func parseHealth(input rawHealth) (Health, error) {
+func parseHealth(input rawHealth, publish []string) (Health, error) {
 	health := Health{}
-	if len(input.Command) == 0 {
+	hasCommand := len(input.Command) > 0
+	hasHTTP := strings.TrimSpace(input.HTTPPath) != ""
+	switch {
+	case hasCommand && hasHTTP:
+		return Health{}, fmt.Errorf("health takes either command or http_path, not both")
+	case !hasCommand && !hasHTTP:
 		if input.Interval != "" || input.Retries != nil {
-			return Health{}, fmt.Errorf("health command is required when a health block is present")
+			return Health{}, fmt.Errorf("health command or http_path is required when a health block is present")
 		}
 		return health, nil
-	}
-	if len(input.Command) > maxHealthArgs {
-		return Health{}, fmt.Errorf("health command must have at most %d arguments", maxHealthArgs)
-	}
-	for _, arg := range input.Command {
-		if strings.TrimSpace(arg) == "" {
-			return Health{}, fmt.Errorf("health command arguments must not be empty")
+	case hasHTTP:
+		path := strings.TrimSpace(input.HTTPPath)
+		if !strings.HasPrefix(path, "/") {
+			return Health{}, fmt.Errorf("health http_path must start with /")
 		}
+		// The probe is made against a published port, so without one there is
+		// nothing on the host to request.
+		if len(publish) == 0 {
+			return Health{}, fmt.Errorf("health http_path requires a published port to probe")
+		}
+		if _, err := hostPort(publish[0]); err != nil {
+			return Health{}, fmt.Errorf("health http_path: %w", err)
+		}
+		health.HTTPPath = path
+	default:
+		if len(input.Command) > maxHealthArgs {
+			return Health{}, fmt.Errorf("health command must have at most %d arguments", maxHealthArgs)
+		}
+		for _, arg := range input.Command {
+			if strings.TrimSpace(arg) == "" {
+				return Health{}, fmt.Errorf("health command arguments must not be empty")
+			}
+		}
+		health.Command = append([]string(nil), input.Command...)
 	}
-	health.Command = append([]string(nil), input.Command...)
 	interval, err := parseDuration("health.interval", input.Interval, DefaultHealthInterval, time.Minute)
 	if err != nil {
 		return Health{}, err
@@ -263,6 +294,20 @@ func parseHealth(input rawHealth) (Health, error) {
 		health.Retries = *input.Retries
 	}
 	return health, nil
+}
+
+// hostPort extracts the host side of a docker publish mapping, accepting both
+// "hostPort:containerPort" and "ip:hostPort:containerPort".
+func hostPort(mapping string) (string, error) {
+	parts := strings.Split(mapping, ":")
+	switch len(parts) {
+	case 2:
+		return parts[0], nil
+	case 3:
+		return parts[1], nil
+	default:
+		return "", fmt.Errorf("cannot read a host port from publish mapping %q", mapping)
+	}
 }
 
 func parseResources(input rawResources) (Resources, error) {

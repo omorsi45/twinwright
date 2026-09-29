@@ -3,6 +3,8 @@ package container
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -296,6 +298,88 @@ func TestStatusReportsRunningAndHealth(t *testing.T) {
 	}
 	if handle.ID != "abc123" || !handle.Running || !handle.Healthy {
 		t.Fatalf("handle=%+v", handle)
+	}
+}
+
+// The host-side HTTP probe needs no daemon to test: point a publish mapping at a
+// local test server and the probe either reaches it or does not. This is the form
+// a scratch image requires, since `docker exec` there fails with exit 127 however
+// healthy the process is.
+func TestStartProbesThePublishedPortFromTheHost(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		// Unready for the first two attempts, then serving.
+		if requests < 3 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	port := server.URL[strings.LastIndex(server.URL, ":")+1:]
+
+	rec := &recorder{responses: map[string]response{
+		"run":     {stdout: "scratch01\n"},
+		"inspect": {stdout: "true\n"},
+	}}
+	cfg, err := Parse([]byte(`
+version: 1
+name: twinwright-scratch
+runtime: docker
+image: hashicorp/http-echo:1.0
+network: bridge
+publish: ["` + port + `:5678"]
+health:
+  http_path: /
+  interval: 1ms
+  retries: 10
+label: experimental
+`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	d := NewDocker(rec.runner())
+	handle, err := d.Start(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if !handle.Healthy {
+		t.Error("handle does not report the container as healthy")
+	}
+	if requests < 3 {
+		t.Errorf("probe requests=%d; the probe should have retried past the 500s", requests)
+	}
+	// An HTTP probe must not shell into the container at all.
+	if rec.count("exec") != 0 {
+		t.Errorf("an http probe ran docker exec %d times", rec.count("exec"))
+	}
+}
+
+// An exec probe against an image without the command fails with exit 127. The
+// error has to say that, because the container logs will show a perfectly healthy
+// service and the reader would otherwise blame it.
+func TestExecProbeExplainsExit127(t *testing.T) {
+	rec := &recorder{
+		responses: map[string]response{
+			"run":     {stdout: "scratch02\n"},
+			"inspect": {stdout: "true\n"},
+			"logs":    {stdout: "[INFO] server is listening on :5678\n"},
+		},
+		fallback: response{err: fmt.Errorf("exit status 127")},
+	}
+	cfg := hardenedConfig(t, "")
+	cfg.Health.Retries = 2
+	d := NewDocker(rec.runner())
+	_, err := d.Start(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("start reported success")
+	}
+	if !strings.Contains(err.Error(), "does not contain that command") {
+		t.Errorf("error does not explain exit 127: %v", err)
+	}
+	if !strings.Contains(err.Error(), "http_path") {
+		t.Errorf("error does not point at the working alternative: %v", err)
 	}
 }
 
