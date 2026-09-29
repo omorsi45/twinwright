@@ -143,6 +143,18 @@ func (p CompanyScriptedProvider) Next(_ context.Context, _ string, history []Mes
 	for _, note := range account.Notes {
 		incident = incident || strings.Contains(strings.ToLower(note.Body), "retry worker")
 	}
+	// Read the charge before moving any money. The invoice listing is a snapshot
+	// from earlier in the investigation, and something else may have refunded this
+	// charge since: another operator, a retry worker, a concurrent run. Refunding
+	// without looking is how a charge that is already whole gets refunded twice.
+	//
+	// The same read serves reconciliation after a lost response, which is why the
+	// check below looks at whichever getCharge result is most recent.
+	if duplicate {
+		if _, ok := results["getCharge"]; !ok {
+			return call("getCharge", map[string]any{"id": charges[1].ID})
+		}
+	}
 	// A lost refund response leaves the effect ambiguous, so a read-back that
 	// shows the money already returned counts as the refund having happened.
 	// The charge ID and amount are both checked: without them a partial or
