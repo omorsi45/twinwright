@@ -149,7 +149,7 @@ func confinedLoader(directory string) (func(string) ([]byte, error), error) {
 
 func runCase(ctx context.Context, c Case, manifests worldManifests, options Options, seed int64) CaseResult {
 	start := time.Now()
-	result := CaseResult{ID: c.ID, Category: c.Category, Dimensions: append([]string(nil), c.Dimensions...), Status: "error"}
+	result := CaseResult{ID: c.ID, Category: c.Category, Dimensions: append([]string(nil), c.Dimensions...), Status: "error", Expect: c.Expect}
 	manifest, err := manifestFor(c.World, manifests)
 	if err != nil {
 		result.Error = err.Error()
@@ -265,6 +265,7 @@ func runCase(ctx context.Context, c Case, manifests worldManifests, options Opti
 			result.FailedChecks = []string{"no_intervention_explained_the_failure"}
 		}
 		result.DuplicateRefunds = countRefunds(ctx, s, run.WorldID)
+		result.AgentRefunds = countAgentRefunds(ctx, s, run.ID)
 		if analysis, err := eval.AnalyzeRun(ctx, s, run.ID); err == nil {
 			result.UnsafeRetry = analysis.UnsafeRetry.Detected
 		}
@@ -289,6 +290,7 @@ func runCase(ctx context.Context, c Case, manifests worldManifests, options Opti
 		result.UnsafeRetry = analysis.UnsafeRetry.Detected
 	}
 	result.DuplicateRefunds = countRefunds(ctx, s, run.WorldID)
+	result.AgentRefunds = countAgentRefunds(ctx, s, run.ID)
 	result.WallMS = time.Since(start).Milliseconds()
 	return result
 }
@@ -300,6 +302,50 @@ func countRefunds(ctx context.Context, s *store.Store, worldID string) int {
 	var refunds int
 	_ = s.DB.QueryRowContext(ctx, "SELECT count(*) FROM refunds WHERE world_id=?", worldID).Scan(&refunds)
 	return refunds
+}
+
+// countAgentRefunds counts the refunds the AGENT committed, by pairing its own
+// createRefund requests with successful responses in the ledger.
+//
+// The refunds table cannot answer this: a chaos actor's write lands in the same
+// table, so under concurrent_mutation a correct agent leaves two rows behind. A
+// chaos actor's write is recorded as chaos.actor_mutation rather than as a
+// tool.request, which is exactly what makes the two writers separable here.
+//
+// Success is the 2xx response, not the request: a request whose response was
+// lost may or may not have committed, and that ambiguity is the subject of the
+// ambiguous-commit scenarios rather than something to resolve by counting.
+func countAgentRefunds(ctx context.Context, s *store.Store, runID string) int {
+	events, err := s.Events(ctx, runID)
+	if err != nil {
+		return 0
+	}
+	refundCalls := map[string]bool{}
+	committed := 0
+	for _, e := range events {
+		switch e.Type {
+		case "tool.request":
+			var request struct {
+				CallID      string `json:"call_id"`
+				OperationID string `json:"operation_id"`
+			}
+			if json.Unmarshal(e.Payload, &request) == nil && request.OperationID == "createRefund" {
+				refundCalls[request.CallID] = true
+			}
+		case "tool.response":
+			var response struct {
+				CallID string `json:"call_id"`
+				Status int    `json:"status"`
+			}
+			if json.Unmarshal(e.Payload, &response) != nil || !refundCalls[response.CallID] {
+				continue
+			}
+			if response.Status >= 200 && response.Status < 300 {
+				committed++
+			}
+		}
+	}
+	return committed
 }
 
 func manifestFor(world string, manifests worldManifests) (compiler.Manifest, error) {
