@@ -35,17 +35,25 @@ func (p CompanyScriptedProvider) Next(_ context.Context, _ string, history []Mes
 	}
 	results := map[string]Message{}
 	var tools []Message
+	// A refund billing refused as exceeding what the charge still owes. The
+	// provider rebuilds its decision from history on every turn, so this is
+	// derived from the whole transcript rather than from the last message: the
+	// rejection has to keep counting once the incident handling moves on.
+	refundRefused := false
 	for _, message := range history {
 		if message.Role != "tool" {
 			continue
 		}
 		tools = append(tools, message)
+		fixtureID := fixtureIDByOperation[message.OperationID]
+		if fixtureID == "" {
+			fixtureID = message.OperationID
+		}
 		if message.Status >= 200 && message.Status < 300 {
-			fixtureID := fixtureIDByOperation[message.OperationID]
-			if fixtureID == "" {
-				fixtureID = message.OperationID
-			}
 			results[fixtureID] = message
+		}
+		if message.Status == 409 && fixtureID == "createRefund" {
+			refundRefused = true
 		}
 	}
 	directCall := func(operation string, args map[string]any) (Message, error) {
@@ -99,7 +107,16 @@ func (p CompanyScriptedProvider) Next(_ context.Context, _ string, history []Mes
 				return call("getCharge", map[string]any{"id": chargeID})
 			}
 		}
-		if last.Status < 200 || last.Status >= 300 {
+		// 409 on the refund is billing refusing to return more than the charge
+		// still owes, which means the money is already back. That rejection comes
+		// from the writer's own invariant check, so it is stronger evidence than
+		// any read the agent can take: retrying the same amount is guaranteed to
+		// fail, and reading the charge again can be served the very snapshot that
+		// caused the attempt. The refund counts as delivered and the incident
+		// handling continues rather than stopping half-done.
+		if last.Status == 409 && refundRefused {
+			// Handled below, where refundConfirmed is decided.
+		} else if last.Status < 200 || last.Status >= 300 {
 			return Message{}, fmt.Errorf("%s returned HTTP %d", last.OperationID, last.Status)
 		}
 	}
@@ -162,6 +179,13 @@ func (p CompanyScriptedProvider) Next(_ context.Context, _ string, history []Mes
 	// this whole path exists to prevent.
 	refundConfirmed := false
 	if _, ok := results["createRefund"]; ok {
+		refundConfirmed = true
+	}
+	// Billing refusing the refund as larger than the outstanding balance settles
+	// the question on its own: nothing is left to return. Without this the agent
+	// would keep reissuing the same refused refund every turn, because the read
+	// it would reconcile against is the one that is wrong.
+	if refundRefused {
 		refundConfirmed = true
 	}
 	if reconciled, ok := results["getCharge"]; ok && duplicate {

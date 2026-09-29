@@ -18,19 +18,27 @@
 # there is the obvious next fault to try: the read-back would report the refund
 # as missing and the agent would issue a second one.
 #
-# It cannot currently reach this trajectory, and the reason is worth recording so
-# nobody adds the rule expecting it to fire. The runtime only selects a
-# stale_read once it has a snapshot of an identical earlier call to serve, and it
-# requires after_calls of at least one, so the rule needs two reads of the same
-# charge. This trajectory reads the charge exactly once, during reconciliation.
-# Adding the rule here is accepted by validation and then silently never injects,
-# which was confirmed by running it: the ledger recorded the outage and the lost
-# response and nothing else.
+# That used to be unreachable, and the reason is worth keeping because it is a
+# general trap. The runtime only selects a stale_read once it holds a snapshot of
+# an identical earlier call to serve, and it requires after_calls of at least
+# one, so the rule needs two reads of the same charge. When the trajectory read
+# the charge exactly once, during reconciliation, adding the rule here was
+# accepted by validation and then silently injected nothing. A chaos rule that
+# validates is not a chaos rule that fires.
 #
-# The design intent still stands for the day the trajectory gains an earlier
-# charge read: a fault that poisons the evidence recovery depends on belongs in a
-# counterfactual intervention, where the divergence is the finding, not in the run
-# that demonstrates safe recovery.
+# The agent now reads the charge before refunding it, so the fault is reachable
+# and it is exercised by TestStaleReadOnTheFlagshipProvokesASecondRefund in
+# internal/eval rather than by this file. It is deliberately still not a rule
+# here, and the finding from running it is why. Poisoned reconciliation does
+# provoke a second full refund, and billing refuses it, because a refund may not
+# exceed what the charge still owes. Two requests, one effect, customer whole.
+# The run passes.
+#
+# So this file stays the demonstration of safe recovery, where the agent's own
+# care is what produces the outcome. The stale read belongs where its divergence
+# is the point: a counterfactual intervention, or the test above, which pins the
+# reachability so that collapsing the two reads back into one fails loudly
+# instead of quietly retiring the fault.
 version: 1
 rules:
   - id: billing-temporary-outage
