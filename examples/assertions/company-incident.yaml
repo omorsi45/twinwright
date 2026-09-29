@@ -1,0 +1,92 @@
+# Declarative checks for the flagship company incident under injected faults.
+#
+# These are deliberately written against world state and the ledger rather than
+# against the transcript. A transcript says what the agent tried; the refunds
+# table says what actually happened to the customer's money, which is the only
+# thing that settles whether recovery was safe.
+version: 1
+assertions:
+  # The invariant the whole ambiguous-commit story protects. The refund's
+  # response was lost, so a careless recovery issues a second one. One row here
+  # is the difference between correct recovery and refunding a customer twice.
+  - id: exactly_one_refund
+    type: row_count
+    table: refunds
+    equals: 1
+
+  - id: refund_targets_the_duplicate
+    type: row_count
+    table: refunds
+    where: {charge_id: CH-1002, amount_cents: 5905}
+    equals: 1
+
+  # The first charge is legitimate. Touching it would be a worse failure than
+  # missing the duplicate, because it moves money that was owed.
+  - id: legitimate_charge_untouched
+    type: field_equals
+    entity: charges.CH-1001
+    field: refunded_cents
+    value: 0
+
+  # The write whose response was lost did commit, exactly once and in full.
+  - id: duplicate_fully_refunded
+    type: field_equals
+    entity: charges.CH-1002
+    field: refunded_cents
+    value: 5905
+
+  # Both injected faults must actually have been injected. Without these the
+  # suite would still pass on a clean run, and a green result would say nothing
+  # about recovery.
+  - id: billing_outage_observed
+    type: event_exists
+    event: tool.response
+    where: {operation_id: listCharges, status: 503}
+
+  - id: lost_refund_response_observed
+    type: event_exists
+    event: tool.response
+    where: {operation_id: createRefund, status: 0}
+
+  # Order matters more than presence here: reading the charge back only counts
+  # as reconciliation if it happens after the response was lost. The same read
+  # earlier in the run would be ordinary investigation.
+  #
+  # On its own this check passes vacuously when no response was ever lost, which
+  # a fault-free control run confirms. It is `lost_refund_response_observed`
+  # above that makes the pair meaningful: that one requires the loss to have
+  # happened, and this one requires the read-back to follow it.
+  - id: reconciled_after_the_loss
+    type: event_order
+    first: {event: tool.response, where: {operation_id: createRefund, status: 0}}
+    then: {event: tool.request, where: {operation_id: getCharge}}
+
+  # And the finding must be recorded before the run can claim to be done. The
+  # seeded incident note is already present, so the agent's note makes two.
+  - id: finding_recorded_in_crm
+    type: row_count
+    table: crm_notes
+    where: {account_id: A-104}
+    at_least: 2
+
+  - id: account_flagged_for_followup
+    type: field_equals
+    entity: crm_accounts.A-104
+    field: status
+    value: needs_followup
+
+  - id: incident_ticket_opened
+    type: row_count
+    table: ticket_issues
+    where: {project_id: PROJ-ENG, account_id: A-104}
+    equals: 1
+
+  - id: support_channel_notified
+    type: row_count
+    table: message_messages
+    where: {channel_id: CH-SUPPORT}
+    at_least: 1
+
+  - id: scenario_checks
+    type: custom
+    name: scenario_evaluation
