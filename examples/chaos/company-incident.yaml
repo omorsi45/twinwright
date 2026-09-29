@@ -1,0 +1,29 @@
+# Faults for the flagship company incident.
+#
+# Two faults, chosen because the agent can be expected to survive both and the
+# run is only evidence if it is survivable:
+#
+#   - A temporary billing outage across the charge-read endpoints. The correct
+#     response is a plain retry: nothing was committed, so repeating the read is
+#     safe. The rule names both read operations because a partial service outage
+#     is a service degrading, not a single endpoint failing; the runtime rejects
+#     a one-operation outage for that reason.
+#   - A lost response on the refund write. This one is not safe to retry blind,
+#     because the refund may already have committed. The agent has to read the
+#     charge back and decide from what it finds.
+#
+# Deliberately NOT stacked here: a stale read on getCharge. The recovery path
+# above reconciles THROUGH getCharge, so a stale snapshot would report the refund
+# as missing and the agent would issue a second one. That is a genuine and
+# interesting failure, and it belongs in a counterfactual intervention where the
+# divergence is the point, not in the run that demonstrates safe recovery.
+version: 1
+rules:
+  - id: billing-temporary-outage
+    type: partial_service_outage
+    operations: [listCharges, getCharge]
+    times: 1
+  - id: refund-response-lost
+    type: timeout_after_commit
+    operations: [createRefund]
+    times: 1

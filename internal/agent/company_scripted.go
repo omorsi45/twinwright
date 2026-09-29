@@ -16,6 +16,7 @@ func (p CompanyScriptedProvider) Next(_ context.Context, _ string, history []Mes
 	behaviorByFixtureID := map[string]string{
 		"getCustomer": "billing.getCustomer", "getSubscription": "billing.getSubscription",
 		"listInvoices": "billing.listInvoices", "listCharges": "billing.listCharges",
+		"getCharge":    "billing.getCharge",
 		"createRefund": "billing.createRefund", "crmGetAccount": "crm.getAccount",
 		"crmAddAccountNote": "crm.addAccountNote", "crmUpdateAccountStatus": "crm.updateAccountStatus",
 		"ticketCreateIssue": "ticket.createIssue", "ticketAddComment": "ticket.addComment",
@@ -70,6 +71,34 @@ func (p CompanyScriptedProvider) Next(_ context.Context, _ string, history []Mes
 			}
 			return Message{}, fmt.Errorf("missing failed call %s", last.CallID)
 		}
+		// Status 0 is a lost response, not a failed request: the write may
+		// already have committed. Retrying blind would refund the customer
+		// twice and giving up would leave the incident half-handled, so the
+		// charge is read back before anything is decided. Only the refund is
+		// treated this way, because it is the only call in this scenario whose
+		// effect cannot be inferred from the rest of the investigation.
+		if last.Status == 0 {
+			lost := fixtureIDByOperation[last.OperationID]
+			if lost == "" {
+				lost = last.OperationID
+			}
+			if lost == "createRefund" {
+				chargeID := ""
+				for i := len(history) - 1; i >= 0 && chargeID == ""; i-- {
+					for _, previous := range history[i].ToolCalls {
+						if previous.ID == last.CallID {
+							if id, ok := previous.Arguments["charge_id"].(string); ok {
+								chargeID = id
+							}
+						}
+					}
+				}
+				if chargeID == "" {
+					return Message{}, fmt.Errorf("lost refund response %s names no charge to reconcile", last.CallID)
+				}
+				return call("getCharge", map[string]any{"id": chargeID})
+			}
+		}
 		if last.Status < 200 || last.Status >= 300 {
 			return Message{}, fmt.Errorf("%s returned HTTP %d", last.OperationID, last.Status)
 		}
@@ -114,10 +143,29 @@ func (p CompanyScriptedProvider) Next(_ context.Context, _ string, history []Mes
 	for _, note := range account.Notes {
 		incident = incident || strings.Contains(strings.ToLower(note.Body), "retry worker")
 	}
-	if duplicate {
-		if _, ok := results["createRefund"]; !ok {
-			return call("createRefund", map[string]any{"charge_id": charges[1].ID, "amount_cents": charges[1].AmountCents, "reason": "duplicate charge"})
+	// A lost refund response leaves the effect ambiguous, so a read-back that
+	// shows the money already returned counts as the refund having happened.
+	// The charge ID and amount are both checked: without them a partial or
+	// unrelated refund could be mistaken for this one, which is the failure
+	// this whole path exists to prevent.
+	refundConfirmed := false
+	if _, ok := results["createRefund"]; ok {
+		refundConfirmed = true
+	}
+	if reconciled, ok := results["getCharge"]; ok && duplicate {
+		var charge struct {
+			ID            string `json:"id"`
+			RefundedCents int64  `json:"refunded_cents"`
 		}
+		if err := json.Unmarshal([]byte(reconciled.Content), &charge); err != nil {
+			return Message{}, err
+		}
+		if charge.ID == charges[1].ID && charge.RefundedCents >= charges[1].AmountCents {
+			refundConfirmed = true
+		}
+	}
+	if duplicate && !refundConfirmed {
+		return call("createRefund", map[string]any{"charge_id": charges[1].ID, "amount_cents": charges[1].AmountCents, "reason": "duplicate charge"})
 	}
 	if _, ok := results["crmAddAccountNote"]; !ok {
 		body := "Reviewed invoice and found one legitimate charge; no refund issued."
