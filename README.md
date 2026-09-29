@@ -801,6 +801,7 @@ examples/
   container/          experimental sidecar configs
 
 docs/adr/             architecture decision records
+docs/performance.md   measured runtime figures and the machine that produced them
 ```
 
 ## Design philosophy
@@ -934,9 +935,15 @@ one that admits a gap.
   The executor is unit-tested against an injected runner. Lifecycle hardening -
   health checks, startup timeouts, resource limits, deterministic shutdown - is
   not done.
-- **Shadow mode reads a JSONL observation log only.** There is no connector for a
-  webhook stream, recorded HTTP interactions or audit logs, and write mode is
-  rejected by design. No live external integration has been tested.
+- **Shadow mode reads recorded files only.** Three connectors decode native
+  JSONL, sanitized audit logs and recorded HTTP interactions, all as pure
+  functions of bytes. There is deliberately no webhook or event-stream
+  transport: a listening socket taking unauthenticated input is a different
+  threat model, not another registry entry. Write mode is rejected by design, and
+  no live external integration has been tested, which the CLI reports as
+  `live_external: false`. Comparison is exact-match on operation and arguments;
+  semantic argument divergence, timing and policy violations are not yet
+  computed.
 - **The distributed runtime is a multi-worker fleet over one database.** It is not
   multi-region, has no broker, and does not shard. A worker is a process that
   needs a DSN; how it is scheduled is an operational choice.
@@ -944,8 +951,13 @@ one that admits a gap.
   deliveries are made safe by call-ID idempotency and fencing, not prevented.
 - **The metrics endpoint is unauthenticated** and off by default. Bind it to
   loopback.
-- **No performance numbers are published.** The repository contains no benchmark
-  figures because none have been measured on a documented machine.
+- **Published performance numbers cover one machine, and three benchmarks have
+  no figure at all.** `docs/performance.md` reports what a Windows laptop
+  measured stably and names the three benchmarks whose wall clock moved while
+  their allocation counts stayed identical, which means the measurement described
+  the host rather than the code. No PostgreSQL figures exist yet: the measurement
+  host had no container runtime. Nothing has been optimised on the strength of
+  these numbers; they are a baseline.
 - **Read-only opens of a SQLite database in WAL mode create `-wal` and `-shm`
   sidecars**, so `replay`, `trace` and `evaluate` need a writable directory even
   though they never write to the database itself.

@@ -21,7 +21,7 @@ import (
 	"twinwright/internal/store"
 )
 
-func completedRun(t *testing.T) (*store.Store, store.Run, compiler.Manifest) {
+func completedRun(t testing.TB) (*store.Store, store.Run, compiler.Manifest) {
 	t.Helper()
 	ctx := context.Background()
 	root := filepath.Join("..", "..", "examples", "billing")

@@ -49,6 +49,18 @@ e2e: ## deterministic end-to-end walk of the documented pipeline (SQLite)
 e2e-postgres: ## end-to-end walk against PostgreSQL
 	./scripts/e2e.sh "$(POSTGRES_DSN)"
 
+.PHONY: bench
+bench: ## measure runtime primitives on SQLite (see docs/performance.md)
+	./scripts/perf.sh
+
+.PHONY: bench-postgres
+bench-postgres: ## measure runtime primitives on SQLite and PostgreSQL
+	./scripts/perf.sh "$(POSTGRES_DSN)"
+
+.PHONY: bench-smoke
+bench-smoke: ## run every benchmark once, to prove they still compile and pass
+	go test -run '^$$' -bench . -benchtime=1x -timeout 900s ./internal/store ./internal/worker ./internal/replay
+
 .PHONY: up
 up: ## start PostgreSQL and an OpenTelemetry collector
 	docker compose up -d

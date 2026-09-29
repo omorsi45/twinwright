@@ -37,7 +37,7 @@ func (probeProvider) Next(ctx context.Context, task string, history []agent.Mess
 	return agent.ScriptedProvider{}.Next(ctx, task, rest, ops)
 }
 
-func runToCompletion(t *testing.T, s *store.Store, manifest compiler.Manifest, runID string) store.Run {
+func runToCompletion(t testing.TB, s *store.Store, manifest compiler.Manifest, runID string) store.Run {
 	t.Helper()
 	runner := agent.Runner{Store: s, Dispatch: &dispatch.Dispatcher{Store: s, Manifest: manifest}, Manifest: manifest, Provider: probeProvider{}}
 	done, err := runner.Execute(context.Background(), runID, 20)
@@ -70,7 +70,7 @@ func completedSecuredRun(t *testing.T) (*store.Store, store.Run, compiler.Manife
 	return source, runToCompletion(t, source, manifest, run.ID), manifest
 }
 
-func firstCheckpoint(t *testing.T, s *store.Store, runID string, manifest compiler.Manifest, eventType string) checkpoint.Checkpoint {
+func firstCheckpoint(t testing.TB, s *store.Store, runID string, manifest compiler.Manifest, eventType string) checkpoint.Checkpoint {
 	t.Helper()
 	points, err := checkpoint.List(context.Background(), s, runID, manifest)
 	if err != nil {
