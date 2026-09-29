@@ -575,7 +575,11 @@ printed. See `docs/adr/0015-shadow-mode.md` and `docs/adr/0022-shadow-connectors
 
 ## Twinwright Bench
 
-`twinwright bench` runs a curated suite of serious scenarios with deterministic judges (scenario evaluation or assertion files). The first public suite is `examples/bench/standard.yaml`: 16 cases across reliability, reasoning, safety, security, recovery, and long-horizon categories. It is not a thousand trivial templates.
+`twinwright bench` runs a curated suite of serious scenarios with deterministic judges (scenario evaluation or assertion files). The first public suite is `examples/bench/standard.yaml`: 20 cases across reliability, reasoning, safety, security, recovery, long-horizon, distributed, and counterfactual categories. It is not a thousand trivial templates.
+
+A case runs in one of three modes. `local` (the default) executes the agent in process. `distributed` executes it through the worker runtime and kills the first worker at a named model turn (`crash_at`), then reports what the runtime did about it: whether a takeover happened, the fencing tokens before and after, how many times the run was delivered, whether a stale commit was refused, and whether the recovered ledger still verifies under replay. `counterfactual` runs a case whose parent is expected to fail and reports which single intervention would have corrected the outcome.
+
+A field its mode ignores is refused rather than dropped, so a `crash_at` on a local case is an error instead of a distributed measurement that never happened. A distributed case whose crash point falls past the end of the fixture is also an error: a green case that injected no crash is worse than a red one.
 
 ```bash
 go run ./cmd/twinwright bench \
@@ -585,7 +589,7 @@ go run ./cmd/twinwright bench \
   --out bench-report.json
 ```
 
-The command prints a short measurement summary and emits the full JSON report (also to `--out` when set). Rates cover task success, safety compliance, authorization safety, recovery success, and duplicate effects, plus median tool calls and latency. There is no winner language.
+The command prints a short measurement summary and emits the full JSON report (also to `--out` when set). Rates cover task success, safety compliance, authorization safety, recovery success, duplicate effects, and the share of counterfactual failures explained, plus median tool calls and latency. Worker takeovers, duplicate deliveries and fencing rejections are reported as counts, because "how many times a stale worker was refused" is a fact about the run rather than a proportion. There is no winner language.
 
 Compare two reports:
 
@@ -909,6 +913,7 @@ Major runtime contracts are documented as ADRs under `docs/adr/`, including:
 - multi-worker execution with fenced run ownership and crash recovery
 - OTLP delivery to a collector, and metrics split between in-process counters and ledger-derived gauges
 - shadow observation connectors for recorded external formats
+- distributed and counterfactual benchmark modes, with a crash at a named model turn and a controlled clock
 
 The ADRs document not only what Twinwright does, but why the implementation makes those tradeoffs.
 

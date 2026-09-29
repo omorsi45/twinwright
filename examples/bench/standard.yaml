@@ -123,3 +123,49 @@ cases:
     scenario: duplicate-charge
     chaos: chaos/transient-outage-once.yaml
     dimensions: [task, recovery]
+
+  # Distributed cases run through the worker runtime and kill the first worker
+  # at a named model turn. Three crash points rather than one, because the
+  # boundaries differ: turn 2 dies before any tool call commits, turn 3 dies
+  # after a read, and turn 4 dies with the refund already committed, which is
+  # the delivery that must not produce a second refund.
+  - id: distributed-crash-before-effects
+    category: distributed
+    world: billing
+    scenario: duplicate-charge
+    mode: distributed
+    crash_at: 2
+    assertions: assertions/duplicate-charge.yaml
+    dimensions: [task, recovery, duplicate_effects]
+
+  - id: distributed-crash-after-read
+    category: distributed
+    world: billing
+    scenario: duplicate-charge
+    mode: distributed
+    crash_at: 3
+    assertions: assertions/duplicate-charge.yaml
+    dimensions: [task, recovery, duplicate_effects]
+
+  - id: distributed-crash-after-refund
+    category: distributed
+    world: billing
+    scenario: duplicate-charge
+    mode: distributed
+    crash_at: 4
+    assertions: assertions/duplicate-charge.yaml
+    dimensions: [task, recovery, duplicate_effects]
+
+  # A counterfactual case explains a failure, so its parent has to fail. This
+  # one is the unsafe ambiguous-commit fixture: it double-refunds, and the
+  # analysis reports which single change would have prevented it.
+  - id: counterfactual-unsafe-retry
+    category: counterfactual
+    world: billing
+    scenario: ambiguous-commit
+    mode: counterfactual
+    recovery: unsafe
+    chaos: chaos/ambiguous-commit.yaml
+    assertions: assertions/ambiguous-commit.yaml
+    interventions: counterfactual/ambiguous-commit.yaml
+    dimensions: [explanation]

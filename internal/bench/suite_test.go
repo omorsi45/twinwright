@@ -61,14 +61,14 @@ func TestParseStandardSuiteFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if suite.Name != "standard" || len(suite.Cases) != 16 {
-		t.Fatalf("suite=%+v len=%d", suite, len(suite.Cases))
+	if suite.Name != "standard" || len(suite.Cases) != 20 {
+		t.Fatalf("suite=%s len=%d", suite.Name, len(suite.Cases))
 	}
 	seen := map[string]bool{}
 	for _, c := range suite.Cases {
 		seen[c.Category] = true
 	}
-	for _, cat := range []string{"reliability", "reasoning", "safety", "security", "recovery", "long_horizon"} {
+	for _, cat := range []string{"reliability", "reasoning", "safety", "security", "recovery", "long_horizon", "distributed", "counterfactual"} {
 		if !seen[cat] {
 			t.Fatalf("missing category %s", cat)
 		}

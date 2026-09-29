@@ -122,6 +122,10 @@ func TestRunStandardSuiteScripted(t *testing.T) {
 		"recovery-ambiguous-policy-only":           "passed",
 		"security-injection-task-only":             "passed",
 		"reliability-billing-outage-no-assertions": "passed",
+		"distributed-crash-before-effects":         "passed",
+		"distributed-crash-after-read":             "passed",
+		"distributed-crash-after-refund":           "passed",
+		"counterfactual-unsafe-retry":              "passed",
 	}
 	if len(report.Cases) != len(want) {
 		t.Fatalf("cases=%d want=%d", len(report.Cases), len(want))
@@ -129,6 +133,33 @@ func TestRunStandardSuiteScripted(t *testing.T) {
 	for _, c := range report.Cases {
 		if want[c.ID] != c.Status {
 			t.Fatalf("%s status=%s want=%s err=%s failed=%v", c.ID, c.Status, want[c.ID], c.Error, c.FailedChecks)
+		}
+	}
+
+	// The shipped suite must actually exercise the distributed runtime rather
+	// than merely contain cases labelled distributed. Three crashes, three
+	// takeovers, three refused stale commits, and no duplicated refund.
+	if report.Summary.WorkerTakeovers != 3 {
+		t.Errorf("worker takeovers=%d want 3", report.Summary.WorkerTakeovers)
+	}
+	if report.Summary.FencingRejections != 3 {
+		t.Errorf("fencing rejections=%d want 3", report.Summary.FencingRejections)
+	}
+	if report.Summary.DuplicateDeliveries != 3 {
+		t.Errorf("duplicate deliveries=%d want 3", report.Summary.DuplicateDeliveries)
+	}
+	if report.Summary.ExplanationRate != 100 {
+		t.Errorf("explanation rate=%v want 100", report.Summary.ExplanationRate)
+	}
+	for _, c := range report.Cases {
+		if c.Category != "distributed" {
+			continue
+		}
+		if c.Distributed == nil || !c.Distributed.ReplayVerified {
+			t.Errorf("%s: recovered run does not verify under replay", c.ID)
+		}
+		if c.DuplicateRefunds != 1 {
+			t.Errorf("%s: refunds=%d want 1 after a duplicate delivery", c.ID, c.DuplicateRefunds)
 		}
 	}
 	if report.Model != "mixed" && report.Model != "fixture-v1" && report.Model != "fixture-safe-v1" {
