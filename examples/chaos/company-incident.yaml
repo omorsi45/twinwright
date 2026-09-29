@@ -12,11 +12,25 @@
 #     because the refund may already have committed. The agent has to read the
 #     charge back and decide from what it finds.
 #
-# Deliberately NOT stacked here: a stale read on getCharge. The recovery path
-# above reconciles THROUGH getCharge, so a stale snapshot would report the refund
-# as missing and the agent would issue a second one. That is a genuine and
-# interesting failure, and it belongs in a counterfactual intervention where the
-# divergence is the point, not in the run that demonstrates safe recovery.
+# On stale reads, and why one is not here.
+#
+# Reconciliation runs THROUGH getCharge, so on the face of it a stale snapshot
+# there is the obvious next fault to try: the read-back would report the refund
+# as missing and the agent would issue a second one.
+#
+# It cannot currently reach this trajectory, and the reason is worth recording so
+# nobody adds the rule expecting it to fire. The runtime only selects a
+# stale_read once it has a snapshot of an identical earlier call to serve, and it
+# requires after_calls of at least one, so the rule needs two reads of the same
+# charge. This trajectory reads the charge exactly once, during reconciliation.
+# Adding the rule here is accepted by validation and then silently never injects,
+# which was confirmed by running it: the ledger recorded the outage and the lost
+# response and nothing else.
+#
+# The design intent still stands for the day the trajectory gains an earlier
+# charge read: a fault that poisons the evidence recovery depends on belongs in a
+# counterfactual intervention, where the divergence is the finding, not in the run
+# that demonstrates safe recovery.
 version: 1
 rules:
   - id: billing-temporary-outage
