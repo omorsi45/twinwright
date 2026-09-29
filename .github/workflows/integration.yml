@@ -70,3 +70,43 @@ jobs:
 
       - name: end-to-end against postgres
         run: ./scripts/e2e.sh "$TWINWRIGHT_TEST_POSTGRES_DSN"
+
+  docker:
+    name: container sidecars against a real daemon
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # This job exists so the container executor's claims are backed by a daemon
+    # rather than by a fake. The unit tests assert the argv the executor builds;
+    # only a real daemon proves docker accepts that argv, that the health gate
+    # means the published port is serving, and that a failed start leaves no
+    # container behind.
+    env:
+      TWINWRIGHT_TEST_DOCKER: "1"
+      OPENAI_API_KEY: ""
+      ANTHROPIC_API_KEY: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: daemon is available
+        run: docker version --format '{{.Server.Version}}'
+
+      - name: pull the images the tests use
+        # Pulling up front keeps an image download out of a startup_timeout
+        # budget, which would otherwise look like an unhealthy container.
+        run: |
+          docker pull hashicorp/http-echo:1.0
+          docker pull busybox:1.36
+
+      - name: container integration tests
+        run: go test -count=1 -v -run 'Docker' ./internal/container/
+
+      - name: the shipped example config starts and stops through the CLI
+        run: |
+          go build -o twinwright ./cmd/twinwright
+          ./twinwright container start --config examples/container/http-echo.yaml
+          ./twinwright container status --config examples/container/http-echo.yaml
+          ./twinwright container stop --config examples/container/http-echo.yaml

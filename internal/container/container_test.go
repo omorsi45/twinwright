@@ -12,6 +12,7 @@ version: 1
 name: echo-sidecar
 runtime: docker
 image: hashicorp/http-echo:1.0
+network: bridge
 publish: ["8080:5678"]
 label: experimental
 `))
@@ -48,7 +49,7 @@ func TestLocalExecutor(t *testing.T) {
 	if _, err := ex.Status(context.Background(), "local-world"); err != nil {
 		t.Fatal(err)
 	}
-	if err := ex.Stop(context.Background(), "local-world"); err != nil {
+	if err := ex.Stop(context.Background(), cfg); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -57,16 +58,23 @@ func TestDockerExecutorUsesRunner(t *testing.T) {
 	var saw []string
 	d := NewDocker(func(ctx context.Context, name string, args ...string) (string, string, error) {
 		saw = append(saw, name+" "+strings.Join(args, " "))
-		if args[0] == "run" {
+		switch args[0] {
+		case "run":
 			return "cid123\n", "", nil
+		case "inspect":
+			// Start now confirms the container is actually running before it
+			// hands back a handle, so the fake has to answer that question.
+			return "true\n", "", nil
+		default:
+			return "", "", nil
 		}
-		return "cid123\n", "", nil
 	})
 	cfg, err := Parse([]byte(`
 version: 1
 name: echo
 runtime: docker
 image: hashicorp/http-echo:1.0
+network: bridge
 publish: ["8080:5678"]
 env_file: secrets.env
 label: experimental
@@ -85,7 +93,7 @@ label: experimental
 	if strings.Contains(joined, "SECRET=") || strings.Contains(joined, "-e ") {
 		t.Fatalf("secrets must not appear on argv: %v", saw)
 	}
-	if err := d.Stop(context.Background(), "echo"); err != nil {
+	if err := d.Stop(context.Background(), cfg); err != nil {
 		t.Fatal(err)
 	}
 }

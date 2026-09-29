@@ -797,7 +797,7 @@ func runCLI(args []string, out io.Writer) error {
 			}
 			return emit(out, map[string]any{"experimental": true, "action": "start", "handle": handle})
 		case "stop":
-			if err := ex.Stop(ctx, cfg.Name); err != nil {
+			if err := ex.Stop(ctx, cfg); err != nil {
 				return err
 			}
 			return emit(out, map[string]any{"experimental": true, "action": "stop", "name": cfg.Name})
