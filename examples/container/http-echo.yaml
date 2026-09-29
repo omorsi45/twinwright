@@ -2,5 +2,28 @@ version: 1
 name: twinwright-http-echo
 runtime: docker
 image: hashicorp/http-echo:1.0
+# Reachability is explicit: docker refuses to publish a port on a container with
+# no network stack, so `network: none` and `publish` together are a config error
+# rather than a runtime surprise.
+network: bridge
 publish: ["18080:5678"]
+# Readiness, not just creation. Start does not return until this probe succeeds,
+# so the published address is serving when you get the handle back.
+#
+# http_path probes from the host rather than with `docker exec`, which is the only
+# form that works here: this image is built on scratch, so it contains no shell and
+# no client and an exec probe fails with exit 127 however healthy the server is.
+# Use health.command instead when the image carries the tool you want to run.
+health:
+  http_path: /
+  interval: 500ms
+  retries: 20
+startup_timeout: 30s
+# The container is asked to exit with this grace period before it is removed.
+stop_timeout: 5s
+# Caps, so an experimental sidecar cannot take the host down with it.
+resources:
+  memory: 64m
+  cpus: "0.5"
+  pids: 64
 label: experimental
