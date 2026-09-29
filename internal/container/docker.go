@@ -3,6 +3,7 @@ package container
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -261,25 +262,39 @@ func (d *Docker) Stop(ctx context.Context, cfg Config) error {
 
 // Status reports identity, whether the container is running, and its health as
 // docker sees it.
+//
+// The state is read as JSON rather than picked apart with a template. An image
+// that declares no HEALTHCHECK has no Health key in State at all, and a template
+// referencing it fails with "map has no entry for key Health" instead of
+// returning an empty value, so the conditional a reader would expect to work
+// turns a healthy container into an error.
 func (d *Docker) Status(ctx context.Context, name string) (Handle, error) {
-	stdout, stderr, err := d.Run(ctx, "docker", "inspect", "-f",
-		"{{.Id}} {{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}", name)
+	stdout, stderr, err := d.Run(ctx, "docker", "inspect", "-f", "{{.Id}} {{json .State}}", name)
 	if err != nil {
 		return Handle{}, fmt.Errorf("docker status failed: %s", message(stderr, err))
 	}
-	fields := strings.Fields(strings.TrimSpace(stdout))
-	handle := Handle{Name: name, Runtime: "docker"}
-	if len(fields) > 0 {
-		handle.ID = fields[0]
+	id, stateJSON, found := strings.Cut(strings.TrimSpace(stdout), " ")
+	handle := Handle{Name: name, Runtime: "docker", ID: id}
+	if !found {
+		return handle, nil
 	}
-	if len(fields) > 1 {
-		handle.Running = fields[1] == "true"
+	var state struct {
+		Running bool `json:"Running"`
+		Health  *struct {
+			Status string `json:"Status"`
+		} `json:"Health"`
 	}
-	// "none" means the image declares no HEALTHCHECK. A running container with no
-	// declared health check is reported healthy, because running is then the only
-	// evidence available and claiming otherwise would be inventing a signal.
-	if len(fields) > 2 {
-		handle.Healthy = fields[2] == "healthy" || (fields[2] == "none" && handle.Running)
+	if err = json.Unmarshal([]byte(stateJSON), &state); err != nil {
+		return handle, fmt.Errorf("docker status: could not read container state: %w", err)
+	}
+	handle.Running = state.Running
+	switch {
+	case state.Health != nil:
+		handle.Healthy = state.Health.Status == "healthy"
+	default:
+		// No declared health check. Running is then the only evidence available,
+		// and claiming more would be inventing a signal.
+		handle.Healthy = state.Running
 	}
 	return handle, nil
 }

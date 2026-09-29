@@ -287,17 +287,41 @@ func TestStopAsksBeforeKilling(t *testing.T) {
 	}
 }
 
+// Status has to survive both shapes docker produces: a container whose image
+// declares a HEALTHCHECK, and one whose State carries no Health key at all. The
+// second is what broke the first real-daemon run.
 func TestStatusReportsRunningAndHealth(t *testing.T) {
-	rec := &recorder{responses: map[string]response{
-		"inspect": {stdout: "abc123 true healthy\n"},
+	withHealth := &recorder{responses: map[string]response{
+		"inspect": {stdout: `abc123 {"Running":true,"Health":{"Status":"healthy"}}` + "\n"},
 	}}
-	d := NewDocker(rec.runner())
-	handle, err := d.Status(context.Background(), "twinwright-probe")
+	handle, err := NewDocker(withHealth.runner()).Status(context.Background(), "twinwright-probe")
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
 	if handle.ID != "abc123" || !handle.Running || !handle.Healthy {
 		t.Fatalf("handle=%+v", handle)
+	}
+
+	noHealthKey := &recorder{responses: map[string]response{
+		"inspect": {stdout: `def456 {"Running":true,"Status":"running"}` + "\n"},
+	}}
+	handle, err = NewDocker(noHealthKey.runner()).Status(context.Background(), "twinwright-probe")
+	if err != nil {
+		t.Fatalf("status without a declared health check: %v", err)
+	}
+	if handle.ID != "def456" || !handle.Running || !handle.Healthy {
+		t.Fatalf("handle=%+v; a running container with no declared health check is the best evidence available", handle)
+	}
+
+	unhealthy := &recorder{responses: map[string]response{
+		"inspect": {stdout: `ghi789 {"Running":true,"Health":{"Status":"starting"}}` + "\n"},
+	}}
+	handle, err = NewDocker(unhealthy.runner()).Status(context.Background(), "twinwright-probe")
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if handle.Healthy {
+		t.Errorf("a container reporting health status starting was called healthy: %+v", handle)
 	}
 }
 
