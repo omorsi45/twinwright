@@ -150,5 +150,33 @@ step "shadow mode (observe only)"
 "$BIN" shadow --config examples/shadow/observe-only.yaml --examples examples \
   --manifest "$WORK/billing.manifest.json" --scenario duplicate-charge --agent scripted > "$WORK/shadow.json"
 grep -q '"comparison"' "$WORK/shadow.json" || { cat "$WORK/shadow.json"; fail "shadow produced no comparison"; }
+grep -q '"live_external": *false' "$WORK/shadow.json" || { cat "$WORK/shadow.json"; fail "shadow did not disclaim live external integration"; }
+
+# Each documented connector config must run, and all of them must reach the same
+# verdict: the three fixtures record one support session in three formats, so a
+# differing comparison means an adaptor is losing or inventing behaviour. Only the
+# comparison object is compared - connector name, config digest and run ID
+# legitimately differ - and comparing it byte for byte across three separate
+# processes also proves the ordering is deterministic.
+step "shadow connectors agree across recorded formats"
+shadow_comparison() {
+  "$BIN" shadow --config "examples/shadow/$1.yaml" --examples examples \
+    --manifest "$WORK/billing.manifest.json" --scenario duplicate-charge \
+    --agent scripted > "$WORK/shadow-$1.json"
+  grep -q "\"connector\": *\"$2\"" "$WORK/shadow-$1.json" ||
+    { cat "$WORK/shadow-$1.json"; fail "$1 did not report connector $2"; }
+  tr -d ' \n' < "$WORK/shadow-$1.json" | grep -o '"comparison":{[^}]*}' > "$WORK/cmp-$1.txt"
+  [ -s "$WORK/cmp-$1.txt" ] || { cat "$WORK/shadow-$1.json"; fail "$1 produced no comparison object"; }
+}
+shadow_comparison observe-only file
+shadow_comparison observe-audit-log audit_log
+shadow_comparison observe-recorded-http recorded_http
+for variant in observe-audit-log observe-recorded-http; do
+  if ! cmp -s "$WORK/cmp-observe-only.txt" "$WORK/cmp-$variant.txt"; then
+    printf 'native:   %s\n' "$(cat "$WORK/cmp-observe-only.txt")" >&2
+    printf '%s: %s\n' "$variant" "$(cat "$WORK/cmp-$variant.txt")" >&2
+    fail "$variant reached a different comparison than the native connector"
+  fi
+done
 
 printf '\ne2e: every step passed\n'

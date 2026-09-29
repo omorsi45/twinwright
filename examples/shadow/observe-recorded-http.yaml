@@ -1,0 +1,7 @@
+version: 1
+mode: observe
+label: experimental
+secret_env: []
+source:
+  type: recorded_http
+  path: shadow/sample-recorded-http.jsonl

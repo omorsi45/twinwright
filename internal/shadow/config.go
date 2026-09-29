@@ -75,8 +75,13 @@ func Parse(raw []byte, examplesRoot string) (Config, error) {
 	if input.Label != "experimental" {
 		return Config{}, fmt.Errorf("shadow label must be experimental")
 	}
-	if input.Source == nil || input.Source.Type != "file" || strings.TrimSpace(input.Source.Path) == "" {
-		return Config{}, fmt.Errorf("shadow source must be a file with a path")
+	if input.Source == nil || strings.TrimSpace(input.Source.Path) == "" {
+		return Config{}, fmt.Errorf("shadow source must name a type and a path")
+	}
+	// The registry decides what a valid type is, so adding a connector does not
+	// mean remembering to widen a condition here.
+	if _, err := ConnectorFor(input.Source.Type); err != nil {
+		return Config{}, err
 	}
 	path, err := confinePath(examplesRoot, input.Source.Path)
 	if err != nil {
@@ -89,7 +94,7 @@ func Parse(raw []byte, examplesRoot string) (Config, error) {
 	}
 	return Config{
 		Version: 1, Mode: "observe", Label: "experimental",
-		Source: SourceConfig{Type: "file", Path: path}, SecretEnv: append([]string(nil), input.SecretEnv...),
+		Source: SourceConfig{Type: input.Source.Type, Path: path}, SecretEnv: append([]string(nil), input.SecretEnv...),
 	}, nil
 }
 
@@ -136,35 +141,9 @@ type Observation struct {
 	Actor       string         `json:"actor,omitempty"`
 }
 
-// LoadObservations reads a JSONL observation file under examplesRoot.
+// LoadObservations reads a native-format JSONL observation file under
+// examplesRoot. It is the direct entry point for the native shape; Load
+// dispatches on a connector name for everything else.
 func LoadObservations(examplesRoot string, rel string) ([]Observation, error) {
-	path := filepath.Join(examplesRoot, filepath.FromSlash(rel))
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var out []Observation
-	for i, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		var obs Observation
-		decoder := json.NewDecoder(strings.NewReader(line))
-		decoder.UseNumber()
-		if err := decoder.Decode(&obs); err != nil {
-			return nil, fmt.Errorf("observation line %d: %w", i+1, err)
-		}
-		if obs.Kind != "human_action" && obs.Kind != "external_event" {
-			return nil, fmt.Errorf("observation line %d: unknown kind %q", i+1, obs.Kind)
-		}
-		if obs.OperationID == "" {
-			return nil, fmt.Errorf("observation line %d: operation_id required", i+1)
-		}
-		if obs.Arguments == nil {
-			obs.Arguments = map[string]any{}
-		}
-		out = append(out, obs)
-	}
-	return out, nil
+	return Load(examplesRoot, SourceConfig{Type: "file", Path: rel})
 }

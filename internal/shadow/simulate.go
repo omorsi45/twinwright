@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"twinwright/internal/agent"
 	"twinwright/internal/compiler"
@@ -121,8 +122,26 @@ func Compare(proposed []ProposedAction, observed []Observation) (Comparison, err
 		}
 		propKeys[k]++
 	}
+	// Walking the maps directly would make the report's order depend on Go's
+	// randomised map iteration, so two comparisons over identical input would
+	// disagree on ordering. A shadow report is evidence, so it is sorted by
+	// operation and then by canonical arguments before anything is emitted.
+	sortedKeys := func(counts map[key]int) []key {
+		keys := make([]key, 0, len(counts))
+		for k := range counts {
+			keys = append(keys, k)
+		}
+		sort.Slice(keys, func(i, j int) bool {
+			if keys[i].op != keys[j].op {
+				return keys[i].op < keys[j].op
+			}
+			return keys[i].args < keys[j].args
+		})
+		return keys
+	}
 	out := Comparison{ProposedCount: len(proposed), ObservedCount: len(observed)}
-	for k, n := range propKeys {
+	for _, k := range sortedKeys(propKeys) {
+		n := propKeys[k]
 		m := obsKeys[k]
 		matched := n
 		if m < matched {
@@ -136,7 +155,8 @@ func Compare(proposed []ProposedAction, observed []Observation) (Comparison, err
 			out.OnlyProposed = append(out.OnlyProposed, label)
 		}
 	}
-	for k, n := range obsKeys {
+	for _, k := range sortedKeys(obsKeys) {
+		n := obsKeys[k]
 		m := propKeys[k]
 		if n > m {
 			for i := 0; i < n-m; i++ {
