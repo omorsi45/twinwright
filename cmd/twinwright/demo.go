@@ -491,14 +491,7 @@ func demoCounterfactual(ctx *demoContext) (string, error) {
 		Failure struct {
 			Failed []string `json:"failed"`
 		} `json:"failure"`
-		Candidates []struct {
-			Label string `json:"label"`
-			Kind  string `json:"kind"`
-			// Forks is how many independent forks were executed for this
-			// intervention, and Changed how many of them altered the outcome.
-			Forks   int `json:"forks"`
-			Changed int `json:"changed"`
-		} `json:"candidates"`
+		Candidates []demoCandidate `json:"candidates"`
 	}
 	if err := json.Unmarshal([]byte(output), &result); err != nil {
 		return "", err
@@ -509,18 +502,85 @@ func demoCounterfactual(ctx *demoContext) (string, error) {
 	if len(result.Failure.Failed) == 0 {
 		return "", fmt.Errorf("the counterfactual found nothing to explain, so its parent did not fail: %s", demoExcerpt(output))
 	}
-	best := ""
-	for _, candidate := range result.Candidates {
-		if candidate.Changed > 0 {
-			best = fmt.Sprintf("%s (%d/%d forks)", candidate.Label, candidate.Changed, candidate.Forks)
-			break
+	summary, err := summarizeCounterfactual(result.Candidates)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%d interventions against %s. %s",
+		len(result.Candidates), strings.Join(result.Failure.Failed, ", "), summary), nil
+}
+
+// demoCandidate is one intervention's result. Kind separates a change to the
+// agent's own decision from a change to the world it acts on, which is the
+// distinction the summary is built on.
+type demoCandidate struct {
+	Label         string `json:"label"`
+	Kind          string `json:"kind"`
+	CheckpointSeq int    `json:"checkpoint_seq"`
+	Forks         int    `json:"forks"`
+	Changed       int    `json:"changed"`
+}
+
+// summarizeCounterfactual describes the distribution rather than picking a
+// winner. Naming the first intervention with any effect is actively misleading
+// when most of them have one: on the flagship failure that names a customer read
+// as the explanation for a lost refund write.
+//
+// What the distribution says is sharper than any single candidate. Changing the
+// agent corrects the outcome at every checkpoint, including the last decision
+// after the notification has already gone out, because a fixture that rebuilds
+// its decision from the whole transcript still sees an unresolved refund that
+// late. Changing the world corrects it only up to the write itself, and not once
+// afterwards. The world's opportunity closes; the agent's does not.
+//
+// The interleaving check is what keeps that claim honest. Effects that stop and
+// then resume are not a deadline, and the demo must not narrate the clean story
+// over a messier one.
+func summarizeCounterfactual(candidates []demoCandidate) (string, error) {
+	agentTotal, agentChanged, lastAgentChanged := 0, 0, 0
+	worldTotal, worldChanged := 0, 0
+	lastWorldChanged, firstWorldUnchanged := 0, 0
+	anyChanged := false
+	for _, c := range candidates {
+		if c.Changed > 0 {
+			anyChanged = true
+		}
+		if c.Kind == "model" {
+			agentTotal++
+			if c.Changed > 0 {
+				agentChanged++
+				if c.CheckpointSeq > lastAgentChanged {
+					lastAgentChanged = c.CheckpointSeq
+				}
+			}
+			continue
+		}
+		worldTotal++
+		if c.Changed > 0 {
+			worldChanged++
+			if c.CheckpointSeq > lastWorldChanged {
+				lastWorldChanged = c.CheckpointSeq
+			}
+			continue
+		}
+		if firstWorldUnchanged == 0 || c.CheckpointSeq < firstWorldUnchanged {
+			firstWorldUnchanged = c.CheckpointSeq
 		}
 	}
-	if best == "" {
-		return "", fmt.Errorf("no intervention changed the outcome, so the failure is unexplained: %s", demoExcerpt(output))
+	if !anyChanged {
+		return "", fmt.Errorf("no intervention changed the outcome, so the failure is unexplained")
 	}
-	return fmt.Sprintf("%d interventions evaluated against %s; the failure is explained by %s",
-		len(result.Candidates), strings.Join(result.Failure.Failed, ", "), best), nil
+	if worldChanged > 0 && firstWorldUnchanged > 0 && lastWorldChanged > firstWorldUnchanged {
+		return "", fmt.Errorf("world-side effects resume after stopping (last effective at event %d, first ineffective at event %d), so there is no single boundary to report",
+			lastWorldChanged, firstWorldUnchanged)
+	}
+	summary := fmt.Sprintf("%d/%d agent-side changes corrected it, the latest at event %d",
+		agentChanged, agentTotal, lastAgentChanged)
+	if worldChanged == worldTotal {
+		return summary + fmt.Sprintf("; every one of the %d world-side changes corrected it too", worldTotal), nil
+	}
+	return summary + fmt.Sprintf("; only %d/%d world-side changes did, none after event %d, so the world's opportunity closes and the agent's does not",
+		worldChanged, worldTotal, lastWorldChanged), nil
 }
 
 func demoSecurity(ctx *demoContext) (string, error) {

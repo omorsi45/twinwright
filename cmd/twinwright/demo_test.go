@@ -115,6 +115,82 @@ func TestDemoStopsAtTheFirstUnverifiedStep(t *testing.T) {
 	}
 }
 
+// Reporting "the failure is explained by <first candidate that changed
+// anything>" is the demo's least defensible possible line. On the flagship
+// failure 24 of 32 interventions change the outcome, all at one fork each, so
+// "first with an effect" names whichever appears earliest in the report: for this
+// run that is a customer read, which has nothing to do with a lost refund write.
+//
+// The distribution itself is the finding. Every agent-side change corrects the
+// outcome, including the last decision after the support message was already
+// posted, because a fixture that rebuilds its decision from the whole transcript
+// still sees an unresolved refund that late. World-side changes correct it only
+// up to the refund dispatch, and none of the ones after it do anything. The
+// world's opportunity has a deadline; the agent's does not.
+func TestCounterfactualSummaryReportsTheAsymmetryNotTheFirstHit(t *testing.T) {
+	candidates := []demoCandidate{
+		{Label: "getCustomer dispatch", Kind: "chaos_policy", CheckpointSeq: 3, Forks: 1, Changed: 1},
+		{Label: "model decision after getCustomer", Kind: "model", CheckpointSeq: 5, Forks: 1, Changed: 1},
+		{Label: "createRefund dispatch", Kind: "chaos_policy", CheckpointSeq: 32, Forks: 1, Changed: 1},
+		{Label: "model decision after createRefund", Kind: "model", CheckpointSeq: 35, Forks: 1, Changed: 1},
+		{Label: "crmAddAccountNote dispatch", Kind: "chaos_policy", CheckpointSeq: 37, Forks: 1, Changed: 0},
+		{Label: "messagePostMessage dispatch", Kind: "chaos_policy", CheckpointSeq: 70, Forks: 1, Changed: 0},
+		{Label: "model decision after messagePostMessage", Kind: "model", CheckpointSeq: 73, Forks: 1, Changed: 1},
+	}
+	summary, err := summarizeCounterfactual(candidates)
+	if err != nil {
+		t.Fatalf("summary failed on a well-formed analysis: %v", err)
+	}
+	for _, want := range []string{
+		"3/3 agent-side", // every model intervention corrected it
+		"event 73",       // including the last one, after the notification
+		"2/4 world-side", // the world's changes stop mattering
+		"event 32",       // and the boundary is the refund dispatch
+	} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("summary is missing %q, got %q", want, summary)
+		}
+	}
+	// Naming one intervention as "the" explanation is exactly what this replaces.
+	if strings.Contains(summary, "getCustomer") {
+		t.Fatalf("summary must not single out the first candidate with an effect, got %q", summary)
+	}
+}
+
+// A run where nothing changes the outcome is unexplained, and saying so is the
+// honest result. The analyzer is not obliged to find a cause.
+func TestCounterfactualSummaryRefusesAnUnexplainedFailure(t *testing.T) {
+	_, err := summarizeCounterfactual([]demoCandidate{
+		{Label: "a", Kind: "model", CheckpointSeq: 5, Forks: 1, Changed: 0},
+		{Label: "b", Kind: "chaos_policy", CheckpointSeq: 7, Forks: 1, Changed: 0},
+	})
+	if err == nil {
+		t.Fatal("an analysis where no intervention changed the outcome explains nothing")
+	}
+	if !strings.Contains(err.Error(), "unexplained") {
+		t.Fatalf("error must say the failure is unexplained, got %v", err)
+	}
+}
+
+// The deadline claim is only true if the world-side effects stop and stay
+// stopped. A world change that matters again after one that did not is a
+// different and messier story, and the demo must not narrate the clean one over
+// it.
+func TestCounterfactualSummaryRejectsAnInterleavedBoundary(t *testing.T) {
+	_, err := summarizeCounterfactual([]demoCandidate{
+		{Label: "early", Kind: "chaos_policy", CheckpointSeq: 10, Forks: 1, Changed: 1},
+		{Label: "middle", Kind: "chaos_policy", CheckpointSeq: 20, Forks: 1, Changed: 0},
+		{Label: "late", Kind: "chaos_policy", CheckpointSeq: 30, Forks: 1, Changed: 1},
+		{Label: "agent", Kind: "model", CheckpointSeq: 35, Forks: 1, Changed: 1},
+	})
+	if err == nil {
+		t.Fatal("world-side effects that resume after stopping are not a deadline")
+	}
+	if !strings.Contains(err.Error(), "no single boundary") {
+		t.Fatalf("error must name the interleaving, got %v", err)
+	}
+}
+
 // The demo writes its world, database and artefacts into the directory it is
 // given, so a reader can open them afterwards. Nothing may land in the
 // repository, which is what makes it safe to run from a clean checkout.
