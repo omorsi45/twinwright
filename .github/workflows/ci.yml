@@ -108,6 +108,17 @@ jobs:
       # keeps the README's commands from drifting away from the binary.
       - name: scripts/e2e.sh
         run: ./scripts/e2e.sh
+      # The narrated walkthrough is the project's one-command argument, and every
+      # step verifies its own claim, so running it here is a real gate rather
+      # than documentation: if a step's evidence stops appearing the command
+      # exits non-zero. It covers ground e2e.sh does not - the four-service
+      # incident, a crashed worker recovered by another, a deliberate failure and
+      # its counterfactual - so a regression in those shows up as a red build
+      # instead of as a reader discovering it.
+      - name: the narrated walkthrough verifies every step
+        run: |
+          go build -o /tmp/twinwright ./cmd/twinwright
+          /tmp/twinwright demo --dir "$(mktemp -d)/demo"
 
   security:
     name: secret and vulnerability scan
