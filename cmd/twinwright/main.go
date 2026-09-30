@@ -977,7 +977,7 @@ func selectProvider(name, model, scenario, baseURL string) (agent.Provider, erro
 			return agent.SecurityScriptedProvider{}, nil
 		}
 		if scenario != "duplicate-charge" {
-			return agent.CompanyScriptedProvider{Scenario: scenario}, nil
+			return agent.CompanyScriptedProvider{Scenario: scenario, Unsafe: model == "fixture-unsafe-v1"}, nil
 		}
 		return agent.ScriptedProvider{}, nil
 	case "openai":

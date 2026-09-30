@@ -10,7 +10,19 @@ import (
 )
 
 // CompanyScriptedProvider exercises the company example without a model call.
-type CompanyScriptedProvider struct{ Scenario string }
+//
+// Unsafe selects the careless branch, the way AmbiguousScriptedProvider does for
+// the billing world, and the two fixtures differ by exactly one decision: what a
+// lost write response means. The safe fixture reads the charge back before
+// concluding anything; the unsafe one assumes its write landed and moves on to
+// the paperwork. Under a fault that loses the response after committing, both
+// end with a whole customer. Under one that loses it before committing, only the
+// safe fixture does, and the unsafe run's CRM note then claims a refund the
+// ledger does not contain. That is the failure the counterfactual step explains.
+type CompanyScriptedProvider struct {
+	Scenario string
+	Unsafe   bool
+}
 
 func (p CompanyScriptedProvider) Next(_ context.Context, _ string, history []Message, ops []compiler.Operation) (Message, error) {
 	behaviorByFixtureID := map[string]string{
@@ -40,6 +52,10 @@ func (p CompanyScriptedProvider) Next(_ context.Context, _ string, history []Mes
 	// derived from the whole transcript rather than from the last message: the
 	// rejection has to keep counting once the incident handling moves on.
 	refundRefused := false
+	// A refund whose response never arrived. Like refundRefused this is derived
+	// from the whole transcript, because the decision it feeds has to hold for
+	// every turn that follows it rather than only the one it happened on.
+	refundLost := false
 	for _, message := range history {
 		if message.Role != "tool" {
 			continue
@@ -54,6 +70,9 @@ func (p CompanyScriptedProvider) Next(_ context.Context, _ string, history []Mes
 		}
 		if message.Status == 409 && fixtureID == "createRefund" {
 			refundRefused = true
+		}
+		if message.Status == 0 && fixtureID == "createRefund" {
+			refundLost = true
 		}
 	}
 	directCall := func(operation string, args map[string]any) (Message, error) {
@@ -131,7 +150,7 @@ func (p CompanyScriptedProvider) Next(_ context.Context, _ string, history []Mes
 			if lost == "" {
 				lost = last.OperationID
 			}
-			if lost == "createRefund" {
+			if lost == "createRefund" && !p.Unsafe {
 				chargeID := ""
 				for i := len(history) - 1; i >= 0 && chargeID == ""; i-- {
 					for _, previous := range history[i].ToolCalls {
@@ -156,9 +175,13 @@ func (p CompanyScriptedProvider) Next(_ context.Context, _ string, history []Mes
 		// the refusal is neither a failure to stop on nor a confirmation. It is
 		// handled below, by reading the charge once more and returning whatever
 		// remains outstanding.
-		if last.Status == 409 && refundRefused {
+		switch {
+		case last.Status == 409 && refundRefused:
 			// Handled below, where the outstanding remainder is decided.
-		} else if last.Status < 200 || last.Status >= 300 {
+		case last.Status == 0 && refundLost && p.Unsafe:
+			// Handled below. The unsafe branch does not stop on a lost response,
+			// and it does not reconcile either; it assumes the write landed.
+		case last.Status < 200 || last.Status >= 300:
 			return Message{}, fmt.Errorf("%s returned HTTP %d", last.OperationID, last.Status)
 		}
 	}
@@ -221,6 +244,13 @@ func (p CompanyScriptedProvider) Next(_ context.Context, _ string, history []Mes
 	// this whole path exists to prevent.
 	refundConfirmed := false
 	if _, ok := results["createRefund"]; ok {
+		refundConfirmed = true
+	}
+	// The unsafe fixture's whole divergence, in one statement: a lost response is
+	// taken as proof the money moved. It is a tempting inference, because the
+	// alternative is an extra read on a call that usually did succeed, and it is
+	// wrong precisely when it matters.
+	if p.Unsafe && refundLost {
 		refundConfirmed = true
 	}
 	if reconciled, ok := results["getCharge"]; ok && duplicate {
