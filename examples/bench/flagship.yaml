@@ -1,0 +1,66 @@
+# The flagship incident run through the distributed worker runtime.
+#
+# examples/bench/standard.yaml already crashes a worker three times, but all
+# three of its distributed cases use the single-service billing world. That left
+# the repository's headline claim measured only on its simplest scenario: the
+# four-service company incident, the one the README and the demo lead with, was
+# never once recovered by a second worker.
+#
+# This suite closes that gap. Each case kills the first worker at a named model
+# turn, advances a controlled clock past the lease TTL rather than sleeping it
+# out, lets a second worker take over, and then makes the zombie attempt a real
+# write. A stale commit that SUCCEEDS is a hard error, not a warning, because the
+# fencing claim is the one thing here that cannot be allowed to be approximate.
+#
+# Three crash points, chosen where the recovery boundary actually differs across
+# a sixteen-call trajectory:
+#
+#   - turn 2 dies before anything has committed, so the takeover starts almost
+#     from scratch and the only question is whether the queue redelivers.
+#   - turn 7 dies after the investigation has read the customer, subscription,
+#     CRM account, invoice and charges but before any money moves. The second
+#     worker inherits reasoning it did not do.
+#   - turn 9 dies with the refund already committed. This is the delivery that
+#     must not produce a second refund, and it is the whole reason at-least-once
+#     delivery is stated honestly rather than described as exactly-once.
+#
+# No chaos policy here, deliberately. The crash IS the fault under study, and
+# layering the outage and lost response on top would leave a failed takeover with
+# two possible explanations. The demo runs the flagship with its faults as a
+# separate step, so both stories are told without either muddying the other.
+#
+# That choice is also why these cases carry no assertions file. The flagship's
+# twelve declarative assertions include billing_outage_observed,
+# lost_refund_response_observed and reconciled_after_the_loss, which describe the
+# chaos run and cannot hold on a run with no chaos; attaching them here failed all
+# three cases while every distributed invariant was green. So each case is judged
+# by the scenario's built-in evaluation, which asserts the thing that actually
+# matters across a crash: the incident still ends correctly handled, with the
+# right charge refunded exactly once, the CRM note written, the ticket opened and
+# support notified, by whichever worker happened to finish it.
+version: 1
+suite: flagship
+cases:
+  - id: flagship-crash-before-effects
+    category: distributed
+    world: company
+    scenario: company-incident
+    mode: distributed
+    crash_at: 2
+    dimensions: [task, recovery, duplicate_effects]
+
+  - id: flagship-crash-after-investigation
+    category: distributed
+    world: company
+    scenario: company-incident
+    mode: distributed
+    crash_at: 7
+    dimensions: [task, recovery, duplicate_effects]
+
+  - id: flagship-crash-after-refund
+    category: distributed
+    world: company
+    scenario: company-incident
+    mode: distributed
+    crash_at: 9
+    dimensions: [task, recovery, duplicate_effects]
