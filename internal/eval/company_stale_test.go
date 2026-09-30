@@ -62,7 +62,7 @@ func TestStaleReadOnTheFlagshipProvokesASecondRefund(t *testing.T) {
 	// against.
 	policy, err := chaos.Parse([]byte("version: 1\nrules:\n"+
 		"  - id: refund-response-lost\n    type: timeout_after_commit\n    operations: [createRefund]\n    times: 1\n"+
-		"  - id: charge-snapshot\n    type: stale_read\n    operations: [getCharge]\n    after_calls: 1\n"), manifest)
+		"  - id: charge-snapshot\n    type: stale_read\n    operations: [getCharge]\n    after_calls: 1\n    times: 1\n"), manifest)
 	if err != nil {
 		t.Fatal(err)
 	}

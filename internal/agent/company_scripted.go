@@ -61,6 +61,47 @@ func (p CompanyScriptedProvider) Next(_ context.Context, _ string, history []Mes
 			ID: fmt.Sprintf("company-%d", len(tools)+1), OperationID: operation, Arguments: args,
 		}}}, nil
 	}
+	// What billing refused, and whether the charge has been read since. Both are
+	// derived from transcript order rather than from the last message, because
+	// the remainder decision below has to survive the turns that follow it.
+	refusedAmount := int64(0)
+	readsAfterRefusal := 0
+	if refundRefused {
+		refusalSeen := false
+		for _, message := range history {
+			if message.Role != "tool" {
+				continue
+			}
+			fixtureID := fixtureIDByOperation[message.OperationID]
+			if fixtureID == "" {
+				fixtureID = message.OperationID
+			}
+			if !refusalSeen {
+				if fixtureID == "createRefund" && message.Status == 409 {
+					refusalSeen = true
+					for _, earlier := range history {
+						for _, previous := range earlier.ToolCalls {
+							if previous.ID != message.CallID {
+								continue
+							}
+							switch amount := previous.Arguments["amount_cents"].(type) {
+							case int64:
+								refusedAmount = amount
+							case int:
+								refusedAmount = int64(amount)
+							case float64:
+								refusedAmount = int64(amount)
+							}
+						}
+					}
+				}
+				continue
+			}
+			if fixtureID == "getCharge" && message.Status >= 200 && message.Status < 300 {
+				readsAfterRefusal++
+			}
+		}
+	}
 	call := func(operation string, args map[string]any) (Message, error) {
 		if bound := operationByBehavior[behaviorByFixtureID[operation]]; bound != "" {
 			operation = bound
@@ -107,15 +148,16 @@ func (p CompanyScriptedProvider) Next(_ context.Context, _ string, history []Mes
 				return call("getCharge", map[string]any{"id": chargeID})
 			}
 		}
-		// 409 on the refund is billing refusing to return more than the charge
-		// still owes, which means the money is already back. That rejection comes
-		// from the writer's own invariant check, so it is stronger evidence than
-		// any read the agent can take: retrying the same amount is guaranteed to
-		// fail, and reading the charge again can be served the very snapshot that
-		// caused the attempt. The refund counts as delivered and the incident
-		// handling continues rather than stopping half-done.
+		// 409 on the refund is billing refusing to return MORE than the charge
+		// still owes. It says the requested amount was too large, not that
+		// nothing is owed: a charge another writer refunded in part refuses the
+		// full amount exactly as loudly as a fully refunded one does, and the
+		// gap between those two worlds is what the customer is still short. So
+		// the refusal is neither a failure to stop on nor a confirmation. It is
+		// handled below, by reading the charge once more and returning whatever
+		// remains outstanding.
 		if last.Status == 409 && refundRefused {
-			// Handled below, where refundConfirmed is decided.
+			// Handled below, where the outstanding remainder is decided.
 		} else if last.Status < 200 || last.Status >= 300 {
 			return Message{}, fmt.Errorf("%s returned HTTP %d", last.OperationID, last.Status)
 		}
@@ -181,13 +223,6 @@ func (p CompanyScriptedProvider) Next(_ context.Context, _ string, history []Mes
 	if _, ok := results["createRefund"]; ok {
 		refundConfirmed = true
 	}
-	// Billing refusing the refund as larger than the outstanding balance settles
-	// the question on its own: nothing is left to return. Without this the agent
-	// would keep reissuing the same refused refund every turn, because the read
-	// it would reconcile against is the one that is wrong.
-	if refundRefused {
-		refundConfirmed = true
-	}
 	if reconciled, ok := results["getCharge"]; ok && duplicate {
 		var charge struct {
 			ID            string `json:"id"`
@@ -198,6 +233,41 @@ func (p CompanyScriptedProvider) Next(_ context.Context, _ string, history []Mes
 		}
 		if charge.ID == charges[1].ID && charge.RefundedCents >= charges[1].AmountCents {
 			refundConfirmed = true
+		}
+	}
+	// Billing refused the refund as exceeding the outstanding balance. Read the
+	// charge once more and return only what is still owed. That re-read is what
+	// separates the two worlds a 409 cannot tell apart on its own: a charge
+	// already whole leaves nothing to do, while one another writer refunded in
+	// part leaves a remainder the customer is short. Reissuing the refused
+	// amount is impossible here by construction, because a remainder billing
+	// will accept is always smaller than the amount it just refused.
+	if duplicate && refundRefused && !refundConfirmed {
+		if readsAfterRefusal == 0 {
+			return call("getCharge", map[string]any{"id": charges[1].ID})
+		}
+		var charge struct {
+			ID            string `json:"id"`
+			RefundedCents int64  `json:"refunded_cents"`
+		}
+		if err := json.Unmarshal([]byte(results["getCharge"].Content), &charge); err != nil {
+			return Message{}, err
+		}
+		if charge.ID != charges[1].ID {
+			return Message{}, fmt.Errorf("refused refund reconciled against charge %s", charge.ID)
+		}
+		remaining := charges[1].AmountCents - charge.RefundedCents
+		switch {
+		case remaining <= 0:
+			refundConfirmed = true
+		case refusedAmount > 0 && remaining >= refusedAmount:
+			// The read claims at least as much is owed as billing just refused
+			// to return. One of the two is wrong and the agent cannot tell
+			// which, so it stops rather than reporting an incident resolved
+			// that it has not resolved, or looping on the same refused amount.
+			return Message{}, fmt.Errorf("charge %s reads %d outstanding after billing refused %d", charge.ID, remaining, refusedAmount)
+		default:
+			return call("createRefund", map[string]any{"charge_id": charges[1].ID, "amount_cents": remaining, "reason": "duplicate charge remainder"})
 		}
 	}
 	if duplicate && !refundConfirmed {
