@@ -68,6 +68,13 @@ type Summary struct {
 	// below total is the benchmark losing its grip on a known-bad behaviour.
 	ControlsTotal    int `json:"controls_total"`
 	ControlsDetected int `json:"controls_detected"`
+	// Measured is how many scored cases declared each dimension, keyed by the
+	// dimension name. It is the denominator behind every rate above, and it
+	// exists because a rate alone cannot distinguish "every case failed" from
+	// "no case declared this dimension": both arrive as zero. A suite covering a
+	// subset of the dimensions is normal, so a consumer must be able to tell an
+	// absent measurement from a bad one without re-deriving it from Cases.
+	Measured map[string]int `json:"measured"`
 }
 
 // DistributedResult records what a distributed case observed. Every field is
@@ -265,6 +272,14 @@ func (r *Report) Aggregate() {
 		Errors:              errored,
 		ControlsTotal:       controls,
 		ControlsDetected:    detected,
+		Measured: map[string]int{
+			"task":              counts["task"].total,
+			"safety":            counts["safety"].total,
+			"authorization":     counts["authorization"].total,
+			"recovery":          counts["recovery"].total,
+			"duplicate_effects": dupTotal,
+			"explanation":       explainable,
+		},
 	}
 }
 
@@ -294,21 +309,33 @@ func median(values []float64) float64 {
 
 // FormatText renders the roadmap-style summary. The distributed lines are
 // printed only when a case measured them, so a suite without distributed cases
-// does not display three zeroes that look like failures. When any case was
-// excluded from the rates, the footer says how many of the suite's cases the
-// rates actually cover: a percentage over a reduced denominator is only honest
-// if the reader is told the denominator moved.
+// does not display three zeroes that look like failures. A dimension no scored
+// case declared is labelled rather than printed as 0.0%, for the same reason and
+// with the stronger consequence: a reader who sees "Safety Compliance 0.0%"
+// concludes the agent failed every safety case, which is the opposite of a suite
+// that declared none. When any case was excluded from the rates, the footer says
+// how many of the suite's cases the rates actually cover: a percentage over a
+// reduced denominator is only honest if the reader is told the denominator moved.
 func (r Report) FormatText() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Suite: %s (%d scenarios)\n", r.Suite, r.Scenarios)
 	fmt.Fprintf(&b, "Agent: %s  Model: %s\n\n", r.Agent, r.Model)
-	fmt.Fprintf(&b, "Task Success             %5.1f%%\n", r.Summary.TaskSuccess)
-	fmt.Fprintf(&b, "Safety Compliance        %5.1f%%\n", r.Summary.SafetyCompliance)
-	fmt.Fprintf(&b, "Authorization Safety     %5.1f%%\n", r.Summary.AuthorizationSafety)
-	fmt.Fprintf(&b, "Recovery Success         %5.1f%%\n", r.Summary.RecoverySuccess)
-	fmt.Fprintf(&b, "Duplicate Effects (bad)  %5.1f%%\n", r.Summary.DuplicateEffects)
+	// label pads the same width a rate occupies, so the measured and unmeasured
+	// lines stay in one column.
+	line := func(name, dimension string, value float64) {
+		if r.Summary.Measured[dimension] == 0 {
+			fmt.Fprintf(&b, "%-24s %12s\n", name, "not measured")
+			return
+		}
+		fmt.Fprintf(&b, "%-24s %5.1f%%\n", name, value)
+	}
+	line("Task Success", "task", r.Summary.TaskSuccess)
+	line("Safety Compliance", "safety", r.Summary.SafetyCompliance)
+	line("Authorization Safety", "authorization", r.Summary.AuthorizationSafety)
+	line("Recovery Success", "recovery", r.Summary.RecoverySuccess)
+	line("Duplicate Effects (bad)", "duplicate_effects", r.Summary.DuplicateEffects)
 	if r.Categories["counterfactual"] > 0 {
-		fmt.Fprintf(&b, "Failures Explained       %5.1f%%\n", r.Summary.ExplanationRate)
+		line("Failures Explained", "explanation", r.Summary.ExplanationRate)
 	}
 	if r.Categories["distributed"] > 0 {
 		fmt.Fprintf(&b, "Worker Takeovers         %5d\n", r.Summary.WorkerTakeovers)

@@ -92,6 +92,24 @@ reissued the refund. `safety-ambiguous-unsafe` demonstrates exactly that shape
 Both numbers are reported rather than one derived number, because "two refunds exist and the agent
 wrote one" is the fact that makes the concurrent case legible.
 
+### A dimension no case declared is labelled, not printed as zero
+
+A rate over an empty denominator is not zero, it is absent, and the two read as opposites. The
+flagship distributed suite is the first shipped suite that declares a subset of the dimensions, and
+it printed `Safety Compliance 0.0%` and `Authorization Safety 0.0%`: a reader scanning that concludes
+the agent failed every safety case, when the truth is that the suite contains none. This is the same
+defect as the original 25% figure, reached from the opposite direction, and any suite covering a
+subset of the dimensions hits it.
+
+`Summary.Measured` now carries the denominator behind every rate, keyed by dimension name, and
+`FormatText` prints `not measured` in place of a percentage when that denominator is zero. The
+machine-readable summary keeps the numeric field, so a consumer reading JSON is not forced to parse
+prose; the denominator beside it is what distinguishes zero-of-zero from zero-of-many.
+
+Silently omitting the line was the alternative, and it is weaker: a reader who does not see Safety
+Compliance at all cannot tell whether the report predates the dimension or the suite skipped it.
+Naming the absence says which.
+
 ## Consequences
 
 The shipped suite now reports task success, safety compliance, authorization safety and recovery
@@ -111,6 +129,8 @@ Mutation evidence for each claim:
 - Replacing the remainder computation with the full charge amount makes two fixture tests fail, one
   reporting the fixture re-refunding 5905 on a charge already partly refunded.
 - Removing the exclusions makes the control and errored-case tests fail on the rates directly.
+- Forcing the unmeasured branch off makes `TestUnmeasuredDimensionIsNotRenderedAsZeroPercent` report
+  `Safety Compliance 0.0%` on a suite that declared no safety case.
 
 ## Rejected alternatives
 
