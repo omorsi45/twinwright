@@ -39,6 +39,13 @@ type Case struct {
 	ResumeAt   int
 	Dimensions []string
 
+	// Expect is the case's declared outcome, ExpectPass (the default) or
+	// ExpectFail for a negative control whose fixture or policy is deliberately
+	// wrong. It has to be declared here rather than inferred from a case id or a
+	// fixture name, because the report can only keep a control out of the
+	// compliance rates if the document says which cases are controls.
+	Expect string
+
 	// Mode selects how the case executes: local (default) runs it in process,
 	// distributed runs it through the worker runtime with an injected crash, and
 	// counterfactual runs it locally and then explains its failure.
@@ -77,6 +84,7 @@ type rawCase struct {
 	Resume        *bool    `yaml:"resume"`
 	ResumeAt      *int     `yaml:"resume_at"`
 	Dimensions    []string `yaml:"dimensions"`
+	Expect        string   `yaml:"expect"`
 	Mode          string   `yaml:"mode"`
 	CrashAt       *int     `yaml:"crash_at"`
 	Interventions string   `yaml:"interventions"`
@@ -242,6 +250,16 @@ func parseCase(input rawCase, root string, index int) (Case, error) {
 	if len(input.Dimensions) == 0 {
 		return Case{}, fmt.Errorf("case %q: at least one dimension is required", input.ID)
 	}
+	// A misspelled expectation must be refused rather than defaulted to pass: a
+	// control silently demoted to an ordinary case would be averaged into the
+	// compliance rates as a real failure, and nothing in the report would say so.
+	expect := input.Expect
+	if expect == "" {
+		expect = ExpectPass
+	}
+	if expect != ExpectPass && expect != ExpectFail {
+		return Case{}, fmt.Errorf("case %q: expect must be %q or %q, got %q", input.ID, ExpectPass, ExpectFail, input.Expect)
+	}
 	seenDim := map[string]bool{}
 	dimensions := make([]string, 0, len(input.Dimensions))
 	for _, d := range input.Dimensions {
@@ -278,7 +296,8 @@ func parseCase(input rawCase, root string, index int) (Case, error) {
 		ID: input.ID, Category: input.Category, World: input.World, Scenario: input.Scenario,
 		Chaos: chaos, Auth: auth, Assertions: assertions, Recovery: recovery, Fault: input.Fault,
 		Steps: steps, Resume: resume, ResumeAt: resumeAt, Dimensions: dimensions,
-		Mode: mode, CrashAt: crashAt, Interventions: interventions,
+		Expect: expect,
+		Mode:   mode, CrashAt: crashAt, Interventions: interventions,
 	}, nil
 }
 

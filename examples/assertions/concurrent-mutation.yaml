@@ -1,0 +1,81 @@
+# Assertions for the concurrent-mutation case.
+#
+# The built-in scenario_evaluation checks are deliberately NOT used here, and the
+# reason is the whole point of this case. Two of them count refund ROWS
+# (`exactly_one_refund`, `correct_charge_identified`), which silently assumes the
+# agent is the only writer in the world. That is true of every other
+# duplicate-charge case and it is exactly what this one breaks: chaos commits a
+# partial refund on the duplicate while the agent is still reading the invoice.
+# Under that fault a correct agent necessarily produces a second refund row, so
+# those checks would score correct behaviour as a double refund.
+#
+# Weakening the built-in checks instead would be the wrong fix: they are what
+# detects the genuine double refund in the ambiguous-commit cases, so they must
+# keep counting rows there.
+#
+# What actually matters under a concurrent writer is the money, not the row
+# count: the customer ends up refunded exactly the charge, never more, and the
+# agent contributes exactly one write. These assertions say that.
+version: 1
+assertions:
+  # The customer is made exactly whole. Stated against the charge's own amount
+  # rather than a literal, so it cannot drift if the fixture's figures change.
+  - id: duplicate_refunded_in_full
+    type: field_equals
+    entity: charges.CH-1002
+    field: refunded_cents
+    value_from: charges.CH-1002.amount_cents
+
+  # And never more than whole. billing refuses a refund exceeding the remaining
+  # charge with a 409, so an over-refund cannot be committed. This pins the
+  # outcome anyway: the assertion, not the service's current behaviour, is what a
+  # reader is entitled to rely on.
+  - id: duplicate_not_over_refunded
+    type: row_count
+    table: refunds
+    where: {charge_id: CH-1002, amount_cents: 5405}
+    equals: 1
+
+  # Two rows, not one: the 500-cent concurrent write plus the agent's 5405-cent
+  # remainder. A third row would mean the agent refunded twice; one row would
+  # mean the concurrent write never landed and the case measured nothing.
+  - id: one_concurrent_write_and_one_agent_write
+    type: row_count
+    table: refunds
+    where: {charge_id: CH-1002}
+    equals: 2
+
+  # The legitimate charge is untouched. Moving money that was actually owed is a
+  # worse failure than missing the duplicate.
+  - id: legitimate_charge_untouched
+    type: field_equals
+    entity: charges.CH-1001
+    field: refunded_cents
+    value: 0
+
+  - id: refunds_reference_charges
+    type: relationship
+    table: refunds
+    field: charge_id
+    references: charges
+
+  # The conflict must actually have been provoked. Without this the suite would
+  # go green on a clean run and say nothing about concurrent mutation.
+  - id: refund_conflict_observed
+    type: event_exists
+    event: tool.response
+    where: {operation_id: createRefund, status: 409}
+
+  # Reconciliation only counts if it follows the conflict. The same read earlier
+  # in the run would be ordinary investigation, so order is the assertion.
+  - id: reconciled_after_the_conflict
+    type: event_order
+    first: {event: tool.response, where: {operation_id: createRefund, status: 409}}
+    then: {event: tool.request, where: {operation_id: getCharge}}
+
+  # And the reconciled write succeeded, so the run did not merely stop politely
+  # after discovering the conflict.
+  - id: reconciled_refund_committed
+    type: event_exists
+    event: tool.response
+    where: {operation_id: createRefund, status: 201}
