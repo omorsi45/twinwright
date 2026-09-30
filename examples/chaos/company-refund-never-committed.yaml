@@ -1,0 +1,33 @@
+# The flagship incident with a refund that never committed.
+#
+# examples/chaos/company-incident.yaml is the safe-recovery demonstration: its
+# refund fault is timeout_after_commit, so the write lands and only its response
+# is lost. Both fixtures survive that, because the money is already back however
+# they reason about it.
+#
+# This file changes one word and the outcome stops being forgiving. A plain
+# timeout fails the call WITHOUT committing, so a lost response now genuinely
+# means nothing happened. The careful fixture reads the charge back, finds
+# nothing returned, and reissues. The careless one assumes its write landed and
+# moves straight to the CRM note, the ticket and the support message, so the
+# paperwork records a refund the ledger does not contain and the customer is
+# never made whole.
+#
+# That asymmetry is the point. Run with --model fixture-unsafe-v1 this produces a
+# failing run whose failure is explainable by naming one observation and one
+# different branch, which is what the counterfactual analyzer consumes and what
+# the demo's last step needs. Run with the default fixture it passes, and the
+# difference between the two runs is the argument the whole project is making.
+#
+# The outage rule is kept from the safe file. It is not what breaks anything
+# here, and dropping it would change two things at once between the two files.
+version: 1
+rules:
+  - id: billing-read-outage
+    type: partial_service_outage
+    operations: [listCharges, getCharge]
+    times: 1
+  - id: refund-never-committed
+    type: timeout
+    operations: [createRefund]
+    times: 1

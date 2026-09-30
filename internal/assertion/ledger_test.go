@@ -120,6 +120,49 @@ func TestEventOrderAssertions(t *testing.T) {
 	expect(t, f.check(t, "id: a\ntype: event_order\nfirst: {event: tool.response}\nthen: {event: retry}"), true, "")
 }
 
+// event_order is a "never before" claim, and it passes vacuously: an agent that
+// never performs the `then` action at all satisfies it. That is the right
+// operator for "do not comment before reading the ticket", and the wrong one for
+// "reconcile after the write was lost", where the read-back has to actually
+// happen and an earlier read of the same operation is legitimate. The flagship
+// incident is exactly that shape: the agent reads the charge before refunding it
+// and again after the response is lost, so identifying the reconciling read by
+// operation alone matches the earlier one and reports a correct agent as wrong.
+func TestEventFollowsRequiresTheLaterEventToExist(t *testing.T) {
+	f := injectionFixture(t, "support-policy.yaml")
+
+	// The fixture reads the ticket, then comments on it.
+	expect(t, f.check(t, "id: a\ntype: event_follows\nfirst: {event: tool.response, where: {operation_id: ticketGetIssue}}\nthen: {event: tool.request, where: {operation_id: ticketAddComment}}"), true, "")
+
+	// Reversed, the comment precedes the read, so nothing follows it. Where
+	// event_order reports the early event as the offence, event_follows reports
+	// the absence of a later one, which is the claim being made.
+	reversed := f.check(t, "id: a\ntype: event_follows\nfirst: {event: tool.response, where: {operation_id: ticketAddComment}}\nthen: {event: tool.request, where: {operation_id: ticketGetIssue}}")
+	expect(t, reversed, false, "no tool.request after")
+
+	// The vacuous pass is the whole reason this operator exists: an action that
+	// never happened cannot have followed anything.
+	expect(t, f.check(t, "id: a\ntype: event_follows\nfirst: {event: tool.response}\nthen: {event: retry}"), false, "no retry after")
+
+	// And an anchor that never occurred is a failure rather than a pass: "after
+	// the response was lost" presupposes a loss, so a run without one has not
+	// demonstrated the behaviour.
+	expect(t, f.check(t, "id: a\ntype: event_follows\nfirst: {event: tool.response, where: {operation_id: createRefund, status: 0}}\nthen: {event: tool.request}"), false, "no tool.response matched")
+}
+
+// An earlier occurrence of the same operation must not satisfy the claim, which
+// is the regression that made this operator necessary.
+func TestEventFollowsIgnoresAnEarlierOccurrence(t *testing.T) {
+	f := injectionFixture(t, "support-policy.yaml")
+	// ticketGetIssue happens before ticketAddComment. Anchored on the comment,
+	// the earlier read must not count, and there is no later one.
+	result := f.check(t, "id: a\ntype: event_follows\nfirst: {event: tool.request, where: {operation_id: ticketAddComment}}\nthen: {event: tool.request, where: {operation_id: ticketGetIssue}}")
+	expect(t, result, false, "no tool.request after")
+	if len(result.EventIDs) != 0 {
+		t.Fatalf("a failing event_follows has no offending event to cite, got %v", result.EventIDs)
+	}
+}
+
 func TestLedgerAssertionsIncludeForkPrefix(t *testing.T) {
 	ctx := context.Background()
 	parent := injectionFixture(t, "support-policy.yaml")

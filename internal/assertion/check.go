@@ -56,6 +56,8 @@ func Check(ctx context.Context, s *store.Store, runID string, set Set) (Report, 
 			err = mutationForbidden(events, set, a, &result)
 		case "event_order":
 			err = eventOrder(events, a, &result)
+		case "event_follows":
+			err = eventFollows(events, a, &result)
 		case "custom":
 			result.Passed, result.Detail, err = set.customs[a.Name](ctx, s, run)
 		default:

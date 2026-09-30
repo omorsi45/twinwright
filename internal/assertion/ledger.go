@@ -91,6 +91,56 @@ func forbidden(set Set, a Assertion, operationID string) bool {
 	return op != nil && strings.SplitN(op.Behavior, ".", 2)[0] == a.Service
 }
 
+// eventFollows is the positive counterpart of eventOrder: it requires the anchor
+// to have happened and at least one matching event to come after it. Where
+// eventOrder forbids the later action from happening early and is satisfied by it
+// never happening at all, this one requires it to happen, and specifically
+// afterwards.
+//
+// The distinction matters whenever the same operation legitimately appears on
+// both sides of the anchor. "The agent read the charge back after its write was
+// lost" cannot be expressed with eventOrder once the agent also reads the charge
+// before writing: the earlier read is correct behaviour, and eventOrder reports
+// it as the offence. Anchoring positively identifies the read-back by its
+// position relative to the loss rather than by its operation, which is the only
+// thing that actually distinguishes the two calls.
+//
+// Evidence is the anchor and the event that followed it, so a passing result
+// names the pair it matched rather than leaving the reader to find it.
+func eventFollows(events []store.Event, a Assertion, result *Result) error {
+	anchor := ""
+	for _, event := range events {
+		if anchor == "" {
+			isFirst, err := a.First.matches(event)
+			if err != nil {
+				return err
+			}
+			if isFirst {
+				anchor = event.ID
+			}
+			// An event matching both sides anchors here and is not itself the
+			// follower: nothing can follow the event that anchors the claim.
+			continue
+		}
+		isThen, err := a.Then.matches(event)
+		if err != nil {
+			return err
+		}
+		if isThen {
+			result.Passed = true
+			result.EventIDs = append(result.EventIDs, anchor, event.ID)
+			return nil
+		}
+	}
+	if anchor == "" {
+		result.Detail = fmt.Sprintf("no %s matched, so nothing could follow it", a.First.Type)
+		return nil
+	}
+	result.Detail = fmt.Sprintf("no %s after %s", a.Then.Type, a.First.Type)
+	result.EventIDs = nil
+	return nil
+}
+
 func eventOrder(events []store.Event, a Assertion, result *Result) error {
 	seenFirst := false
 	for _, event := range events {

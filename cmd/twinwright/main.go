@@ -40,12 +40,14 @@ func main() {
 
 func runCLI(args []string, out io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: twinwright version|doctor|build|build-world|run|resume|worker|enqueue|queue|inspect|trace|replay|checkpoints|fork|compare|evaluate|counterfactual|bench|shadow|container ...")
+		return fmt.Errorf("usage: twinwright version|doctor|build|build-world|run|resume|worker|enqueue|queue|inspect|trace|replay|checkpoints|fork|compare|evaluate|counterfactual|bench|shadow|container|demo ...")
 	}
 	ctx := context.Background()
 	switch args[0] {
 	case "version", "--version", "-v":
 		return versionCommand(out)
+	case "demo":
+		return cmdDemo(args[1:], out)
 	case "doctor":
 		return doctorCommand(ctx, args, out)
 	case "worker":
@@ -977,7 +979,7 @@ func selectProvider(name, model, scenario, baseURL string) (agent.Provider, erro
 			return agent.SecurityScriptedProvider{}, nil
 		}
 		if scenario != "duplicate-charge" {
-			return agent.CompanyScriptedProvider{Scenario: scenario}, nil
+			return agent.CompanyScriptedProvider{Scenario: scenario, Unsafe: model == "fixture-unsafe-v1"}, nil
 		}
 		return agent.ScriptedProvider{}, nil
 	case "openai":

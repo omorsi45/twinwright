@@ -126,6 +126,35 @@ Clone the repository and run the full test suite:
 go test ./...
 ```
 
+### See the whole system in one command
+
+```bash
+go run ./cmd/twinwright demo --dir ./demo-out
+```
+
+Eleven steps over one incident: compile the four-service world, run it under injected faults, inspect, trace, evaluate, replay, fork and compare, crash a worker and let another take over, then fail the same incident on purpose and explain the failure. Everything is scripted, so it needs no API key, no network and no container runtime.
+
+Every step reads its evidence back out of what it just ran, and the first step that cannot produce its evidence stops the walkthrough with a non-zero exit. That is why CI runs it: a narration that prints a story without checking it would keep telling the happy story after the runtime regressed.
+
+```text
+ 5/11 evaluate the declarative assertions
+evidence: 12/12 assertions held against the world's final state and the ledger's order
+
+ 8/11 crash a worker and watch another take over
+evidence: 3 crashes, 3 takeovers at fence 1 -> 2, 3 stale commit refused by fencing,
+          replay verified on all 3
+
+10/11 explain the failure with a counterfactual
+evidence: 32 interventions against correct_charge_identified, refund_amount_correct,
+          exactly_one_refund. 16/16 agent-side changes corrected it, the latest at
+          event 73; only 8/16 world-side changes did, none after event 32, so the
+          world's opportunity closes and the agent's does not
+```
+
+That last line is the project's argument as measured output rather than prose. Event 32 is the refund dispatch and event 73 is the final model decision, after the support notification has already gone out: changing the world stops helping once the write is lost, while changing the agent still corrects the outcome at every later point.
+
+The sections below walk the same ground one command at a time.
+
 Build the multi-service company world:
 
 ```bash

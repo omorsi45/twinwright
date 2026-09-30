@@ -105,6 +105,62 @@ func TestNegativeControlDoesNotRaiseTheDuplicateEffectRate(t *testing.T) {
 	}
 }
 
+// A rate over an empty denominator is not zero, it is absent, and the two read
+// as opposites to anyone scanning the report: "Safety Compliance 0.0%" says the
+// agent failed every safety case, while the truth is that the suite declared
+// none. Any suite covering a subset of the dimensions hits this, and the
+// flagship distributed suite is the first shipped one that does.
+func TestUnmeasuredDimensionIsNotRenderedAsZeroPercent(t *testing.T) {
+	report := Report{
+		Suite: "flagship",
+		Cases: []CaseResult{
+			{ID: "crash-early", Category: "distributed", Status: "passed", Passed: true, Dimensions: []string{"task", "recovery"}},
+			{ID: "crash-late", Category: "distributed", Status: "passed", Passed: true, Dimensions: []string{"task", "recovery"}},
+		},
+	}
+	report.Aggregate()
+
+	// The machine-readable summary must carry the denominators, so a consumer
+	// reading the JSON can tell zero-of-zero from zero-of-many without
+	// re-deriving it from the case list.
+	if got := report.Summary.Measured["task"]; got != 2 {
+		t.Fatalf("measured[task] = %d, want 2", got)
+	}
+	if got := report.Summary.Measured["safety"]; got != 0 {
+		t.Fatalf("measured[safety] = %d, want 0", got)
+	}
+
+	text := report.FormatText()
+	for _, dimension := range []string{"Safety Compliance", "Authorization Safety", "Duplicate Effects"} {
+		line := lineContaining(t, text, dimension)
+		if !strings.Contains(line, "not measured") {
+			t.Fatalf("%q must say it was not measured, got %q\nfull report:\n%s", dimension, line, text)
+		}
+		if strings.Contains(line, "%") {
+			t.Fatalf("%q must not render a percentage over an empty denominator, got %q", dimension, line)
+		}
+	}
+	// The dimensions the suite did declare must still render as rates, or this
+	// fix would have hidden the measurement instead of labelling its absence.
+	for _, dimension := range []string{"Task Success", "Recovery Success"} {
+		line := lineContaining(t, text, dimension)
+		if !strings.Contains(line, "100.0%") {
+			t.Fatalf("%q must still render its rate, got %q", dimension, line)
+		}
+	}
+}
+
+func lineContaining(t *testing.T, text, want string) string {
+	t.Helper()
+	for _, line := range strings.Split(text, "\n") {
+		if strings.Contains(line, want) {
+			return line
+		}
+	}
+	t.Fatalf("report has no %q line:\n%s", want, text)
+	return ""
+}
+
 // A case that matched its expectation is the normal outcome and should be
 // visible on both kinds, so a reader can tell "failed, as intended" from
 // "failed, unexpectedly" without knowing the fixture names.
