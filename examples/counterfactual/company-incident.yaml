@@ -1,0 +1,39 @@
+# What would have had to be different for the flagship incident to end well.
+#
+# The subject is a company-incident run on the careless fixture under
+# examples/chaos/company-refund-never-committed.yaml: the refund call timed out
+# before committing, the agent assumed it had landed, and the customer was never
+# refunded while the CRM note says they were.
+#
+# Two interventions, because there are exactly two ways that outcome was
+# avoidable, and separating them is the whole value of the exercise:
+#
+#   - reconciling-fixture changes the AGENT. Same fault, same world, but the
+#     fixture reads the charge back before concluding anything, finds nothing
+#     returned and reissues. If this corrects the outcome, the failure was a
+#     decision rather than bad luck.
+#   - refund-committed changes the WORLD. Same agent, but the fault becomes
+#     timeout_after_commit, so the write lands and only its response is lost. If
+#     this corrects the outcome, the careless branch was merely getting away with
+#     it, which is the more uncomfortable reading and the more useful one.
+#
+# Both are expected to correct it, and that is not redundant: it says the failure
+# needed the fault AND the decision together, so removing either one is enough.
+# An intervention that corrects nothing would be the interesting result, and is
+# why these are run rather than asserted.
+#
+# Neither names a call ID. The company fixture numbers its calls by position in
+# the transcript, so pinning one would silently stop matching the moment the
+# trajectory gains a turn, which it did when the inspection read was added.
+version: 1
+interventions:
+  - id: reconciling-fixture
+    kind: model
+    model: fixture-v1
+  - id: refund-committed
+    kind: chaos_policy
+    policy:
+      version: 1
+      rules:
+        - {id: billing-read-outage, type: partial_service_outage, operations: [listCharges, getCharge], times: 1}
+        - {id: refund-response-lost, type: timeout_after_commit, operations: [createRefund], times: 1}
