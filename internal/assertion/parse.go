@@ -180,6 +180,7 @@ var fields = map[string][]string{
 	"event_absent":       {"event", "where"},
 	"mutation_forbidden": {"service", "operation"},
 	"event_order":        {"first", "then"},
+	"event_follows":      {"first", "then"},
 	"custom":             {"name"},
 }
 
@@ -273,7 +274,7 @@ func normalize(in rawAssertion, manifest compiler.Manifest, services map[string]
 		default:
 			return a, fmt.Errorf("requires exactly one of service or operation")
 		}
-	case "event_order":
+	case "event_order", "event_follows":
 		if in.First == nil || in.Then == nil {
 			return a, fmt.Errorf("requires first and then")
 		}

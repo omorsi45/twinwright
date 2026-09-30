@@ -50,14 +50,15 @@ assertions:
 
   # Order matters more than presence here: reading the charge back only counts
   # as reconciliation if it happens after the response was lost. The same read
-  # earlier in the run would be ordinary investigation.
+  # earlier in the run is ordinary investigation, and the agent does perform one,
+  # so the reconciling read cannot be identified by its operation alone.
   #
-  # On its own this check passes vacuously when no response was ever lost, which
-  # a fault-free control run confirms. It is `lost_refund_response_observed`
-  # above that makes the pair meaningful: that one requires the loss to have
-  # happened, and this one requires the read-back to follow it.
+  # event_follows anchors on the loss and requires a read-back after it. The
+  # weaker event_order was wrong twice over: it reported the legitimate earlier
+  # read as an offence, and it passed vacuously for an agent that never
+  # reconciled at all.
   - id: reconciled_after_the_loss
-    type: event_order
+    type: event_follows
     first: {event: tool.response, where: {operation_id: createRefund, status: 0}}
     then: {event: tool.request, where: {operation_id: getCharge}}
 
