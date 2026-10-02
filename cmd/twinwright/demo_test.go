@@ -21,66 +21,77 @@ func demoArgs(dir string) []string {
 	return []string{"demo", "--dir", dir, "--examples", filepath.Join("..", "..", "examples")}
 }
 
-// The order is the argument. A reader following along has to see the incident
-// handled before the trace, the trace before the verdict, the verdict before the
-// replay, and the crash after the clean run has established what correct looks
-// like. A demo that prints the same steps in another order tells a different and
-// less convincing story.
-func TestDemoWalksTheFlagshipStepsInOrder(t *testing.T) {
+// The walkthrough is the most expensive thing in this package: it compiles a
+// four-service world, runs an incident under chaos, crashes workers, and
+// analyses 32 counterfactual interventions. Three separate tests each running it
+// tripled that cost and pushed the package past Go's ten-minute default timeout
+// on a machine without cgo sqlite. One run, three claims about it.
+func TestDemo(t *testing.T) {
+	dir := t.TempDir()
 	var out bytes.Buffer
-	if err := runCLI(demoArgs(t.TempDir()), &out); err != nil {
+	if err := runCLI(demoArgs(dir), &out); err != nil {
 		t.Fatalf("demo failed: %v\n%s", err, out.String())
 	}
 	text := out.String()
 
-	want := []string{
-		"compile the four-service company world",
-		"run the incident under chaos",
-		"inspect what the agent did",
-		"trace the run",
-		"evaluate the declarative assertions",
-		"replay the ledger",
-		"fork from a checkpoint and compare",
-		"crash a worker and watch another take over",
-		"fail the same incident on purpose",
-		"explain the failure with a counterfactual",
-		"block a prompt injection and an over-privileged request",
-	}
-	at := 0
-	for _, step := range want {
-		idx := strings.Index(text[at:], step)
-		if idx < 0 {
-			t.Fatalf("demo never reached %q (or reached it out of order)\nfull output:\n%s", step, text)
+	// The order is the argument. A reader following along has to see the incident
+	// handled before the trace, the trace before the verdict, the verdict before
+	// the replay, and the crash after the clean run has established what correct
+	// looks like. A demo that prints the same steps in another order tells a
+	// different and less convincing story.
+	t.Run("walks the flagship steps in order", func(t *testing.T) {
+		want := []string{
+			"compile the four-service company world",
+			"run the incident under chaos",
+			"inspect what the agent did",
+			"trace the run",
+			"evaluate the declarative assertions",
+			"replay the ledger",
+			"fork from a checkpoint and compare",
+			"crash a worker and watch another take over",
+			"fail the same incident on purpose",
+			"explain the failure with a counterfactual",
+			"block a prompt injection and an over-privileged request",
 		}
-		at += idx + len(step)
-	}
-}
-
-// Each step must print what it read back, not that it ran. These are the
-// specific numbers the project claims, so they are the ones the demo has to
-// produce: a reader who takes nothing else away should still see that the
-// assertions all held, that a second worker took the run over with a higher
-// fence, that the stale worker's commit was refused, and that the ledger still
-// reproduces.
-func TestDemoPrintsEvidenceForEachClaim(t *testing.T) {
-	var out bytes.Buffer
-	if err := runCLI(demoArgs(t.TempDir()), &out); err != nil {
-		t.Fatalf("demo failed: %v\n%s", err, out.String())
-	}
-	text := out.String()
-
-	for _, evidence := range []string{
-		"12/12 assertions", // the flagship's declarative verdict, in full
-		"replay verified",  // the ledger still reproduces after the chaos
-		"fence 1 -> 2",     // the takeover is fenced, not merely retried
-		"stale commit refused",
-		"resourceSpans",  // the trace is real OTLP, not a prose summary
-		"counterfactual", // the failure is explained, not just reported
-	} {
-		if !strings.Contains(text, evidence) {
-			t.Fatalf("demo output is missing the evidence %q\nfull output:\n%s", evidence, text)
+		at := 0
+		for _, step := range want {
+			idx := strings.Index(text[at:], step)
+			if idx < 0 {
+				t.Fatalf("demo never reached %q (or reached it out of order)\nfull output:\n%s", step, text)
+			}
+			at += idx + len(step)
 		}
-	}
+	})
+
+	// Each step must print what it read back, not that it ran. These are the
+	// specific numbers the project claims, so they are the ones the demo has to
+	// produce: a reader who takes nothing else away should still see that the
+	// assertions all held, that a second worker took the run over with a higher
+	// fence, that the stale worker's commit was refused, and that the ledger
+	// still reproduces.
+	t.Run("prints evidence for each claim", func(t *testing.T) {
+		for _, evidence := range []string{
+			"12/12 assertions", // the flagship's declarative verdict, in full
+			"replay verified",  // the ledger still reproduces after the chaos
+			"fence 1 -> 2",     // the takeover is fenced, not merely retried
+			"stale commit refused",
+			"resourceSpans",  // the trace is real OTLP, not a prose summary
+			"counterfactual", // the failure is explained, not just reported
+		} {
+			if !strings.Contains(text, evidence) {
+				t.Fatalf("demo output is missing the evidence %q\nfull output:\n%s", evidence, text)
+			}
+		}
+	})
+
+	// The demo writes its world, database and artefacts into the directory it is
+	// given, so a reader can open them afterwards. Nothing may land in the
+	// repository, which is what makes it safe to run from a clean checkout.
+	t.Run("writes only into its own directory", func(t *testing.T) {
+		if _, err := readManifest(filepath.Join(dir, "company.manifest.json")); err != nil {
+			t.Fatalf("demo must leave its compiled world in the given directory: %v", err)
+		}
+	})
 }
 
 // A step whose evidence check fails must stop the demo and surface a non-zero
@@ -192,16 +203,5 @@ func TestCounterfactualSummaryRejectsAnInterleavedBoundary(t *testing.T) {
 }
 
 // The demo writes its world, database and artefacts into the directory it is
-// given, so a reader can open them afterwards. Nothing may land in the
-// repository, which is what makes it safe to run from a clean checkout.
-func TestDemoWritesOnlyIntoItsOwnDirectory(t *testing.T) {
-	dir := t.TempDir()
-	var out bytes.Buffer
-	if err := runCLI(demoArgs(dir), &out); err != nil {
-		t.Fatalf("demo failed: %v\n%s", err, out.String())
-	}
-	manifest := filepath.Join(dir, "company.manifest.json")
-	if _, err := readManifest(manifest); err != nil {
-		t.Fatalf("demo must leave its compiled world in the given directory: %v", err)
-	}
-}
+// given, and that claim is checked as a subtest of TestDemo above, sharing the
+// single expensive run rather than performing a third one.
