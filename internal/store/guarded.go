@@ -58,8 +58,18 @@ func (s *Store) AppendGuarded(ctx context.Context, fence *Fence, clock Clock, ru
 }
 
 // SaveTurnGuarded persists a model turn under an ownership check.
-func (s *Store) SaveTurnGuarded(ctx context.Context, fence *Fence, clock Clock, runID string, step int, transcript string, response any) error {
+//
+// interruptions are the attempts that produced no turn, recorded in the same
+// transaction as the response they precede. Appending them separately would leave
+// a window where a crash abandons an interruption event under an unanswered
+// request, and the resumed attempt would record its own: the ledger would then
+// hold more interruptions than the recorded turn carries, and replay compares the
+// two.
+func (s *Store) SaveTurnGuarded(ctx context.Context, fence *Fence, clock Clock, runID string, step int, transcript string, response any, interruptions []any) error {
 	return s.guarded(ctx, fence, clock, func(tx *sql.Tx) error {
+		if err := appendInterruptionsTx(ctx, tx, runID, interruptions); err != nil {
+			return err
+		}
 		if err := AppendEventTx(ctx, tx, runID, "model.response", response); err != nil {
 			return err
 		}
@@ -69,8 +79,11 @@ func (s *Store) SaveTurnGuarded(ctx context.Context, fence *Fence, clock Clock, 
 }
 
 // FailModelTurnGuarded records a provider failure under an ownership check.
-func (s *Store) FailModelTurnGuarded(ctx context.Context, fence *Fence, clock Clock, runID string, response any, message string) error {
+func (s *Store) FailModelTurnGuarded(ctx context.Context, fence *Fence, clock Clock, runID string, response any, interruptions []any, message string) error {
 	return s.guarded(ctx, fence, clock, func(tx *sql.Tx) error {
+		if err := appendInterruptionsTx(ctx, tx, runID, interruptions); err != nil {
+			return err
+		}
 		if err := AppendEventTx(ctx, tx, runID, "model.response", response); err != nil {
 			return err
 		}

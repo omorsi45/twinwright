@@ -19,6 +19,8 @@ type OpenAIProvider struct {
 	Model  string
 	URL    string
 	Client *http.Client
+	// Timeout is the per-attempt deadline. Zero means DefaultCallTimeout.
+	Timeout time.Duration
 }
 
 func (p OpenAIProvider) Next(ctx context.Context, task string, history []Message, ops []compiler.Operation) (Message, error) {
@@ -29,9 +31,15 @@ func (p OpenAIProvider) Next(ctx context.Context, task string, history []Message
 	if endpoint == "" {
 		endpoint = "https://api.openai.com/v1/responses"
 	}
+	// The deadline lives on the context rather than on the client, so the request
+	// is cancelled instead of merely abandoned, and a caller that passed its own
+	// deadline still wins.
+	deadline := callDeadline(p.Timeout)
+	attemptCtx, cancel := context.WithTimeout(ctx, deadline)
+	defer cancel()
 	client := p.Client
 	if client == nil {
-		client = &http.Client{Timeout: 90 * time.Second}
+		client = &http.Client{}
 	}
 	guidance := guidanceFor(ops)
 	input := []any{
@@ -70,7 +78,7 @@ func (p OpenAIProvider) Next(ctx context.Context, task string, history []Message
 	if err != nil {
 		return Message{}, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(attemptCtx, http.MethodPost, endpoint, bytes.NewReader(data))
 	if err != nil {
 		return Message{}, err
 	}
@@ -78,12 +86,12 @@ func (p OpenAIProvider) Next(ctx context.Context, task string, history []Message
 	req.Header.Set("Content-Type", "application/json")
 	res, err := client.Do(req)
 	if err != nil {
-		return Message{}, err
+		return Message{}, interrupted(ctx, attemptCtx, deadline, err)
 	}
 	defer res.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(res.Body, 4<<20))
 	if err != nil {
-		return Message{}, err
+		return Message{}, interrupted(ctx, attemptCtx, deadline, err)
 	}
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		text := redact.String(string(body), p.APIKey)
@@ -92,10 +100,27 @@ func (p OpenAIProvider) Next(ctx context.Context, task string, history []Message
 	var wire struct {
 		Output []json.RawMessage `json:"output"`
 		Usage  *Usage            `json:"usage"`
+		// The Responses API reports a cut-short generation with a top-level
+		// status of "incomplete" and the reason nested in incomplete_details,
+		// not with a finish_reason.
+		Status            string `json:"status"`
+		IncompleteDetails *struct {
+			Reason string `json:"reason"`
+		} `json:"incomplete_details"`
 	}
 	if err = json.Unmarshal(body, &wire); err != nil {
 		text := redact.String(string(body), p.APIKey)
 		return Message{RawBody: text}, fmt.Errorf("decode OpenAI response: %w; body=%q", err, text[:min(len(text), 1024)])
+	}
+	if wire.Status == "incomplete" {
+		// Returning before any output item is parsed is the whole point: a
+		// function call cut mid-arguments can still decode into something that
+		// looks like a decision.
+		reason := "unspecified"
+		if wire.IncompleteDetails != nil && wire.IncompleteDetails.Reason != "" {
+			reason = wire.IncompleteDetails.Reason
+		}
+		return Message{RawBody: redact.String(string(body), p.APIKey)}, truncatedCompletion(reason)
 	}
 	message := Message{Role: "assistant", RawOutput: wire.Output, Usage: wire.Usage}
 	var texts []string

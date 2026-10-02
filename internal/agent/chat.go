@@ -21,15 +21,20 @@ type ChatCompletionsProvider struct {
 	Model   string
 	BaseURL string
 	Client  *http.Client
+	// Timeout is the per-attempt deadline. Zero means DefaultCallTimeout.
+	Timeout time.Duration
 }
 
 func (p ChatCompletionsProvider) Next(ctx context.Context, task string, history []Message, ops []compiler.Operation) (Message, error) {
 	if p.Model == "" || p.BaseURL == "" {
 		return Message{}, fmt.Errorf("chat completions model and base URL are required")
 	}
+	deadline := callDeadline(p.Timeout)
+	attemptCtx, cancel := context.WithTimeout(ctx, deadline)
+	defer cancel()
 	client := p.Client
 	if client == nil {
-		client = &http.Client{Timeout: 90 * time.Second}
+		client = &http.Client{}
 	}
 	messages := []any{map[string]any{"role": "system", "content": guidanceFor(ops)}, map[string]any{"role": "user", "content": task}}
 	for _, m := range history {
@@ -80,7 +85,7 @@ func (p ChatCompletionsProvider) Next(ctx context.Context, task string, history 
 		return Message{}, err
 	}
 	endpoint := strings.TrimRight(p.BaseURL, "/") + "/chat/completions"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(attemptCtx, http.MethodPost, endpoint, bytes.NewReader(data))
 	if err != nil {
 		return Message{}, err
 	}
@@ -90,12 +95,12 @@ func (p ChatCompletionsProvider) Next(ctx context.Context, task string, history 
 	req.Header.Set("Content-Type", "application/json")
 	res, err := client.Do(req)
 	if err != nil {
-		return Message{}, err
+		return Message{}, interrupted(ctx, attemptCtx, deadline, err)
 	}
 	defer res.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(res.Body, 4<<20))
 	if err != nil {
-		return Message{}, err
+		return Message{}, interrupted(ctx, attemptCtx, deadline, err)
 	}
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		text := redact.String(string(body), p.APIKey)
@@ -104,6 +109,10 @@ func (p ChatCompletionsProvider) Next(ctx context.Context, task string, history 
 	var wire struct {
 		Choices []struct {
 			Message json.RawMessage `json:"message"`
+			// finish_reason carries the truncation signal here. "length" is
+			// OpenAI's value for the request ceiling; "model_length" is the
+			// second value Mistral's own SDK defines for the model's own limit.
+			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
 		Usage *struct {
 			PromptTokens     int `json:"prompt_tokens"`
@@ -114,6 +123,9 @@ func (p ChatCompletionsProvider) Next(ctx context.Context, task string, history 
 	if err = json.Unmarshal(body, &wire); err != nil || len(wire.Choices) == 0 {
 		text := redact.String(string(body), p.APIKey)
 		return Message{RawBody: text}, fmt.Errorf("decode chat completions response: %v", err)
+	}
+	if reason := wire.Choices[0].FinishReason; reason == "length" || reason == "model_length" {
+		return Message{RawBody: redact.String(string(body), p.APIKey)}, truncatedCompletion(reason)
 	}
 	var message struct {
 		Content   *string `json:"content"`

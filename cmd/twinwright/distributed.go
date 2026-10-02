@@ -123,6 +123,7 @@ func workerCommand(ctx context.Context, args []string, out io.Writer) error {
 	drain := fs.Bool("drain", false, "exit as soon as the queue is empty instead of polling")
 	metricsAddr := fs.String("metrics-addr", "", "serve Prometheus metrics on this address, for example 127.0.0.1:9095 (unauthenticated: bind loopback)")
 	baseURL := fs.String("base-url", os.Getenv("OPENAI_BASE_URL"), "base URL for openai-compatible providers")
+	providerTimeout := providerTimeoutFlag(fs)
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -143,7 +144,7 @@ func workerCommand(ctx context.Context, args []string, out io.Writer) error {
 		if err != nil {
 			return store.Run{}, err
 		}
-		provider, err := selectProvider(run.Provider, run.Model, run.Scenario, *baseURL)
+		provider, err := selectProvider(run.Provider, run.Model, run.Scenario, *baseURL, *providerTimeout)
 		if err != nil {
 			return store.Run{}, err
 		}

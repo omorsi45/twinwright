@@ -696,6 +696,45 @@ The base URL is process configuration, not a ledger column. Resuming an `openai-
 
 Live model behavior is nondeterministic. Twinwright's world state, tool execution, recorded decisions, and deterministic evaluators provide the reproducible boundary around it. When a provider reports token usage, the assistant turn stores it. Error bodies are redacted before they reach the ledger. No live OpenAI, Anthropic, or local-server run has been verified in this repository; scripted fixtures are the tested path. See `docs/adr/0013-agent-providers.md`.
 
+### When a provider hangs or cuts a completion short
+
+Two things can go wrong with a provider call without the response looking wrong.
+
+`--provider-timeout` is the per-attempt deadline, default 90s, available on every
+command that can reach a provider. It arrives on the request's context, so a hung
+call is cancelled rather than abandoned, and a caller's own deadline still wins. It
+cannot be zero: an uncancellable call is what this replaced.
+
+A completion the provider cut off at its token ceiling arrives as HTTP 200 with a
+well-formed body, and the only signal is a metadata field spelled differently on
+each surface: `stop_reason: "max_tokens"` on Anthropic's Messages API,
+`finish_reason: "length"` on an OpenAI-compatible chat completion, and
+`status: "incomplete"` with `incomplete_details.reason: "max_output_tokens"` on the
+Responses API. Twinwright reads it and returns before parsing any output item, so a
+tool call cut mid-arguments never becomes a dispatched action.
+`--model`-specific ceilings are the operator's to raise; `AnthropicProvider`
+takes a configurable `MaxOutputTokens` because the API requires one.
+
+Either failure is retried exactly once and both attempts are recorded as
+`provider.interrupted` events carrying the kind, the attempt number, the vendor's
+verbatim reason and the configured deadline:
+
+```json
+{"kind":"timeout","attempt":1,"deadline_ms":90000}
+{"kind":"truncated","attempt":1,"reason":"length"}
+```
+
+A run that recovers on the second attempt still replays: the interruption is
+recorded on the turn itself, so a replayed run reproduces the same ledger from the
+record instead of needing the provider to fail again. A run where every attempt is
+interrupted fails with the usual `error` event of kind `provider`.
+
+**This detection is only as good as the field.** A surface that omits its stop
+reason, or a gateway that rewrites it to a success value, gives nothing to check
+and the response is treated as complete. There is no content-level alternative: a
+truncated response is a successful request whose content happens to be a fragment.
+See `docs/adr/0027-provider-deadlines-and-truncation.md`.
+
 ## Engineering guarantees
 
 Twinwright is designed around a small set of explicit runtime invariants.

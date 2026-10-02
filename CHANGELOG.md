@@ -11,7 +11,29 @@ database written by a newer build is refused rather than downgraded.
 
 ## Unreleased
 
-Nothing pending.
+### Added
+
+- **Per-attempt provider deadlines, and truncated completions that stop being
+  decisions.** Every provider built an `http.Client` with a flat, hard-coded,
+  uncancellable 90 second timeout, and nothing in the repository read
+  `finish_reason`, `stop_reason` or the Responses API's `incomplete_details`. So a
+  hung call took 90 seconds off the run and left nothing in the ledger, and a
+  completion the provider cut off at its token ceiling was consumed as a complete
+  answer: a tool call cut mid-arguments still decodes into a map, and the runtime
+  would dispatch an action built from half a serialisation. The deadline is now per
+  attempt and carried on the request context, configurable with
+  `--provider-timeout` on every command that can reach a provider and refused if
+  non-positive. Each provider reads its own surface's truncation field and returns
+  before parsing any output item. Either failure is retried exactly once and every
+  attempt is recorded as a `provider.interrupted` event carrying the kind, the
+  attempt number, the vendor's verbatim reason and the configured deadline; a run
+  where every attempt is interrupted fails with the existing `error` event of kind
+  `provider`. The record lives on the turn, so a run that recovered still replays:
+  a replayed run appends the same event from the recorded turn instead of needing
+  the provider to fail again, which is also why the event is in replay's semantic
+  list rather than ignored by it. `AnthropicProvider.MaxOutputTokens` makes the
+  ceiling a truncated completion hit configurable, since raising it is the
+  documented remedy. See ADR 0027.
 
 ## v0.1.0 - 2026-09-30
 
