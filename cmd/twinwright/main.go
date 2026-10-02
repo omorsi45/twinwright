@@ -694,6 +694,7 @@ func runCLI(args []string, out io.Writer) error {
 		baseURL := fs.String("base-url", os.Getenv("OPENAI_BASE_URL"), "base URL for openai-compatible")
 		steps := fs.Int("steps", 20, "maximum model turns for the local simulation")
 		workDir := fs.String("work-dir", "", "local DB directory; defaults to a temp dir")
+		authPath := fs.String("policy", "", "principal policy YAML; proposed actions are screened against it")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
@@ -726,6 +727,20 @@ func runCLI(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
+		// Parsed against this world's manifest, so a policy naming a permission
+		// the world cannot use fails here rather than screening nothing.
+		var screenPolicy *authz.Policy
+		if *authPath != "" {
+			raw, err := os.ReadFile(*authPath)
+			if err != nil {
+				return err
+			}
+			policy, err := authz.Parse(raw, manifest)
+			if err != nil {
+				return err
+			}
+			screenPolicy = &policy
+		}
 		provider, err := selectProvider(*providerName, *model, *scenario, *baseURL)
 		if err != nil {
 			return err
@@ -738,9 +753,10 @@ func runCLI(args []string, out io.Writer) error {
 			}
 			defer os.RemoveAll(dir)
 		}
-		proposed, runID, err := shadow.Simulate(ctx, shadow.SimulateOptions{
+		result, err := shadow.Simulate(ctx, shadow.SimulateOptions{
 			Manifest: manifest, Scenario: *scenario, Task: task, Provider: provider,
 			AgentName: *providerName, Model: *model, Steps: *steps, WorkDir: dir,
+			Policy: screenPolicy,
 		})
 		if err != nil {
 			return err
@@ -749,7 +765,7 @@ func runCLI(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		comparison, err := shadow.Compare(proposed, observed)
+		comparison, err := shadow.CompareWith(result.Proposed, observed, shadow.CompareOptions{Policy: result.Policy})
 		if err != nil {
 			return err
 		}
@@ -760,8 +776,8 @@ func runCLI(args []string, out io.Writer) error {
 			"config_digest": cfg.Digest(),
 			"connector":     cfg.Source.Type,
 			"live_external": false,
-			"run_id":        runID,
-			"proposed":      proposed,
+			"run_id":        result.RunID,
+			"proposed":      result.Proposed,
 			"observed":      observed,
 			"comparison":    comparison,
 		})
