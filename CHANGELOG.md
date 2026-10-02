@@ -11,8 +11,48 @@ database written by a newer build is refused rather than downgraded.
 
 ## Unreleased
 
+Nothing pending.
+
+## v0.1.0 - 2026-09-30
+
+First tagged release. Everything below shipped before the tag; the sections are
+grouped rather than dated individually.
+
 ### Added
 
+- **`twinwright demo`.** One command that walks the whole runtime over the
+  flagship incident in eleven steps: compile the four-service world, run it under
+  chaos, inspect, trace, evaluate assertions, replay, fork and compare, crash a
+  worker and watch another take over, fail the same incident on purpose, explain
+  that failure with a counterfactual, and refuse a prompt injection and an
+  over-privileged request. Each step executes through the CLI's own entry point,
+  so it runs the documented interface rather than a parallel copy, and reads its
+  evidence back out of the run. The walkthrough stops at the first step that
+  cannot produce its evidence, and CI runs it, so a step that stops being true
+  fails the build.
+- **`event_follows` assertion operator.** Anchors on the first matching event and
+  requires a later match, so existence is part of the claim. `event_order`
+  forbids an event from happening early and is therefore satisfied when it never
+  happens at all, which is the right operator for "do not comment before reading
+  the ticket" and the wrong one for "reconciled after the loss".
+- **Negative controls in Bench suites.** `expect: fail` declares a case that is
+  supposed to fail, and a misspelling is refused rather than defaulted. A control
+  that starts passing is reported as an undetected control instead of a green
+  case.
+- **Flagship distributed bench suite.** `examples/bench/flagship.yaml` crashes the
+  first worker at three points of a sixteen-call trajectory on the four-service
+  company world and requires a takeover, a duplicate delivery and a refused stale
+  commit on each. The three shipped distributed cases all used the single-service
+  billing world, so the headline claim had never been measured on the incident the
+  README leads with.
+- **Unsafe company fixture.** Selected by `--model fixture-unsafe-v1`, as the
+  billing world already did. It differs from the safe fixture by one decision,
+  whether a lost write response is taken as proof the write landed, which gives
+  counterfactual analysis a genuinely failing parent on the flagship scenario.
+- **Distributed runtime documentation.** `docs/distributed.md` carries the
+  topology, the crash-and-takeover sequence and the lease lifecycle. Every
+  database identifier in those diagrams is checked against the migration DDL, so
+  a renamed table breaks the diagram that names it. (ADR 0020)
 - **Shadow observation connectors.** A `Connector` boundary decodes a recorded
   external format into observations, so shadow evaluation no longer requires
   hand-transforming an export into Twinwright's own shape first. Three
@@ -28,6 +68,39 @@ database written by a newer build is refused rather than downgraded.
 
 ### Fixed
 
+- **Bench reported a safety figure that covered fewer cases than it claimed.**
+  A case that errored and measured nothing was counted as a compliance failure in
+  every dimension it declared, and the two deliberate negative controls were
+  counted as agent failures, which is how the standard suite reported 25% safety
+  compliance while no agent had misbehaved. Errored cases and declared controls
+  now leave the rate denominators, the report names both counts, and the footer
+  states how many cases a percentage covers. (ADR 0025)
+- **A rate over an empty denominator printed as `0.0%`.** A suite declaring only
+  some dimensions reported `Safety Compliance 0.0%`, which reads as the opposite
+  of the truth: the suite contained no safety case. The text report now labels the
+  absence, and the JSON keeps the numeric field beside a `measured` map so a
+  machine consumer can tell zero-of-zero from zero-of-many. (ADR 0025)
+- **The duplicate-effect rate counted refund rows, not the agent's refunds.** That
+  assumes the agent is the only writer, so the one case built to exercise a
+  concurrent writer was scored as the defect it exists to rule out. The rate now
+  counts refunds the agent itself committed, paired from its own requests and
+  responses in the ledger; a chaos actor's write is recorded as
+  `chaos.actor_mutation` and is not a tool call, so the separation is exact rather
+  than heuristic. (ADR 0025)
+- **A concurrent partial refund made the flagship fixture stop rather than
+  reconcile.** Billing refuses a refund exceeding what a charge still owes, so an
+  amount computed from an invoice read earlier is rejected once another writer has
+  moved money. The fixture re-reads the charge and refunds the remainder, so the
+  customer ends at exactly the charge amount and never above it.
+- **A refusal was read as proof the money was already back.** That holds for a
+  fully refunded charge and fails for a partly refunded one, leaving a customer
+  short while the agent reported the incident resolved, with nothing in its own
+  transcript to show it. The refusal now triggers one fresh read and a refund of
+  what is still outstanding, and a read that contradicts the writer stops the run
+  instead of reporting a resolution.
+- **An unbounded stale-read rule poisoned every later read.** `after_calls` with
+  no `times` models a replica that never catches up, which is a different fault
+  from the single stale observation the test was named for.
 - **Shadow comparison is now deterministic.** `Compare` built its matched and
   residual lists by ranging over maps, so Go's randomised iteration order decided
   the order of a report meant to serve as evidence: two comparisons over

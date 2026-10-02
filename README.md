@@ -112,6 +112,8 @@ isolated executable world
 
 OpenAPI defines **callable shapes**, not business semantics. Twinwright keeps those concerns separate instead of pretending an API schema can infer real application behavior.
 
+That diagram is the single-process picture. Twinwright also runs a fleet of workers over one database, with leases, fencing and takeover after a crash: [docs/distributed.md](docs/distributed.md) has the topology, the takeover sequence and the lease lifecycle.
+
 ## Quick start
 
 ### Requirements
