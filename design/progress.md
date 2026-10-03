@@ -14,7 +14,7 @@ reader cannot get from `git log` in less effort than it takes to read.
 
 ## Where main is
 
-`main` at `0ddd022`, the merge of PR 25. The three features that closed out the
+`main` at `24ceadd`, the merge of PR 26. The three features that closed out the
 roadmap slice landed on 2026-10-02, each on its own branch with its own ADR:
 
 - **23**, `shadow-comparison-depth`: semantic argument divergence, order divergence
@@ -32,18 +32,26 @@ Checkout for this work: `C:/Users/ermaomo/Personal/github/twinwright`.
 
 ## What is open
 
-This change (PR 26) is the last of the four, and nothing else is in flight. The
-roadmap in `briefs/2026-09-25-platform-roadmap.md` is direction, not a claim about
-what is implemented; everything it describes for the current slice is now on `main`.
+Nothing. PRs 23, 24, 25 and 26 all landed on 2026-10-02, and this note is the only
+change after them. The roadmap in `briefs/2026-09-25-platform-roadmap.md` is
+direction, not a claim about what is implemented; everything it describes for the
+current slice is now on `main`.
 
-## Not tagged
+## Tagged
 
-`CHANGELOG.md` has a cut `v0.1.0` section and the repository has no tags. Note that
-`main` has moved past what that section describes: the three features above are
-listed under `Unreleased`, so a `v0.1.0` tag belongs on the commit the section was
-cut at rather than on today's `main`. Tagging is a decision rather than a chore -
-a tag is awkward to retract once anyone has fetched it - so it waits for an explicit
-call.
+`v0.1.0` is an annotated tag on `2334811`, the merge of PR 22, which is the commit
+the changelog's `v0.1.0 - 2026-09-30` section describes. It is deliberately not on
+today's `main`: the three features above landed afterwards and are listed under
+`Unreleased`, so tagging the current tip would have made the tag's contents disagree
+with its own changelog section.
+
+Nothing hard-codes a version. `cmd/twinwright/version.go` reports the module version
+the Go toolchain stamps into the binary and falls back to `dev`, so a build from this
+tag identifies itself without anyone editing a constant. There is no GitHub Release
+object; the tag and the changelog section are the release.
+
+The next tag is a decision for whenever the `Unreleased` entries are cut into a
+version.
 
 ## How to check this yourself
 
