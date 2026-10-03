@@ -34,6 +34,28 @@ database written by a newer build is refused rather than downgraded.
   list rather than ignored by it. `AnthropicProvider.MaxOutputTokens` makes the
   ceiling a truncated completion hit configurable, since raising it is the
   documented remedy. See ADR 0027.
+- **Shadow comparison depth.** The comparison was an exact match on marshalled
+  arguments, so a proposed refund of 500 against an observed refund of 5905 on the
+  same charge was reported as two unrelated entries, one in each only-list, and
+  the reader had to notice they were the same charge. Three classifiers report it
+  instead: `argument_divergences` pairs the leftover actions that address the same
+  resource with the same operation and names the fields that differ with both
+  values; `timing` reports the pairs the two streams sequence differently; and
+  `policy` screens each proposed action against a principal policy given with
+  `shadow --policy` and lists what it would refuse, with the permission, the deny
+  reason and the call number. A refusal stands even when the observed stream
+  contains the same action, flagged `also_observed`, because a human with other
+  permissions doing something is not evidence that this principal may. Resource
+  identity comes from the arguments that name the resource, not from the operation
+  name and not from a call's position, both of which stop identifying anything
+  once a call site is added. Elapsed time is reported as not compared rather than
+  as zero: a local simulation has no wall clock comparable to a recorded stream.
+  Shadow mode stays observe-only, the output stays deterministic and sorted, and
+  it still declares no winner. See ADR 0026.
+- **`authz.Screen`.** The policy decision for one call at a given call number,
+  without consuming one. `authz.Decide` is now `Screen` plus the two things only a
+  live run supplies, the stored policy and the next call number, so a shadow
+  verdict and an enforced one cannot drift apart.
 
 ## v0.1.0 - 2026-09-30
 
