@@ -37,7 +37,9 @@ type Decision struct {
 	Call       int
 }
 
-type querier interface {
+// Querier is the read surface the policy checks need. *sql.Tx satisfies it on
+// the dispatcher's path and *sql.DB satisfies it for a read-only screen.
+type Querier interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
@@ -78,7 +80,7 @@ func (p Policy) broad(behavior string) bool {
 	return false
 }
 
-func load(ctx context.Context, q querier, runID string) (Policy, bool, error) {
+func load(ctx context.Context, q Querier, runID string) (Policy, bool, error) {
 	var encoded, digest string
 	err := q.QueryRowContext(ctx, "SELECT policy_json,digest FROM run_auth WHERE run_id=?", runID).Scan(&encoded, &digest)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -130,6 +132,42 @@ func contains(list []string, value string) bool {
 	return false
 }
 
+// Screen reports what a policy would decide about one call at a given run-local
+// call number, without consuming one.
+//
+// It holds the whole decision, and Decide is Screen plus the two things only a
+// live run can supply: the stored policy and the next call number. Keeping it
+// that way round is the point. A caller that is not executing a run - shadow
+// comparison is the first - needs the same verdict the dispatcher would reach,
+// and a second copy of these rules would keep passing its own tests while
+// drifting away from the enforced ones.
+//
+// q is read-only here: customer scope is resolved by following the world's own
+// relationships, so an accurate verdict needs the world the call would land in.
+func Screen(ctx context.Context, q Querier, worldID string, policy Policy, op compiler.Operation, args map[string]any, call int) (Decision, error) {
+	if !handlerValid(op.Behavior, args) {
+		// The handler would reject these arguments before authorization is
+		// consulted, so no call number is consumed and no permission is named.
+		return Decision{Enforced: true, Invalid: true, Principal: policy.Principal.ID}, nil
+	}
+	decision := Decision{Enforced: true, Principal: policy.Principal.ID, Call: call}
+	permission, mapped := Permission(op)
+	if !mapped {
+		decision.Reason = ReasonUnmapped
+		return decision, nil
+	}
+	decision.Permission = permission
+	if decision.Reason = policy.grantReason(permission, decision.Call); decision.Reason != "" {
+		return decision, nil
+	}
+	var err error
+	if decision.Reason, err = policy.resourceReason(ctx, q, worldID, op.Behavior, args); err != nil {
+		return Decision{}, err
+	}
+	decision.Allowed = decision.Reason == ""
+	return decision, nil
+}
+
 // Decide consumes one call number for a run with a policy. Call it inside the
 // dispatcher transaction, after argument validation and saved-result lookup.
 func Decide(ctx context.Context, tx *sql.Tx, runID, worldID string, op compiler.Operation, args map[string]any) (Decision, error) {
@@ -143,27 +181,14 @@ func Decide(ctx context.Context, tx *sql.Tx, runID, worldID string, op compiler.
 	if _, err := tx.ExecContext(ctx, `INSERT INTO auth_state(run_id,call_index) VALUES(?,1) ON CONFLICT(run_id) DO UPDATE SET call_index=auth_state.call_index+1`, runID); err != nil {
 		return Decision{}, err
 	}
-	decision := Decision{Enforced: true, Principal: policy.Principal.ID}
-	if err := tx.QueryRowContext(ctx, "SELECT call_index FROM auth_state WHERE run_id=?", runID).Scan(&decision.Call); err != nil {
+	var call int
+	if err := tx.QueryRowContext(ctx, "SELECT call_index FROM auth_state WHERE run_id=?", runID).Scan(&call); err != nil {
 		return Decision{}, err
 	}
-	permission, mapped := Permission(op)
-	if !mapped {
-		decision.Reason = ReasonUnmapped
-		return decision, nil
-	}
-	decision.Permission = permission
-	if decision.Reason = policy.grantReason(permission, decision.Call); decision.Reason != "" {
-		return decision, nil
-	}
-	if decision.Reason, err = policy.resourceReason(ctx, tx, worldID, op.Behavior, args); err != nil {
-		return Decision{}, err
-	}
-	decision.Allowed = decision.Reason == ""
-	return decision, nil
+	return Screen(ctx, tx, worldID, policy, op, args, call)
 }
 
-func (p Policy) resourceReason(ctx context.Context, q querier, worldID, behavior string, args map[string]any) (string, error) {
+func (p Policy) resourceReason(ctx context.Context, q Querier, worldID, behavior string, args map[string]any) (string, error) {
 	if p.broad(behavior) {
 		return ReasonBroadSearch, nil
 	}
@@ -198,7 +223,7 @@ func (p Policy) resourceReason(ctx context.Context, q querier, worldID, behavior
 // CustomerOf resolves the customer a call's resource belongs to. scoped is
 // false for behaviors without a customer resource; customer is "" when the
 // resource does not exist in the world.
-func CustomerOf(ctx context.Context, q querier, worldID, behavior string, args map[string]any) (customer string, scoped bool, err error) {
+func CustomerOf(ctx context.Context, q Querier, worldID, behavior string, args map[string]any) (customer string, scoped bool, err error) {
 	lookup, ok := customerLookups[behavior]
 	if !ok {
 		return "", false, nil
@@ -227,7 +252,7 @@ func wholeNumber(value any) (int64, bool) {
 
 // Exposed lists the operations a provider should see before the next call.
 // It only filters by permission; the dispatcher still enforces every call.
-func Exposed(ctx context.Context, q querier, runID string, ops []compiler.Operation) ([]compiler.Operation, error) {
+func Exposed(ctx context.Context, q Querier, runID string, ops []compiler.Operation) ([]compiler.Operation, error) {
 	policy, enforced, err := load(ctx, q, runID)
 	if err != nil || !enforced {
 		return ops, err
