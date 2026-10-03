@@ -80,7 +80,7 @@ func TestPostgresRuntimeParity(t *testing.T) {
 		}
 	}
 
-	if err = s.SaveTurn(ctx, run.ID, 1, `[{"role":"assistant"}]`, map[string]any{"role": "assistant"}); err != nil {
+	if err = s.SaveTurn(ctx, run.ID, 1, `[{"role":"assistant"}]`, map[string]any{"role": "assistant"}, nil); err != nil {
 		t.Fatalf("save turn: %v", err)
 	}
 	reloaded, err := s.Run(ctx, run.ID)

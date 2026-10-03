@@ -273,6 +273,11 @@ func recordedMessages(run store.Run, events []store.Event, forked bool) ([]agent
 				return nil, fmt.Errorf("completion event is not last")
 			}
 		case "execution.paused", "tool.request", "tool.response", "state.mutation", "retry", "chaos.injected", "chaos.actor_mutation", "authorization.allowed", "authorization.denied":
+		case "provider.interrupted":
+			// An attempt that produced no turn, recorded with the response that
+			// followed it. It answers no model request of its own, so it is not
+			// counted here; it is in the semantic list, so the replayed run has
+			// to reproduce it field for field.
 		case "model.request":
 			requests++
 		case "model.response":
@@ -306,7 +311,7 @@ func recordedMessages(run store.Run, events []store.Event, forked bool) ([]agent
 
 func semantic(typ string) bool {
 	switch typ {
-	case "model.request", "model.response", "tool.request", "tool.response", "state.mutation", "error", "retry", "chaos.injected", "chaos.actor_mutation", "authorization.allowed", "authorization.denied", "observation.overridden":
+	case "model.request", "model.response", "tool.request", "tool.response", "state.mutation", "error", "retry", "chaos.injected", "chaos.actor_mutation", "authorization.allowed", "authorization.denied", "observation.overridden", "provider.interrupted":
 		return true
 	}
 	return false
