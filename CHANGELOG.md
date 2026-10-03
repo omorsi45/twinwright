@@ -13,6 +13,28 @@ database written by a newer build is refused rather than downgraded.
 
 ### Added
 
+- **A documented security review, gated by a test.** `SECURITY.md` was the policy
+  and there was no record of anyone having looked: nothing under `docs/` matching
+  secur, audit, review or threat, and no ADR. `docs/security-review.md` is the pass
+  over seven surfaces - the authorization boundary and its eight deny reasons,
+  prompt injection through world content, secret redaction at write time and read
+  time, the container surface, the shadow connector's observe-only guarantee, SQL
+  construction, and what is deliberately not covered - with the file and the test
+  that hold each claim, and with the places where no test holds one written down as
+  limits rather than left out.
+  `cmd/twinwright/security_review_test.go` requires every cited file and test to
+  exist and every surface to be present, and fails outright if it parses nothing,
+  so the document fails the build when it drifts.
+- **Two claims `SECURITY.md` already made are now tested.** "Provider errors are
+  recorded without credentials" is a claim about the ledger and only the provider's
+  return values were asserted, so `TestProviderErrorReachesTheLedgerWithoutTheKey`
+  now runs a real provider against a server that echoes the configured key into a
+  401 and asserts no event payload and no stored transcript carries it. The one
+  interpolated SQL identifier is documented as validated first and nothing
+  exercised that, so `TestSearchPathSchemaRejectsAnythingButAPlainIdentifier`
+  refuses seven hostile `search_path` values with legal controls beside them. A
+  third test covers an `env_file` traversal written in the unnormalised form the
+  existing cases had already normalised away. See ADR 0028.
 - **Per-attempt provider deadlines, and truncated completions that stop being
   decisions.** Every provider built an `http.Client` with a flat, hard-coded,
   uncancellable 90 second timeout, and nothing in the repository read
