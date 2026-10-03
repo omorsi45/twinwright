@@ -25,9 +25,7 @@ Traditional mocks are good at returning canned responses. They are much less use
 - Did the agent refund the right charge?
 - What happens if the refund commits but the response is lost?
 - Can execution resume after a crash without duplicating side effects?
-- Did a transient failure change the agent's trajectory?
-- Can the exact run be reconstructed and verified?
-- What changes if execution forks from an earlier checkpoint?
+- Can the exact run be reconstructed, verified, and forked from an earlier point?
 - Does a malicious ticket comment get the agent to leak another customer's data?
 
 Twinwright provides **isolated, stateful software environments** where those behaviors can be tested without touching production systems.
@@ -38,32 +36,48 @@ Twinwright turns API contracts plus explicit behavior definitions into executabl
 
 A run can:
 
-- create a deterministic world from a seed
-- expose stateful tools to an agent
-- record model and tool activity in an ordered event ledger
-- commit local side effects atomically
-- make repeated tool calls idempotent by stable call ID
-- inject deterministic chaos policies and controlled failures
-- model ambiguous outcomes such as timeout-after-commit
-- run an agent as a principal whose permissions are enforced at runtime, and measure blocked prompt-injection attempts
-- pause and resume durable execution
-- evaluate final state against deterministic ground truth
-- check a run against declarative state, event, authorization, and ordering assertions
-- replay a completed run in an isolated world
-- restore valid execution checkpoints
-- fork a run and change future model or fault conditions
-- compare parent and forked trajectories
-- fork a failed run at candidate events, change one variable per fork, and rank which events the failure was sensitive to
-- summarize a run and render its ledger as a trace, including an OpenTelemetry JSON export
-- drive a run with OpenAI Responses, an OpenAI-compatible chat endpoint, Anthropic Messages, or a scripted fixture
-- run Twinwright Bench, a curated suite with deterministic ground truth and JSON reports
-- experimentally observe recorded actions, simulate proposed local tool calls, and compare them without production writes
-- optionally start experimental local or Docker sidecars when a scenario needs process isolation
-- store runs, ledgers and runtime state in SQLite for local work or PostgreSQL for a fleet, under versioned migrations
-- execute queued runs on several worker processes that own a run under a fenced lease, take over a crashed worker's run, and cannot commit once fenced out (at-least-once delivery with idempotent handlers, never exactly-once)
-- post ledger-derived spans to an OpenTelemetry collector, and serve Prometheus metrics from a worker
+- create a deterministic world from a seed, expose stateful tools to an agent, and
+  record model and tool activity in an ordered event ledger
+- commit local side effects atomically, and make repeated tool calls idempotent by
+  stable call ID
+- inject deterministic chaos policies, controlled failures, and ambiguous outcomes
+  such as timeout-after-commit
+- run an agent as a principal whose permissions are enforced at runtime, and
+  measure blocked prompt-injection attempts
+- pause and resume durable execution, and survive a provider that hangs or cuts a
+  completion short: the per-attempt deadline is configurable, a truncated
+  completion is never consumed as a decision, and every interrupted attempt is
+  recorded as a replayable event
+- evaluate final state against deterministic ground truth, and check a run against
+  declarative state, event, authorization and ordering assertions
+- replay a completed run in an isolated world, restore valid checkpoints, fork a
+  run with changed model or fault conditions, and compare parent and child
+  trajectories
+- fork a failed run at candidate events, change one variable per fork, and rank
+  which events the failure was sensitive to
+- summarize a run and render its ledger as a trace, including an OpenTelemetry
+  JSON export
+- drive a run with OpenAI Responses, an OpenAI-compatible chat endpoint, Anthropic
+  Messages, or a scripted fixture
+- run Twinwright Bench, a curated suite with deterministic ground truth and JSON
+  reports
+- experimentally observe recorded actions, simulate proposed local tool calls, and
+  compare them without production writes, reporting which arguments diverged on a
+  shared resource, where the two streams disagree about order, and which proposed
+  actions a principal policy would refuse
+- optionally start experimental local or Docker sidecars when a scenario needs
+  process isolation
+- store runs, ledgers and runtime state in SQLite for local work or PostgreSQL for
+  a fleet, under versioned migrations
+- execute queued runs on several worker processes that own a run under a fenced
+  lease, take over a crashed worker's run, and cannot commit once fenced out
+  (at-least-once delivery with idempotent handlers, never exactly-once)
+- post ledger-derived spans to an OpenTelemetry collector, and serve Prometheus
+  metrics from a worker
 
-The project includes a minimal billing world and a multi-service company world spanning billing, CRM, ticketing, and messaging.
+The project includes a minimal billing world and a multi-service company world
+spanning billing, CRM, ticketing, and messaging. `docs/security-review.md` is the
+review pass over each internal boundary, with the test that holds every claim.
 
 ## Architecture
 
@@ -94,21 +108,9 @@ flowchart LR
     P --> X[Trajectory Comparison]
 ```
 
-World construction is intentionally explicit:
-
-```text
-OpenAPI contracts
-      +
-behavior bindings
-      +
-world definition
-      ↓
-Twinwright compiler
-      ↓
-versioned world manifest
-      ↓
-isolated executable world
-```
+World construction is intentionally explicit: OpenAPI contracts plus behavior
+bindings plus a world definition go through the Twinwright compiler into a versioned
+world manifest, which is what an isolated executable world is created from.
 
 OpenAPI defines **callable shapes**, not business semantics. Twinwright keeps those concerns separate instead of pretending an API schema can infer real application behavior.
 
@@ -136,7 +138,7 @@ go run ./cmd/twinwright demo --dir ./demo-out
 
 Eleven steps over one incident: compile the four-service world, run it under injected faults, inspect, trace, evaluate, replay, fork and compare, crash a worker and let another take over, then fail the same incident on purpose and explain the failure. Everything is scripted, so it needs no API key, no network and no container runtime.
 
-Every step reads its evidence back out of what it just ran, and the first step that cannot produce its evidence stops the walkthrough with a non-zero exit. That is why CI runs it: a narration that prints a story without checking it would keep telling the happy story after the runtime regressed.
+Every step reads its evidence back out of what it just ran, and the first step that cannot produce its evidence stops the walkthrough with a non-zero exit.
 
 ```text
  5/11 evaluate the declarative assertions
@@ -153,9 +155,7 @@ evidence: 32 interventions against correct_charge_identified, refund_amount_corr
           world's opportunity closes and the agent's does not
 ```
 
-That last line is the project's argument as measured output rather than prose. Event 32 is the refund dispatch and event 73 is the final model decision, after the support notification has already gone out: changing the world stops helping once the write is lost, while changing the agent still corrects the outcome at every later point.
-
-The sections below walk the same ground one command at a time.
+Event 32 is the refund dispatch and event 73 is the final model decision, after the support notification has already gone out: changing the world stops helping once the write is lost, while changing the agent still corrects the outcome at every later point.
 
 Build the multi-service company world:
 
@@ -227,7 +227,7 @@ run R-c4c57a885f400873b62689ff completed 38.655ms
 
 Each model response and each tool call is a span. Inside a tool call, the trace records authorization checks, injected faults, retries, state mutations, and chaos actor writes. The run span carries the scenario, provider, model, principal, world, and, for a fork, the parent run. An evaluation span is added for a completed run and is marked as computed when the trace is read, not as something the agent did.
 
-Tool time is the time inside the local transaction. Model time includes a live provider round trip only when the run used one. Simulated chaos latency is a separate attribute, not added into the wall clock. Token usage is recorded when the provider reports it. Scripted fixtures do not, and no live model run has been verified. The export has not been sent to a collector in this repository.
+Tool time is the time inside the local transaction; model time includes a live provider round trip only when the run used one; simulated chaos latency is a separate attribute rather than part of the wall clock. Token usage is recorded when the provider reports it, which scripted fixtures do not. No live model run has been verified, and the export has not been sent to a collector in this repository.
 
 Provider error text is redacted before it is stored: the configured API key, `sk-` API keys, and bearer tokens. `trace` and `inspect` apply the same redactor to error messages already in a ledger, including `OPENAI_API_KEY` when it is set. Like `replay` and `evaluate`, they open the database read-only and still need a writable directory, because SQLite in WAL mode creates `-wal` and `-shm` files.
 
@@ -299,7 +299,7 @@ go run ./cmd/twinwright fork <run-id> \
   --db company.db
 ```
 
-The child receives an isolated world and explicit lineage back to the parent. Everything before the fork remains fixed while future execution can change.
+The child receives an isolated world and explicit lineage back to the parent.
 
 For example, continue with a different fault configuration or model:
 
@@ -319,8 +319,6 @@ go run ./cmd/twinwright compare <parent-run-id> <child-run-id> \
   --db company.db
 ```
 
-This makes Twinwright useful not only for testing whether an agent failed, but for investigating **how changes in execution conditions alter downstream behavior**.
-
 ## Deterministic chaos policies
 
 Use `--chaos` to attach a validated, versioned YAML policy to a new run. The policy is persisted with the run and reused on resume and replay. Forks inherit the policy and its counters at the selected checkpoint, or can replace it for the child.
@@ -337,9 +335,9 @@ go run ./cmd/twinwright inspect <run-id>
 go run ./cmd/twinwright replay <run-id>
 ```
 
-The ambiguous-commit scenario models a difficult distributed-systems failure: a write commits successfully, but the response is lost. A safe agent verifies state before retrying. An unsafe agent retries with a new call ID and can duplicate the side effect.
+The ambiguous-commit scenario models a difficult distributed-systems failure: a write commits successfully, but the response is lost. An unsafe agent retries with a new call ID and can duplicate the side effect.
 
-Twinwright separates deterministic evaluation from failure analysis. The run can report infrastructure faults, unsafe retries, recovery success, and agent failure without allowing a later state check to erase evidence of an unsafe action.
+The run can report infrastructure faults, unsafe retries, recovery success, and agent failure without allowing a later state check to erase evidence of an unsafe action.
 
 Supported policy effects include:
 
@@ -393,7 +391,7 @@ See `examples/security/` and `docs/adr/0009-principal-authorization.md`.
 
 ## Counterfactual analysis
 
-A failed run shows what happened. `counterfactual` asks which earlier events the failure depended on. It forks a completed, failed run at candidate events, changes exactly one controlled variable in each fork, executes the child with the run's provider, and judges it with the same success definition as the parent.
+`counterfactual` asks which earlier events the failure depended on. It forks a completed, failed run at candidate events, changes exactly one controlled variable in each fork, executes the child with the run's provider, and judges it with the same success definition as the parent.
 
 ```bash
 go run ./cmd/twinwright build examples/billing/openapi.yaml
@@ -490,40 +488,35 @@ as auditable as a local one.
 ### Semantics
 
 Delivery is **at-least-once**. A crashed worker's run is taken over and the same
-work is attempted again. Exactly-once delivery is not claimed anywhere, because
-it is not achievable across a process boundary and a database. Duplicates are
-safe for two independent reasons:
+work is attempted again. Exactly-once is not claimed anywhere, because it is not
+achievable across a process boundary and a database. Duplicates are safe for two
+independent reasons:
 
-- **Idempotency by call ID.** A repeated tool call returns the result recorded
-  the first time and commits nothing. The same call ID with different arguments
-  is refused rather than answered from the cache.
+- **Idempotency by call ID.** A repeated tool call returns the result recorded the
+  first time and commits nothing. The same call ID with different arguments is
+  refused rather than answered from the cache.
 - **Fencing.** Every durable write proves, inside the same transaction as the
-  write, that this worker still owns the run. A worker that stalled past its
-  lease cannot commit after a newer worker took over.
+  write, that this worker still owns the run. A worker that stalled past its lease
+  cannot commit after a newer worker took over.
 
 Every lease acquisition raises the fence, including re-acquisition by the same
-owner, so a worker that lost contact and reconnected cannot reuse an old token.
-The check rejects both a token below the highest that has committed - which needs
-no clock and is therefore immune to clock skew - and a lease that has expired.
-Losing a renewal cancels execution immediately rather than spending model calls
-on work the worker can no longer commit.
+owner, so a reconnected worker cannot reuse an old token. The check rejects both a
+token below the highest that has committed - which needs no clock and is therefore
+immune to clock skew - and an expired lease. Losing a renewal cancels execution
+immediately rather than spending model calls on work that can no longer commit.
 
 A run is claimable when it is runnable, or marked leased with an expired lease,
-which is what a killed process leaves behind. Recovery needs no janitor process.
-On PostgreSQL the candidate row is taken with `FOR UPDATE ... SKIP LOCKED`, so
+which is what a killed process leaves behind, so recovery needs no janitor. On
+PostgreSQL the candidate row is taken with `FOR UPDATE ... SKIP LOCKED`, so
 simultaneous pollers take different runs.
 
 Ownership history is recorded in `run_ownership_log`, **not** in the run ledger.
-Fork lineage and checkpoint reconstruction digest the ledger prefix, so putting
-ownership there would make an identical agent trajectory digest differently
-depending on which worker ran it. Keeping the ledger purely about the agent is
-what lets every recovered run still replay, which the crash-recovery tests
-assert by replaying each one.
+Keeping the ledger purely about the agent is what lets every
+recovered run still replay, which the crash-recovery tests assert by replaying each
+one.
 
 See `docs/adr/0019-postgres-storage.md` and
-`docs/adr/0020-multi-worker-runtime.md`. ADR 0020 supersedes ADR 0018: the
-standalone lease store it described lived in a separate database, where a fence
-cannot be checked in the same transaction as the write it protects.
+`docs/adr/0020-multi-worker-runtime.md`.
 
 ### Storage
 
@@ -560,8 +553,7 @@ A worker exposes Prometheus metrics with `--metrics-addr`: in-process counters
 for claims, dispositions, takeovers, fencing rejections and execution seconds,
 plus gauges read from the database at scrape time for queue depth, run statuses,
 tool calls, retries, authorization denials, chaos injections and ownership
-transitions. The ledger-derived gauges are queried rather than separately
-maintained, so they cannot disagree with the ledger. **The endpoint is
+transitions. **The endpoint is
 unauthenticated and off by default: bind it to loopback.** See
 `docs/adr/0021-otlp-and-metrics.md`.
 
@@ -591,88 +583,75 @@ config's `source.type` selects one:
 | `audit_log` | a sanitized audit export: `timestamp`, `actor`, `action`, `parameters`, `outcome` |
 | `recorded_http` | captured HTTP interactions: `at`, `method`, `path`, `operation_id`, `query`, `body`, `status`, `actor` |
 
-Decoding is a pure function of bytes. A connector opens no socket, resolves no
-host and holds no credential, so a crafted observation file cannot turn shadow
-mode into a request forwarder. The transport is a file confined under the
-examples root, enforced on both the config path and the loader, and capped at
-8 MiB. Unknown fields are rejected rather than ignored, because a misspelled key
-would drop real observed behaviour and leave a report looking clean.
-
-An attempt that did not take effect is not an observed action: a denied audit
-entry and a 4xx or 5xx response are dropped, so the comparison cannot accuse the
-agent of missing a step that never happened. `recorded_http` requires an explicit
-`operation_id` and will not infer one from method and path, because a report that
-names the wrong operation is worse than one that refuses to load.
+Decoding is a pure function of bytes. A connector opens no socket, resolves no host
+and holds no credential, so a crafted observation file cannot turn shadow mode into
+a request forwarder. The transport is a file confined under the examples root,
+enforced on both the config path and the loader, and capped at 8 MiB. Unknown
+fields are rejected rather than ignored, because a misspelled key would drop real
+observed behaviour and leave a report looking clean. An attempt that did not take
+effect is not an observed action: a denied audit entry and a 4xx or 5xx response
+are dropped, so the comparison cannot accuse the agent of missing a step that never
+happened. `recorded_http` requires an explicit `operation_id` rather than inferring
+one from method and path, because a report that names the wrong operation is worse
+than one that refuses to load.
 
 **No connector has been tested against a live external system.** Every test runs
 against fixture bytes, and the JSON output carries `live_external: false` so a
-report cannot be mistaken for evidence of one. A webhook or event-stream
-transport is deliberately absent: a listening socket taking unauthenticated
-input is a different security posture from reading a file and needs its own ADR.
+report cannot be mistaken for evidence of one. A webhook or event-stream transport
+is deliberately absent: a listening socket taking unauthenticated input is a
+different security posture from reading a file and needs its own ADR.
 
 The JSON output always sets `experimental: true` and names the `connector` that
-produced the observations. Secret env names listed in the config are never
-printed. See `docs/adr/0015-shadow-mode.md` and `docs/adr/0022-shadow-connectors.md`.
+produced the observations. Secret env names listed in the config are never printed.
+See `docs/adr/0015-shadow-mode.md` and `docs/adr/0022-shadow-connectors.md`.
 
 ### What the comparison reports
 
 Matched, only-proposed and only-observed answer "did the same thing happen". On
-their own they cannot express a run that did broadly the same work differently,
-which is where the interesting divergence is: a proposed refund of 500 against an
-observed refund of 5905 on one charge came back as two unrelated entries, one in
-each only-list, leaving the reader to notice they were the same charge.
+their own they cannot express a run that did broadly the same work differently: a
+proposed refund of 500 against an observed refund of 5905 on one charge came back as
+two unrelated entries, one in each only-list, leaving the reader to notice they were
+the same charge. Three classifiers report that instead.
 
-Three classifiers report that instead.
-
-- **`argument_divergences`** pairs the leftover actions that are the same
-  operation on the same resource and names the fields that differ, with both
-  values and a presence flag for each side. Resource identity comes from the
-  arguments that name the resource (`id`, or a key ending in `_id`, carrying a
-  non-empty string), not from the operation name and not from a call's position:
-  a refund of `CH-2` and a refund of `CH-9` are different charges, and adding one
-  call site renumbers every position after it. A call that identifies no resource
-  stays in the only-lists rather than being paired on a guess.
-- **`timing`** reports the pairs the two streams sequence differently. Order is
-  the timing property both sides carry; elapsed time is not, because a local
-  simulation's wall clock has nothing to do with how long a human took. The
-  report says so in `timing.elapsed_gap` instead of printing a zero, and carries
-  `timing.observed_timestamps` so a reader can see how many observations had a
-  timestamp at all.
-- **`policy`** screens each proposed action against a principal policy supplied
-  with `--policy` and lists what it would refuse, with the permission, the stable
-  deny reason and the run-local call number. A refusal stands even when the
-  observed stream contains the same action, flagged `also_observed: true`: a human
-  with other permissions doing something is not evidence that this principal may.
-  The screen calls the same `internal/authz` entry point the dispatcher's
+- **`argument_divergences`** pairs the leftover actions that are the same operation
+  on the same resource and names the fields that differ, with both values and a
+  presence flag per side. Resource identity comes from the arguments that name the
+  resource (`id`, or a key ending in `_id`, carrying a non-empty string), not from
+  the operation name and not from a call's position: a refund of `CH-2` and one of
+  `CH-9` are different charges, and adding a call site renumbers every position
+  after it. A call that identifies no resource stays in the only-lists rather than
+  being paired on a guess.
+- **`timing`** reports the pairs the two streams sequence differently. Order is the
+  timing property both sides carry; elapsed time is not, because a local
+  simulation's wall clock has nothing to do with how long a human took. The report
+  says so in `timing.elapsed_gap` instead of printing a zero, and carries
+  `timing.observed_timestamps` as the denominator.
+- **`policy`** screens each proposed action against a principal policy supplied with
+  `--policy` and lists what it would refuse, with the permission, the stable deny
+  reason and the run-local call number. A refusal stands even when the observed
+  stream contains the same action, flagged `also_observed: true`: a human with other
+  permissions doing something is not evidence that this principal may. The screen
+  calls the same `internal/authz` entry point the dispatcher's
   enforcement delegates to, so a shadow verdict cannot drift away from an enforced
   one, and it reads the world without executing or writing anything.
 
-```bash
-go run ./cmd/twinwright shadow \
-  --config examples/shadow/observe-only.yaml \
-  --examples examples \
-  --manifest twinwright.manifest.json \
-  --scenario duplicate-charge \
-  --agent scripted \
-  --policy examples/security/billing-support-policy.yaml
-```
-
-A policy is parsed against the world's own manifest, so one naming a permission
-the world has no operation for is refused here rather than screening nothing.
-`examples/security/support-policy.yaml` is the four-service version;
-`billing-support-policy.yaml` is the same principal scoped to the billing
-examples. Neither grants `refunds.create`, which is what makes the fixture's
-proposed refund a finding.
+Add `--policy examples/security/billing-support-policy.yaml` to the command above to
+turn the screen on. A policy is parsed against the world's own manifest, so one
+naming a permission the world has no operation for is refused here rather than
+screening nothing. `examples/security/support-policy.yaml` is the four-service
+version; `billing-support-policy.yaml` is the same principal scoped to the billing
+examples. Neither grants `refunds.create`, which is what makes the fixture's proposed
+refund a finding.
 
 Without `--policy` the report carries `policy.evaluated: false` and the reason,
 because an empty refusal list reads exactly like a clean screen. The comparison
-remains deterministic and sorted, and still declares no winner: the observed
-stream is what happened, not what should have happened. See
+remains deterministic and sorted, and still declares no winner: the observed stream
+is what happened, not what should have happened. See
 `docs/adr/0026-shadow-comparison-depth.md`.
 
 ## Twinwright Bench
 
-`twinwright bench` runs a curated suite of serious scenarios with deterministic judges (scenario evaluation or assertion files). The first public suite is `examples/bench/standard.yaml`: 20 cases across reliability, reasoning, safety, security, recovery, long-horizon, distributed, and counterfactual categories. It is not a thousand trivial templates.
+`twinwright bench` runs a curated suite of serious scenarios with deterministic judges (scenario evaluation or assertion files). The first public suite is `examples/bench/standard.yaml`: 20 cases across reliability, reasoning, safety, security, recovery, long-horizon, distributed, and counterfactual categories.
 
 A case runs in one of three modes. `local` (the default) executes the agent in process. `distributed` executes it through the worker runtime and kills the first worker at a named model turn (`crash_at`), then reports what the runtime did about it: whether a takeover happened, the fencing tokens before and after, how many times the run was delivered, whether a stale commit was refused, and whether the recovered ledger still verifies under replay. `counterfactual` runs a case whose parent is expected to fail and reports which single intervention would have corrected the outcome.
 
@@ -690,12 +669,10 @@ The command prints a short measurement summary and emits the full JSON report (a
 
 ### What the rates are computed over
 
-A percentage is only honest if its denominator is stated, so the report says which cases it covers and why the others are absent.
-
 Two kinds of case are deliberately excluded from every rate and reported as their own counts instead:
 
-- **Negative controls**, declared `expect: fail` in the suite. Their fixture or policy is deliberately wrong (`fixture-unsafe-v1` blind-retries a write whose response was lost; the over-privileged principal grants what an injected instruction asks for). Such a case exists to prove the suite still catches a known-bad behaviour, so its failure is the benchmark working. Averaging it into safety compliance would report that as an agent defect, which is what made an earlier build of this suite read `Safety Compliance 25%`. Controls are summarised as `Negative Controls 2/2 detected`; the dangerous outcome for a control is the quiet one, where it starts passing and the suite goes green having caught nothing. A misspelled `expect` value is refused rather than defaulted, since a control silently demoted to an ordinary case would be invisible.
-- **Errored cases**, which reached no verdict. Scoring one would report a stalled harness as an agent failure across every dimension it declared. They appear as `Errored Cases`.
+- **Negative controls**, declared `expect: fail` in the suite. Their fixture or policy is deliberately wrong (`fixture-unsafe-v1` blind-retries a write whose response was lost; the over-privileged principal grants what an injected instruction asks for). Averaging it into safety compliance would report that as an agent defect, which is what made an earlier build of this suite read `Safety Compliance 25%`. Controls are summarised as `Negative Controls 2/2 detected`; the dangerous outcome for a control is the quiet one, where it starts passing and the suite goes green having caught nothing. A misspelled `expect` value is refused rather than defaulted, since a control silently demoted to an ordinary case would be invisible.
+- **Errored cases**, which reached no verdict. They appear as `Errored Cases`.
 
 The footer names the surviving denominator (`Rates cover 18 of 20 cases`) whenever anything was excluded.
 
@@ -723,38 +700,22 @@ Default `--agent` is `scripted` so CI stays deterministic. Live agents are allow
 | `anthropic` | Anthropic Messages API | `ANTHROPIC_API_KEY`; model required via `--model` or `ANTHROPIC_MODEL` (no invented default) |
 
 ```bash
-export OPENAI_API_KEY="..."
+export OPENAI_API_KEY="..."            # or ANTHROPIC_API_KEY, or OPENAI_BASE_URL
 go run ./cmd/twinwright run company-incident \
   --agent openai \
   --manifest company.world.manifest.json \
   --db company.db
 ```
 
-```bash
-export OPENAI_BASE_URL="http://127.0.0.1:11434/v1"
-go run ./cmd/twinwright run duplicate-charge \
-  --agent openai-compatible \
-  --model local-model \
-  --manifest twinwright.manifest.json \
-  --db twinwright.db
-```
+Swap `--agent` for `anthropic` or `openai-compatible` and supply that row's
+credentials; `openai-compatible` also needs `--model` and a base URL. The base URL
+is process configuration, not a ledger column, so resuming such a run needs
+`--base-url` or `OPENAI_BASE_URL` again. The stored provider name and model are what
+replay and traces show.
 
-```bash
-export ANTHROPIC_API_KEY="..."
-export ANTHROPIC_MODEL="claude-..."
-go run ./cmd/twinwright run company-incident \
-  --agent anthropic \
-  --manifest company.world.manifest.json \
-  --db company.db
-```
-
-The base URL is process configuration, not a ledger column. Resuming an `openai-compatible` run needs `--base-url` or `OPENAI_BASE_URL` again. The stored provider name and model are what replay and traces show.
-
-Live model behavior is nondeterministic. Twinwright's world state, tool execution, recorded decisions, and deterministic evaluators provide the reproducible boundary around it. When a provider reports token usage, the assistant turn stores it. Error bodies are redacted before they reach the ledger. No live OpenAI, Anthropic, or local-server run has been verified in this repository; scripted fixtures are the tested path. See `docs/adr/0013-agent-providers.md`.
+Twinwright's world state, tool execution, recorded decisions, and deterministic evaluators provide the reproducible boundary around it. When a provider reports token usage, the assistant turn stores it. Error bodies are redacted before they reach the ledger. No live OpenAI, Anthropic, or local-server run has been verified in this repository; scripted fixtures are the tested path. See `docs/adr/0013-agent-providers.md`.
 
 ### When a provider hangs or cuts a completion short
-
-Two things can go wrong with a provider call without the response looking wrong.
 
 `--provider-timeout` is the per-attempt deadline, default 90s, available on every
 command that can reach a provider. It arrives on the request's context, so a hung
@@ -792,8 +753,6 @@ truncated response is a successful request whose content happens to be a fragmen
 See `docs/adr/0027-provider-deadlines-and-truncation.md`.
 
 ## Engineering guarantees
-
-Twinwright is designed around a small set of explicit runtime invariants.
 
 ### Isolated worlds
 
@@ -882,7 +841,7 @@ services:
     bindings: services/messaging.bindings.yaml
 ```
 
-Behavior remains explicit and registered in Go. This keeps simulations auditable and prevents the compiler from inventing business semantics that are not present in an API contract.
+Behavior remains explicit and registered in Go.
 
 See `examples/company/world.yaml` and the architecture decision records in `docs/adr/`.
 
@@ -907,8 +866,6 @@ execution.forked
 observation.overridden
 ```
 
-Stable event ordering and persisted tool results provide the foundation for recovery, replay, checkpoint reconstruction, forking, chaos analysis, and trajectory comparison.
-
 ## Repository layout
 
 ```text
@@ -916,50 +873,40 @@ cmd/twinwright/       CLI
 
 internal/
   agent/              provider boundary and durable runner
-  assertion/          declarative run assertions
-  authz/              principal policies and authorization decisions
-  behavior/           behavior registry
-  bench/              suite parser, case runner, and report aggregates
-  billing/            billing simulation
-  crm/                CRM simulation
-  ticketing/          ticketing simulation
-  messaging/          messaging simulation
-  compiler/           API and world compilation
   dispatch/           validated tool execution
+  compiler/           API and world compilation
+  behavior/           behavior registry
+  billing/ crm/ ticketing/ messaging/   the four service simulations
+  store/              SQLite and PostgreSQL state, ledger, queue, leases
+  pgsql/ pgtest/      PostgreSQL driver wrapper, placeholder translation, test helpers
+  worker/             multi-worker claim, lease renewal and takeover loop
   chaos/              deterministic fault policies and state
-  store/              SQLite state, ledger, and transactions
+  authz/              principal policies and authorization decisions
   eval/               deterministic scenario evaluation and run analysis
+  assertion/          declarative run assertions
   replay/             verification replay
   checkpoint/         checkpoint discovery and reconstruction
   fork/               fork execution and trajectory comparison
   counterfactual/     intervention analysis over forks
+  bench/              suite parser, case runner, and report aggregates
   shadow/             experimental observe-only shadow simulation
   container/          optional local or Docker sidecar executor
-  worker/             multi-worker claim, lease renewal and takeover loop
-metrics/            Prometheus exposition from counters and the ledger
-pgsql/              PostgreSQL driver wrapper and placeholder translation
-pgtest/             shared PostgreSQL test-support helpers
+  trace/ metrics/     ledger traces, OTLP export, Prometheus exposition
   redact/             secret redaction before storage or display
-  trace/              ledger traces, text trees, and OTLP export
 
 examples/
-  billing/            minimal stateful reference world
-  company/            multi-service company world
-  chaos/              deterministic failure policies
-  security/           principal policies for the prompt-injection scenario
-  assertions/         declarative assertions for the example scenarios
-  counterfactual/     intervention files for the example failures
-  bench/              Twinwright Bench suite definitions
-  shadow/             experimental observe-only configs and sample observations
-  container/          experimental sidecar configs
+  billing/ company/   the minimal reference world and the four-service world
+  chaos/ security/    failure policies and principal policies
+  assertions/ counterfactual/ bench/   assertion files, intervention files, suites
+  shadow/ container/  observe-only configs with sample observations, sidecar configs
 
 docs/adr/             architecture decision records
+docs/distributed.md   fleet topology, takeover sequence, lease lifecycle
 docs/performance.md   measured runtime figures and the machine that produced them
+docs/security-review.md   the review pass, with the test behind each claim
 ```
 
 ## Design philosophy
-
-Twinwright favors difficult systems guarantees over feature count.
 
 The project intentionally prioritizes:
 
@@ -1008,64 +955,25 @@ docker compose up -d && make verify-full   # adds the PostgreSQL integration tes
 ```
 
 PostgreSQL tests are opt-in behind `TWINWRIGHT_TEST_POSTGRES_DSN` and skip when
-it is unset, so the default suite stays hermetic. They run against a real server
-rather than a mock: the dialect differences they exist to catch - integer widths,
-aggregate grouping, type strictness, upsert column ambiguity - do not appear
-against a fake.
+it is unset, so the default suite stays hermetic.
 
 `CONTRIBUTING.md` describes what a change is expected to prove.
 
-Run the original billing reference example:
-
-```bash
-go run ./cmd/twinwright build examples/billing/openapi.yaml
-
-go run ./cmd/twinwright run duplicate-charge \
-  --agent scripted \
-  --seed 42 \
-  --fault listCharges \
-  --steps 3
-```
-
-Resume and inspect:
-
-```bash
-go run ./cmd/twinwright resume <run-id> --agent scripted
-go run ./cmd/twinwright inspect <run-id>
-go run ./cmd/twinwright replay <run-id>
-```
-
-The default SQLite database is `twinwright.db` and is ignored by Git.
+The minimal billing world is the smaller reference example: `build` it, `run`
+`duplicate-charge` with `--fault listCharges`, then `resume`, `inspect` and `replay`
+it exactly as the sections above do for the company world. The default SQLite
+database is `twinwright.db` and is ignored by Git.
 
 ## Architecture decisions
 
-Major runtime contracts are documented as ADRs under `docs/adr/`, including:
-
-- Go and SQLite runtime
-- OpenAPI plus explicit behavior bindings
-- atomic tool effects and checkpoints
-- isolated verification replay
-- multi-service company world
-- versioned world definitions
-- checkpoint reconstruction and execution forks
-- deterministic chaos policies and ambiguous-commit recovery
-- runtime principal authorization
-- declarative run assertions
-- counterfactual intervention analysis and observation overrides
-- ledger traces and provider error redaction
-- multiple agent providers behind one internal message shape
-- Twinwright Bench suite runner and report comparison
-- experimental observe-only shadow mode
-- optional local or Docker sidecars
-- single-node guarantees frozen as the contract a distributed runtime had to preserve
-- PostgreSQL-backed storage with versioned migrations
-- multi-worker execution with fenced run ownership and crash recovery
-- OTLP delivery to a collector, and metrics split between in-process counters and ledger-derived gauges
-- shadow observation connectors for recorded external formats
-- distributed and counterfactual benchmark modes, with a crash at a named model turn and a controlled clock
-- container lifecycle hardening: readiness gating, bounded startup, cleanup with captured logs, graceful stop
-
-The ADRs document not only what Twinwright does, but why the implementation makes those tradeoffs.
+Every runtime contract is documented as an ADR under `docs/adr/`, 28 of them, each
+recording what was decided, what was rejected, and the limits that came with it.
+The ones that constrain everything else: `0001` Go and SQLite, `0002` OpenAPI plus
+explicit behavior bindings, `0003` atomic tool effects and checkpoints, `0004`
+isolated verification replay, `0009` runtime principal authorization, `0017` the
+single-node guarantees frozen as the contract a distributed runtime had to preserve,
+`0020` multi-worker execution with fenced ownership, `0025` honest bench
+aggregation, and `0028` the security review.
 
 ## Safety and scope
 
@@ -1077,6 +985,14 @@ Principals and permissions are local, deterministic simulations with no external
 
 Keep provider credentials outside the repository.
 
+`SECURITY.md` is the policy and how to report a vulnerability.
+[docs/security-review.md](docs/security-review.md) is the review pass over each
+internal boundary - the authorization boundary and its deny reasons, prompt
+injection through world content, secret redaction, the container surface, the
+shadow connector, SQL construction - naming the test that holds every claim and the
+places where no test holds one. A test fails the build if the document cites a file
+or test that no longer exists.
+
 ## Current limitations
 
 Stated plainly, because a testing harness that overstates itself is worse than
@@ -1085,7 +1001,10 @@ one that admits a gap.
 - **Live provider runs are unverified in this repository.** The OpenAI,
   OpenAI-compatible and Anthropic adapters are exercised against deterministic
   local HTTP servers. No test here has called a paid API, so no claim is made
-  about live-provider behaviour beyond adapter conformance.
+  about live-provider behaviour beyond adapter conformance. Truncation detection
+  depends on the provider sending its stop reason: a surface that omits it, or a
+  gateway that rewrites it to a success value, gives nothing to check and the
+  response is treated as complete.
 - **Container execution is experimental, and its live-daemon evidence comes from
   CI rather than from a development host.** The lifecycle is hardened: readiness
   gating, bounded startup, cleanup with captured logs on failure, graceful stop,
@@ -1099,9 +1018,10 @@ one that admits a gap.
   transport: a listening socket taking unauthenticated input is a different
   threat model, not another registry entry. Write mode is rejected by design, and
   no live external integration has been tested, which the CLI reports as
-  `live_external: false`. Comparison is exact-match on operation and arguments;
-  semantic argument divergence, timing and policy violations are not yet
-  computed.
+  `live_external: false`. The comparison pairs a diverging action only when both
+  sides name the same resource, so a call carrying no identifying argument stays an
+  unpaired residual rather than being guessed at, and elapsed time is reported as
+  not compared rather than as zero.
 - **The distributed runtime is a multi-worker fleet over one database.** It is not
   multi-region, has no broker, and does not shard. A worker is a process that
   needs a DSN; how it is scheduled is an operational choice.
