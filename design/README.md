@@ -1,6 +1,6 @@
 # Twinwright personal design workspace
 
-This folder is ignored by Git and kept in Omar's local Twinwright checkout. Public architectural decisions remain in `docs/adr/`.
+This folder holds the private working notes for Twinwright. It is tracked in Git, despite what this line used to claim: `git ls-files design` lists every file in it, and nothing here is ignored. Treat it accordingly. Public architectural decisions remain in `docs/adr/`.
 
 ## Briefs
 
@@ -35,12 +35,12 @@ This folder is ignored by Git and kept in Omar's local Twinwright checkout. Publ
 - `superpowers/plans/2026-09-25-bench.md`: Milestone 11 implementation plan, completed on PR 10.
 - `superpowers/specs/2026-09-25-shadow-design.md`: Milestone 12 experimental shadow mode design.
 - `superpowers/plans/2026-09-25-shadow.md`: Milestone 12 implementation plan.
-- `progress.md`: current branch, PR, checks, limitations, and next work. Read this before continuing after compaction.
+- `progress.md`: a dated snapshot of where main is, what is open, how to verify it, and the limits worth carrying forward. It is not a source of truth; when it and the repository disagree, the repository is right.
 
 ## Handoff
 
-- Milestone 10: https://github.com/omorsi45/twinwright/pull/9. Milestone 11: https://github.com/omorsi45/twinwright/pull/10. Continue Milestone 12 from the shadow spec/plan.
+- Milestone 10: https://github.com/omorsi45/twinwright/pull/9. Milestone 11: https://github.com/omorsi45/twinwright/pull/10. Those are historical; `progress.md` names what is open now.
 
-The latest brief is a roadmap, not proof that its later milestones are implemented. Check the repository, open PRs, and public README for current behavior before starting the next milestone. Main contains Milestones 1 through 9 (`44d25e1`). Milestones 10 through 12 are open PRs (9, 10, 11). Milestones 13 and 14 have private design notes only. A live OpenAI run has not yet been verified with a key.
+The latest brief is a roadmap, not proof that its later milestones are implemented. Check the repository, the open PRs and the public README for current behavior before starting new work. `progress.md` carries the current state and is dated; the roadmap carries direction. A live provider run has still not been verified with a key.
 
 - superpowers/specs/2026-09-25-distributed-foundation-design.md / plans/2026-09-25-distributed-foundation.md — Milestone 14 lease fencing foundation (PR 13).
