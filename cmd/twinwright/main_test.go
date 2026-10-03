@@ -1398,6 +1398,47 @@ func TestShadowCLIObserveOnly(t *testing.T) {
 	}
 }
 
+// Without a policy the shadow report has measured nothing about authorization,
+// and has to say that rather than report an empty refusal list. With one, a
+// proposed call the policy refuses appears even though the observed stream
+// contains the same refund.
+func TestShadowCLIScreensProposedActionsAgainstAPolicy(t *testing.T) {
+	examples := filepath.Join("..", "..", "examples")
+	dir := t.TempDir()
+	manifest := filepath.Join(dir, "manifest.json")
+	if err := runCLI([]string{"build", filepath.Join(examples, "billing", "openapi.yaml"), "--out", manifest}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	base := []string{
+		"shadow", "--config", filepath.Join(examples, "shadow", "observe-only.yaml"),
+		"--examples", examples, "--manifest", manifest, "--scenario", "duplicate-charge",
+		"--agent", "scripted",
+	}
+	var unscreened bytes.Buffer
+	if err := runCLI(append(append([]string{}, base...), "--work-dir", filepath.Join(dir, "plain")), &unscreened); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(unscreened.String(), `"evaluated":false`) || !strings.Contains(unscreened.String(), `"absent":"no principal policy`) {
+		t.Fatalf("an unscreened report must name the absence: %s", unscreened.String())
+	}
+
+	// The policy the README documents for this world, so a broken fixture fails
+	// here rather than for a reader.
+	policy := filepath.Join(examples, "security", "billing-support-policy.yaml")
+	var screened bytes.Buffer
+	if err := runCLI(append(append([]string{}, base...), "--work-dir", filepath.Join(dir, "screened"), "--policy", policy), &screened); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"evaluated":true`, `"principal":"support-agent-1"`, `"operation_id":"createRefund"`, `"reason":"permission_not_granted"`, `"also_observed":true`} {
+		if !strings.Contains(screened.String(), want) {
+			t.Fatalf("screened report is missing %s: %s", want, screened.String())
+		}
+	}
+	if err := runCLI(append(append([]string{}, base...), "--work-dir", filepath.Join(dir, "rejected"), "--policy", filepath.Join(dir, "absent.yaml")), &bytes.Buffer{}); err == nil {
+		t.Fatal("missing policy file accepted")
+	}
+}
+
 func TestContainerCLILocal(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "local.yaml")

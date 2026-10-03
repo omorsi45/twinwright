@@ -29,6 +29,11 @@ type Message struct {
 	RawOutput   []json.RawMessage `json:"raw_output,omitempty"`
 	RawBody     string            `json:"raw_body,omitempty"`
 	Usage       *Usage            `json:"usage,omitempty"`
+	// Interruptions are the attempts that produced no turn before this one did.
+	// They live on the message because the message is what the ledger records and
+	// what a replay reads back: the recorded turn is what makes the interruption
+	// reproducible without the provider having to fail again.
+	Interruptions []Interruption `json:"interruptions,omitempty"`
 }
 
 // Usage is the token count a provider reported for one turn.
@@ -103,9 +108,9 @@ func (r Runner) Execute(ctx context.Context, runID string, maxSteps int) (store.
 		if err = r.startModelCall(ctx, runID, request); err != nil {
 			return store.Run{}, err
 		}
-		next, err := r.Provider.Next(ctx, run.Task, history, operations)
+		next, err := r.callProvider(ctx, run.Task, history, operations)
 		if err != nil {
-			if saveErr := r.Store.FailModelTurnGuarded(ctx, r.Fence, r.Clock, runID, next, err.Error()); saveErr != nil {
+			if saveErr := r.Store.FailModelTurnGuarded(ctx, r.Fence, r.Clock, runID, next, interruptionPayloads(next.Interruptions), err.Error()); saveErr != nil {
 				return store.Run{}, fmt.Errorf("provider error: %v; recording error: %w", err, saveErr)
 			}
 			return store.Run{}, err
@@ -122,7 +127,7 @@ func (r Runner) Execute(ctx context.Context, runID string, maxSteps int) (store.
 			}
 		}
 		if err != nil {
-			if saveErr := r.Store.FailModelTurnGuarded(ctx, r.Fence, r.Clock, runID, next, err.Error()); saveErr != nil {
+			if saveErr := r.Store.FailModelTurnGuarded(ctx, r.Fence, r.Clock, runID, next, interruptionPayloads(next.Interruptions), err.Error()); saveErr != nil {
 				return store.Run{}, fmt.Errorf("validation error: %v; recording error: %w", err, saveErr)
 			}
 			return store.Run{}, err
@@ -132,11 +137,62 @@ func (r Runner) Execute(ctx context.Context, runID string, maxSteps int) (store.
 		if err != nil {
 			return store.Run{}, err
 		}
-		if err = r.Store.SaveTurnGuarded(ctx, r.Fence, r.Clock, runID, run.Step+1, string(transcript), next); err != nil {
+		if err = r.Store.SaveTurnGuarded(ctx, r.Fence, r.Clock, runID, run.Step+1, string(transcript), next, interruptionPayloads(next.Interruptions)); err != nil {
 			return store.Run{}, err
 		}
 		used++
 	}
+}
+
+// providerAttempts is how many times one model turn is attempted.
+//
+// Two, not more. An attempt that passed its deadline or came back cut short is
+// routinely transient, and killing a long run over the first one is the wrong
+// trade. The second failure is a different signal: whatever is wrong is not
+// something waiting again will fix, and a third attempt only delays the report
+// while spending another call. Nothing escalates silently either way, because
+// every attempt is recorded.
+const providerAttempts = 2
+
+// callProvider makes up to providerAttempts attempts at one model turn and
+// returns the turn together with the attempts that produced nothing.
+//
+// Only an interrupted attempt is retried. An ordinary provider error - a rejected
+// key, a malformed request, a 500 - is returned as it always was, because a retry
+// cannot fix it and two identical failures are worse evidence than one.
+//
+// A replayed turn arrives with its interruptions already on it and no error, so
+// the recorded list is what gets appended in both cases. That is what lets a run
+// that was interrupted once replay from its own ledger without the provider
+// having to be made to fail again.
+func (r Runner) callProvider(ctx context.Context, task string, history []Message, ops []compiler.Operation) (Message, error) {
+	var recorded []Interruption
+	for attempt := 1; ; attempt++ {
+		next, err := r.Provider.Next(ctx, task, history, ops)
+		var interrupt *CallInterrupted
+		if !errors.As(err, &interrupt) {
+			next.Interruptions = append(recorded, next.Interruptions...)
+			return next, err
+		}
+		recorded = append(recorded, interrupt.Record(attempt))
+		if attempt >= providerAttempts {
+			next.Interruptions = recorded
+			return next, fmt.Errorf("provider interrupted on %d of %d attempts: %w", len(recorded), providerAttempts, err)
+		}
+	}
+}
+
+// interruptionPayloads hands the store what to record without giving it a reason
+// to know about this package's types.
+func interruptionPayloads(interruptions []Interruption) []any {
+	if len(interruptions) == 0 {
+		return nil
+	}
+	out := make([]any, 0, len(interruptions))
+	for _, interruption := range interruptions {
+		out = append(out, interruption)
+	}
+	return out
 }
 
 // startModelCall records the model request the runner is about to make,

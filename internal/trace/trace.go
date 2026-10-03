@@ -70,6 +70,7 @@ type Summary struct {
 	FailedToolCalls      int          `json:"failed_tool_calls"`
 	StateMutations       int          `json:"state_mutations"`
 	Retries              int          `json:"retries"`
+	Interruptions        int          `json:"provider_interruptions"`
 	Faults               int          `json:"faults"`
 	AuthorizationAllowed int          `json:"authorization_allowed"`
 	AuthorizationDenied  int          `json:"authorization_denied"`
@@ -241,6 +242,16 @@ func (b *builder) add(event store.Event) error {
 		if b.checkpoints {
 			span.Attributes["checkpoint"] = true
 		}
+	case "provider.interrupted":
+		// The attempt belongs to the model call that is open, so the note lands on
+		// that span rather than at the root: a reader looking at a slow turn sees
+		// why it was slow.
+		span := b.current
+		if span == nil || span.Name != "model.invocation" {
+			return fmt.Errorf("provider interruption without a model request")
+		}
+		b.summary.Interruptions++
+		b.note(span, event, "provider.interrupted", pick(payload, "kind", "attempt", "reason", "deadline_ms"))
 	case "tool.request":
 		span := b.span("tool.call", event)
 		span.Attributes["call_id"], span.Attributes["operation"] = payload["call_id"], payload["operation_id"]

@@ -113,6 +113,13 @@ func List(ctx context.Context, s *store.Store, runID string, manifest compiler.M
 				return nil, fmt.Errorf("invalid tool request at event %d", event.Seq)
 			}
 			toolOpen, toolCallID, toolOperation = true, request.CallID, request.OperationID
+		case "provider.interrupted":
+			// An attempt that produced no turn. It belongs to the open model
+			// call, and it is not a boundary: nothing was decided and nothing was
+			// written, so there is nothing to fork from here.
+			if !modelOpen {
+				return nil, fmt.Errorf("provider interruption outside a model call at event %d", event.Seq)
+			}
 		case "state.mutation", "retry", "chaos.injected", "chaos.actor_mutation", "authorization.allowed", "authorization.denied":
 			if !toolOpen {
 				return nil, fmt.Errorf("%s without tool request at event %d", event.Type, event.Seq)

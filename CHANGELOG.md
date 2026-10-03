@@ -35,6 +35,49 @@ database written by a newer build is refused rather than downgraded.
   refuses seven hostile `search_path` values with legal controls beside them. A
   third test covers an `env_file` traversal written in the unnormalised form the
   existing cases had already normalised away. See ADR 0028.
+- **Per-attempt provider deadlines, and truncated completions that stop being
+  decisions.** Every provider built an `http.Client` with a flat, hard-coded,
+  uncancellable 90 second timeout, and nothing in the repository read
+  `finish_reason`, `stop_reason` or the Responses API's `incomplete_details`. So a
+  hung call took 90 seconds off the run and left nothing in the ledger, and a
+  completion the provider cut off at its token ceiling was consumed as a complete
+  answer: a tool call cut mid-arguments still decodes into a map, and the runtime
+  would dispatch an action built from half a serialisation. The deadline is now per
+  attempt and carried on the request context, configurable with
+  `--provider-timeout` on every command that can reach a provider and refused if
+  non-positive. Each provider reads its own surface's truncation field and returns
+  before parsing any output item. Either failure is retried exactly once and every
+  attempt is recorded as a `provider.interrupted` event carrying the kind, the
+  attempt number, the vendor's verbatim reason and the configured deadline; a run
+  where every attempt is interrupted fails with the existing `error` event of kind
+  `provider`. The record lives on the turn, so a run that recovered still replays:
+  a replayed run appends the same event from the recorded turn instead of needing
+  the provider to fail again, which is also why the event is in replay's semantic
+  list rather than ignored by it. `AnthropicProvider.MaxOutputTokens` makes the
+  ceiling a truncated completion hit configurable, since raising it is the
+  documented remedy. See ADR 0027.
+- **Shadow comparison depth.** The comparison was an exact match on marshalled
+  arguments, so a proposed refund of 500 against an observed refund of 5905 on the
+  same charge was reported as two unrelated entries, one in each only-list, and
+  the reader had to notice they were the same charge. Three classifiers report it
+  instead: `argument_divergences` pairs the leftover actions that address the same
+  resource with the same operation and names the fields that differ with both
+  values; `timing` reports the pairs the two streams sequence differently; and
+  `policy` screens each proposed action against a principal policy given with
+  `shadow --policy` and lists what it would refuse, with the permission, the deny
+  reason and the call number. A refusal stands even when the observed stream
+  contains the same action, flagged `also_observed`, because a human with other
+  permissions doing something is not evidence that this principal may. Resource
+  identity comes from the arguments that name the resource, not from the operation
+  name and not from a call's position, both of which stop identifying anything
+  once a call site is added. Elapsed time is reported as not compared rather than
+  as zero: a local simulation has no wall clock comparable to a recorded stream.
+  Shadow mode stays observe-only, the output stays deterministic and sorted, and
+  it still declares no winner. See ADR 0026.
+- **`authz.Screen`.** The policy decision for one call at a given call number,
+  without consuming one. `authz.Decide` is now `Screen` plus the two things only a
+  live run supplies, the stored policy and the next call number, so a shadow
+  verdict and an enforced one cannot drift apart.
 
 ## v0.1.0 - 2026-09-30
 

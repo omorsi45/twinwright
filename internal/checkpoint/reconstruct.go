@@ -117,9 +117,19 @@ func Reconstruct(ctx context.Context, source *store.Store, runID string, selecte
 				return nil, store.Run{}, err
 			}
 			step++
-			if err := target.SaveTurn(ctx, runID, step, string(transcript), message); err != nil {
+			// The interruptions come off the recorded turn, which is why the
+			// reconstructed prefix reproduces those events in the same order
+			// rather than silently dropping them.
+			interruptions := make([]any, 0, len(message.Interruptions))
+			for _, interruption := range message.Interruptions {
+				interruptions = append(interruptions, interruption)
+			}
+			if err := target.SaveTurn(ctx, runID, step, string(transcript), message, interruptions); err != nil {
 				return nil, store.Run{}, err
 			}
+		case "provider.interrupted":
+			// Recorded with the response it precedes, so SaveTurn above appends
+			// it. Handling it again here would duplicate it.
 		case "tool.request":
 			var request struct {
 				CallID      string         `json:"call_id"`

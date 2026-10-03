@@ -614,6 +614,62 @@ The JSON output always sets `experimental: true` and names the `connector` that
 produced the observations. Secret env names listed in the config are never
 printed. See `docs/adr/0015-shadow-mode.md` and `docs/adr/0022-shadow-connectors.md`.
 
+### What the comparison reports
+
+Matched, only-proposed and only-observed answer "did the same thing happen". On
+their own they cannot express a run that did broadly the same work differently,
+which is where the interesting divergence is: a proposed refund of 500 against an
+observed refund of 5905 on one charge came back as two unrelated entries, one in
+each only-list, leaving the reader to notice they were the same charge.
+
+Three classifiers report that instead.
+
+- **`argument_divergences`** pairs the leftover actions that are the same
+  operation on the same resource and names the fields that differ, with both
+  values and a presence flag for each side. Resource identity comes from the
+  arguments that name the resource (`id`, or a key ending in `_id`, carrying a
+  non-empty string), not from the operation name and not from a call's position:
+  a refund of `CH-2` and a refund of `CH-9` are different charges, and adding one
+  call site renumbers every position after it. A call that identifies no resource
+  stays in the only-lists rather than being paired on a guess.
+- **`timing`** reports the pairs the two streams sequence differently. Order is
+  the timing property both sides carry; elapsed time is not, because a local
+  simulation's wall clock has nothing to do with how long a human took. The
+  report says so in `timing.elapsed_gap` instead of printing a zero, and carries
+  `timing.observed_timestamps` so a reader can see how many observations had a
+  timestamp at all.
+- **`policy`** screens each proposed action against a principal policy supplied
+  with `--policy` and lists what it would refuse, with the permission, the stable
+  deny reason and the run-local call number. A refusal stands even when the
+  observed stream contains the same action, flagged `also_observed: true`: a human
+  with other permissions doing something is not evidence that this principal may.
+  The screen calls the same `internal/authz` entry point the dispatcher's
+  enforcement delegates to, so a shadow verdict cannot drift away from an enforced
+  one, and it reads the world without executing or writing anything.
+
+```bash
+go run ./cmd/twinwright shadow \
+  --config examples/shadow/observe-only.yaml \
+  --examples examples \
+  --manifest twinwright.manifest.json \
+  --scenario duplicate-charge \
+  --agent scripted \
+  --policy examples/security/billing-support-policy.yaml
+```
+
+A policy is parsed against the world's own manifest, so one naming a permission
+the world has no operation for is refused here rather than screening nothing.
+`examples/security/support-policy.yaml` is the four-service version;
+`billing-support-policy.yaml` is the same principal scoped to the billing
+examples. Neither grants `refunds.create`, which is what makes the fixture's
+proposed refund a finding.
+
+Without `--policy` the report carries `policy.evaluated: false` and the reason,
+because an empty refusal list reads exactly like a clean screen. The comparison
+remains deterministic and sorted, and still declares no winner: the observed
+stream is what happened, not what should have happened. See
+`docs/adr/0026-shadow-comparison-depth.md`.
+
 ## Twinwright Bench
 
 `twinwright bench` runs a curated suite of serious scenarios with deterministic judges (scenario evaluation or assertion files). The first public suite is `examples/bench/standard.yaml`: 20 cases across reliability, reasoning, safety, security, recovery, long-horizon, distributed, and counterfactual categories. It is not a thousand trivial templates.
@@ -695,6 +751,45 @@ go run ./cmd/twinwright run company-incident \
 The base URL is process configuration, not a ledger column. Resuming an `openai-compatible` run needs `--base-url` or `OPENAI_BASE_URL` again. The stored provider name and model are what replay and traces show.
 
 Live model behavior is nondeterministic. Twinwright's world state, tool execution, recorded decisions, and deterministic evaluators provide the reproducible boundary around it. When a provider reports token usage, the assistant turn stores it. Error bodies are redacted before they reach the ledger. No live OpenAI, Anthropic, or local-server run has been verified in this repository; scripted fixtures are the tested path. See `docs/adr/0013-agent-providers.md`.
+
+### When a provider hangs or cuts a completion short
+
+Two things can go wrong with a provider call without the response looking wrong.
+
+`--provider-timeout` is the per-attempt deadline, default 90s, available on every
+command that can reach a provider. It arrives on the request's context, so a hung
+call is cancelled rather than abandoned, and a caller's own deadline still wins. It
+cannot be zero: an uncancellable call is what this replaced.
+
+A completion the provider cut off at its token ceiling arrives as HTTP 200 with a
+well-formed body, and the only signal is a metadata field spelled differently on
+each surface: `stop_reason: "max_tokens"` on Anthropic's Messages API,
+`finish_reason: "length"` on an OpenAI-compatible chat completion, and
+`status: "incomplete"` with `incomplete_details.reason: "max_output_tokens"` on the
+Responses API. Twinwright reads it and returns before parsing any output item, so a
+tool call cut mid-arguments never becomes a dispatched action.
+`--model`-specific ceilings are the operator's to raise; `AnthropicProvider`
+takes a configurable `MaxOutputTokens` because the API requires one.
+
+Either failure is retried exactly once and both attempts are recorded as
+`provider.interrupted` events carrying the kind, the attempt number, the vendor's
+verbatim reason and the configured deadline:
+
+```json
+{"kind":"timeout","attempt":1,"deadline_ms":90000}
+{"kind":"truncated","attempt":1,"reason":"length"}
+```
+
+A run that recovers on the second attempt still replays: the interruption is
+recorded on the turn itself, so a replayed run reproduces the same ledger from the
+record instead of needing the provider to fail again. A run where every attempt is
+interrupted fails with the usual `error` event of kind `provider`.
+
+**This detection is only as good as the field.** A surface that omits its stop
+reason, or a gateway that rewrites it to a success value, gives nothing to check
+and the response is treated as complete. There is no content-level alternative: a
+truncated response is a successful request whose content happens to be a fragment.
+See `docs/adr/0027-provider-deadlines-and-truncation.md`.
 
 ## Engineering guarantees
 

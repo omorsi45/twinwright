@@ -1,0 +1,21 @@
+# The support principal, scoped to the billing world.
+#
+# examples/security/support-policy.yaml is the four-service version and names CRM
+# and ticketing permissions. A policy is parsed against the world it will be used
+# in and a permission with no operation there is refused, so the billing examples
+# need their own file rather than a subset applied by hand.
+#
+# refunds.create is deliberately absent: reading an account is support work and
+# moving money is not, which is what makes a proposed refund a finding.
+version: 1
+principal:
+  id: support-agent-1
+  roles: [support]
+roles:
+  support:
+    allow:
+      - customers.read
+      - invoices.read
+      - charges.read
+resources:
+  customer_ids: [C-104]
