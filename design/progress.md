@@ -14,15 +14,8 @@ reader cannot get from `git log` in less effort than it takes to read.
 
 ## Where main is
 
-`main` at `2334811`, the merge of PR 22. PRs 20, 21 and 22 were the last three to
-land: honest bench aggregation, the flagship suite, and the distributed documentation
-plus the cut `v0.1.0` changelog section.
-
-Checkout for this work: `C:/Users/ermaomo/Personal/github/twinwright`.
-
-## What is open
-
-Three pull requests, one feature each, all based on `main`:
+`main` at `0ddd022`, the merge of PR 25. The three features that closed out the
+roadmap slice landed on 2026-10-02, each on its own branch with its own ADR:
 
 - **23**, `shadow-comparison-depth`: semantic argument divergence, order divergence
   and a policy screen in the shadow comparison. ADR 0026.
@@ -32,15 +25,25 @@ Three pull requests, one feature each, all based on `main`:
 - **25**, `documented-security-review`: `docs/security-review.md` plus the test that
   fails CI when its citations drift. ADR 0028.
 
-Nothing else is in flight. The roadmap in
-`briefs/2026-09-25-platform-roadmap.md` is direction, not a claim about what is
-implemented.
+PRs 20, 21 and 22 were the three before them: honest bench aggregation, the flagship
+suite, and the distributed documentation plus the cut `v0.1.0` changelog section.
+
+Checkout for this work: `C:/Users/ermaomo/Personal/github/twinwright`.
+
+## What is open
+
+This change (PR 26) is the last of the four, and nothing else is in flight. The
+roadmap in `briefs/2026-09-25-platform-roadmap.md` is direction, not a claim about
+what is implemented; everything it describes for the current slice is now on `main`.
 
 ## Not tagged
 
-`CHANGELOG.md` has a cut `v0.1.0` section and the repository has no tags. Tagging is
-a decision rather than a chore: a tag is awkward to retract once anyone has fetched
-it, so it waits for an explicit call.
+`CHANGELOG.md` has a cut `v0.1.0` section and the repository has no tags. Note that
+`main` has moved past what that section describes: the three features above are
+listed under `Unreleased`, so a `v0.1.0` tag belongs on the commit the section was
+cut at rather than on today's `main`. Tagging is a decision rather than a chore -
+a tag is awkward to retract once anyone has fetched it - so it waits for an explicit
+call.
 
 ## How to check this yourself
 
