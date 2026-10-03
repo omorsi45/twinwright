@@ -537,12 +537,17 @@ func (s *Store) StartModelCall(ctx context.Context, runID string, request any) e
 	return s.Append(ctx, runID, "model.request", request)
 }
 
-func (s *Store) SaveTurn(ctx context.Context, runID string, step int, transcript string, response any) error {
+// SaveTurn persists a model turn. interruptions are the attempts that produced
+// no turn, recorded ahead of the response in the same transaction.
+func (s *Store) SaveTurn(ctx context.Context, runID string, step int, transcript string, response any, interruptions []any) error {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	if err = appendInterruptionsTx(ctx, tx, runID, interruptions); err != nil {
+		return err
+	}
 	if err = AppendEventTx(ctx, tx, runID, "model.response", response); err != nil {
 		return err
 	}
@@ -550,6 +555,16 @@ func (s *Store) SaveTurn(ctx context.Context, runID string, step int, transcript
 		return err
 	}
 	return tx.Commit()
+}
+
+// appendInterruptionsTx records the provider attempts that produced no turn.
+func appendInterruptionsTx(ctx context.Context, tx *sql.Tx, runID string, interruptions []any) error {
+	for _, interruption := range interruptions {
+		if err := AppendEventTx(ctx, tx, runID, "provider.interrupted", interruption); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) FailModelTurn(ctx context.Context, runID string, response any, message string) error {

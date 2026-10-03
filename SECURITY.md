@@ -14,7 +14,10 @@ in-process handlers over a local database. Twinwright does not call a customer's
 real systems, and shadow mode is observe-only by design - a configuration that
 asks for production writes is rejected rather than honoured.
 
-The interesting boundaries are therefore internal, and they are enforced in code:
+The interesting boundaries are therefore internal, and they are enforced in code.
+`docs/security-review.md` is the review pass over each of them: what was examined,
+what was found, and the test that holds each claim below, including the places
+where no test holds one.
 
 **Authorization.** Principal policies are evaluated in the tool transaction,
 before any handler runs, and the decision is recorded in the ledger. Enforcement

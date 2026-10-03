@@ -180,7 +180,7 @@ func TestRefundRollbackAndIdempotentCommit(t *testing.T) {
 	if err := s.StartModelCall(ctx, r.ID, map[string]any{"task": "refund"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SaveTurn(ctx, r.ID, 1, transcript, map[string]any{"tool_call": "refund-call"}); err != nil {
+	if err := s.SaveTurn(ctx, r.ID, 1, transcript, map[string]any{"tool_call": "refund-call"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	before, err := s.Events(ctx, r.ID)

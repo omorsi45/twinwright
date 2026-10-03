@@ -25,7 +25,7 @@ func ValidateStored(encoded []byte, digest string, manifest compiler.Manifest) (
 }
 
 // CopyRun gives a fork child the policy and call counter of a reconstructed prefix.
-func CopyRun(ctx context.Context, source querier, target *sql.Tx, from, to string) error {
+func CopyRun(ctx context.Context, source Querier, target *sql.Tx, from, to string) error {
 	var encoded, digest string
 	err := source.QueryRowContext(ctx, "SELECT policy_json,digest FROM run_auth WHERE run_id=?", from).Scan(&encoded, &digest)
 	if errors.Is(err, sql.ErrNoRows) {

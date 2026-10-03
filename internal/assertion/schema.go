@@ -30,4 +30,5 @@ var eventTypes = map[string]bool{
 	"model.request": true, "model.response": true, "tool.request": true, "tool.response": true,
 	"state.mutation": true, "error": true, "retry": true, "chaos.injected": true, "chaos.actor_mutation": true,
 	"authorization.allowed": true, "authorization.denied": true, "observation.overridden": true,
+	"provider.interrupted": true,
 }
