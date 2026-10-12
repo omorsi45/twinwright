@@ -106,21 +106,14 @@ func confinePath(root, rel string) (string, error) {
 	if cleaned == ".." || strings.HasPrefix(cleaned, "../") {
 		return "", fmt.Errorf("shadow source path escapes examples/: %s", rel)
 	}
-	full := filepath.Join(root, filepath.FromSlash(cleaned))
-	abs, err := filepath.Abs(full)
+	// os.OpenInRoot follows safe in-root symlinks but refuses symlinks
+	// outside the root. Absolute/Rel checks alone miss that escape.
+	file, err := os.OpenInRoot(root, filepath.FromSlash(cleaned))
 	if err != nil {
+		return "", fmt.Errorf("shadow source missing or escapes examples/: %w", err)
+	}
+	if err := file.Close(); err != nil {
 		return "", err
-	}
-	rootAbs, err := filepath.Abs(root)
-	if err != nil {
-		return "", err
-	}
-	relToRoot, err := filepath.Rel(rootAbs, abs)
-	if err != nil || strings.HasPrefix(relToRoot, "..") {
-		return "", fmt.Errorf("shadow source path escapes examples/: %s", rel)
-	}
-	if _, err := os.Stat(abs); err != nil {
-		return "", fmt.Errorf("shadow source missing: %w", err)
 	}
 	return cleaned, nil
 }
