@@ -118,6 +118,42 @@ func TestConnectorsRejectUnknownFields(t *testing.T) {
 	}
 }
 
+// Every JSONL line must contain exactly one record. If a decoder silently
+// accepts a second JSON value, the shadow comparison loses observed actions
+// without reporting malformed input. Check every connector against valid data.
+func TestConnectorsRejectMultipleJSONValuesOnOneLine(t *testing.T) {
+	cases := []struct {
+		name, typ, body string
+	}{
+		{"native", "file", `{"kind":"human_action","operation_id":"getCustomer","arguments":{"id":"C-104"}}`},
+		{"audit", "audit_log", `{"timestamp":"t","actor":"a","action":"getCustomer","parameters":{"id":"C-104"},"outcome":"success"}`},
+		{"http", "recorded_http", `{"at":"t","method":"GET","path":"/customers/C-104","operation_id":"getCustomer","query":{"id":"C-104"},"status":200}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root, file := writeSource(t, tc.body+"\n"+tc.body+"\n")
+			observations, err := Load(root, SourceConfig{Type: tc.typ, Path: file})
+			if err != nil || len(observations) != 2 {
+				t.Fatalf("two normal JSONL lines: got %d observations, err=%v", len(observations), err)
+			}
+
+			// Both records are valid individually. Only their lack of a
+			// newline makes this invalid, so a JSON syntax error from the
+			// first record cannot accidentally satisfy the test.
+			if err := os.WriteFile(filepath.Join(root, file), []byte(tc.body+tc.body+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			observations, err = Load(root, SourceConfig{Type: tc.typ, Path: file})
+			if err == nil {
+				t.Fatalf("silently ignored the second JSON value: %+v", observations)
+			}
+			if !strings.Contains(err.Error(), "line 1") || !strings.Contains(err.Error(), "multiple JSON values") {
+				t.Fatalf("want line-numbered multiple-values error, got %v", err)
+			}
+		})
+	}
+}
+
 // Guessing an operation from method and path would mis-attribute actions, and a
 // report naming the wrong operation is worse than one that refuses to load.
 func TestRecordedHTTPRequiresAnExplicitOperation(t *testing.T) {

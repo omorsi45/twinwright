@@ -151,16 +151,25 @@ func eachJSONLine(data []byte, decode func(line int, raw []byte) error) error {
 	return nil
 }
 
-// decodeStrict rejects unknown fields.
+// decodeStrict rejects unknown fields and trailing JSON values.
 //
-// Silently ignoring a field is the failure mode that matters for a shadow
-// source: a misspelled key would drop real observed behaviour and the report
-// would look clean because the evidence never arrived.
+// Silently ignoring a field or a second record on a line can drop observed
+// behaviour and make a shadow comparison look clean despite missing evidence.
 func decodeStrict(raw []byte, target any) error {
 	decoder := json.NewDecoder(strings.NewReader(string(raw)))
 	decoder.UseNumber()
 	decoder.DisallowUnknownFields()
-	return decoder.Decode(target)
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err != nil {
+			return fmt.Errorf("trailing JSON value: %w", err)
+		}
+		return fmt.Errorf("multiple JSON values on one line")
+	}
+	return nil
 }
 
 func validKind(kind string) bool {
