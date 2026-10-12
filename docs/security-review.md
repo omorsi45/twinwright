@@ -258,9 +258,11 @@ added without a test objecting.
 `mode` must be `observe`, `label` must be `experimental`, and `allow_writes: true`
 is refused with its own message - the key is accepted by the decoder solely so the
 refusal can name it rather than reporting an unknown field. A source is a file
-under the examples root, confined by `confinePath` on both the config path and the
-loader, because a guard that only runs on one path has a hole in it. The source is
-capped at 8 MiB, checked before and after reading. Every connector rejects unknown
+under the examples root. Both configuration validation and actual source reads
+use `os.OpenInRoot` to refuse symlinks that point outside the allowed directory.
+The loader reopens within the root even after validating, so a symlink swap
+cannot redirect the read outside. Sources are capped at 8 MiB using both the
+file size and a bounded read. Every connector rejects unknown
 JSON fields, since a misspelled key would silently drop observed behaviour and
 leave a report looking clean. An attempt that did not take effect - a denied audit
 entry, a 4xx or 5xx response - is not treated as an observed action.
@@ -275,7 +277,9 @@ entry, a 4xx or 5xx response - is not treated as an observed action.
   the same bytes, points the escape at a file that is *valid* observation JSONL so
   a parse failure cannot stand in for the guard, loops over every registered
   connector and four escape forms, and requires the error to say `escapes` or `must
-  be relative`. `TestOversizedSourceIsRefused` holds the cap.
+  be relative`. `TestShadowSourcesRejectSymlinkEscapes` uses valid outside-root
+  JSONL targets behind file and directory symlinks, and keeps an in-root symlink
+  as the positive control. `TestOversizedSourceIsRefused` holds the cap.
   `TestConnectorsRejectUnknownFields` holds the strict decoding across all three
   formats. `TestConnectorsDropActionsThatDidNotTakeEffect` holds that a denied or
   rejected attempt is not an observation.

@@ -107,15 +107,22 @@ func Load(examplesRoot string, src SourceConfig) ([]Observation, error) {
 	if err != nil {
 		return nil, err
 	}
-	path := filepath.Join(examplesRoot, filepath.FromSlash(cleaned))
-	info, err := os.Stat(path)
+	// Re-open under the root rather than trusting the previous path check:
+	// another process may have swapped a symlink since validation.
+	file, err := os.OpenInRoot(examplesRoot, filepath.FromSlash(cleaned))
+	if err != nil {
+		return nil, fmt.Errorf("shadow source missing or escapes examples/: %w", err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
 	if err != nil {
 		return nil, err
 	}
 	if info.Size() > maxSourceBytes {
 		return nil, fmt.Errorf("shadow source %s is %d bytes, over the %d byte limit", cleaned, info.Size(), maxSourceBytes)
 	}
-	data, err := os.ReadFile(path)
+	// LimitReader also caps a source that grows after Stat.
+	data, err := io.ReadAll(io.LimitReader(file, maxSourceBytes+1))
 	if err != nil {
 		return nil, err
 	}

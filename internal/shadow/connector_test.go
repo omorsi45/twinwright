@@ -236,6 +236,54 @@ func TestEveryConnectorRefusesToEscapeTheExamplesRoot(t *testing.T) {
 	}
 }
 
+// A lexical path check is not sufficient: a relative path can point at a
+// symlink whose target is outside the examples root. Reject both file and
+// directory symlinks in Parse and direct Load without rejecting safe symlinks.
+func TestShadowSourcesRejectSymlinkEscapes(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "examples")
+	shadowDir := filepath.Join(root, "shadow")
+	outsideDir := filepath.Join(base, "outside")
+	for _, dir := range []string{shadowDir, outsideDir} {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	line := `{"kind":"human_action","operation_id":"getCustomer","arguments":{"id":"C-104"}}` + "\n"
+	inside := filepath.Join(shadowDir, "inside.jsonl")
+	outside := filepath.Join(outsideDir, "outside.jsonl")
+	for _, path := range []string{inside, outside} {
+		if err := os.WriteFile(path, []byte(line), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	links := []struct{ link, target string }{
+		{filepath.Join(shadowDir, "safe.jsonl"), "inside.jsonl"},
+		{filepath.Join(shadowDir, "escape.jsonl"), outside},
+		{filepath.Join(shadowDir, "escape-dir"), outsideDir},
+	}
+	for _, link := range links {
+		if err := os.Symlink(link.target, link.link); err != nil {
+			t.Skipf("cannot create symlinks: %v", err)
+		}
+	}
+	control, err := Load(root, SourceConfig{Type: "file", Path: "shadow/safe.jsonl"})
+	if err != nil || len(control) != 1 {
+		t.Fatalf("in-root symlink failed: got %d observations, err=%v", len(control), err)
+	}
+	for _, source := range []string{"shadow/escape.jsonl", "shadow/escape-dir/outside.jsonl"} {
+		t.Run(source, func(t *testing.T) {
+			if obs, err := Load(root, SourceConfig{Type: "file", Path: source}); err == nil {
+				t.Fatalf("Load followed symlink outside root: %+v", obs)
+			}
+			raw := fmt.Sprintf("version: 1\nmode: observe\nlabel: experimental\nsource:\n  type: file\n  path: %s\n", source)
+			if cfg, err := Parse([]byte(raw), root); err == nil {
+				t.Fatalf("Parse accepted symlink outside root: %+v", cfg)
+			}
+		})
+	}
+}
+
 // A shadow source is someone else's export, so its size is not this project's
 // choice. The cap is what turns an oversized dump into an error instead of
 // memory pressure.
