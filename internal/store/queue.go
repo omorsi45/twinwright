@@ -30,6 +30,11 @@ type QueueEntry struct {
 	EnqueuedAt  string `json:"enqueued_at"`
 	AvailableAt string `json:"available_at"`
 	LastError   string `json:"last_error,omitempty"`
+	// Takeover is set by ClaimRun, never stored. It is true only when the claim
+	// displaced a lease that had expired, the state a dead worker leaves behind.
+	// A run that was requeued after an error is claimed from the runnable state
+	// and is a retry, not a takeover, however many attempts it has had.
+	Takeover bool `json:"takeover"`
 }
 
 // Enqueue makes a run claimable by any worker. Enqueueing a run that is
@@ -168,6 +173,7 @@ LIMIT 1`+lock, args...).
 	}
 	entry.State = QueueLeased
 	entry.Attempts++
+	entry.Takeover = takeover
 	return lease, entry, nil
 }
 
@@ -191,9 +197,6 @@ func (s *Store) RequeueRun(ctx context.Context, lease RunLease, now, availableAt
 }
 
 func (s *Store) completeQueueEntry(ctx context.Context, lease RunLease, now time.Time, state, kind, reason string, availableAt time.Time) error {
-	if availableAt.IsZero() {
-		availableAt = now
-	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -204,11 +207,24 @@ func (s *Store) completeQueueEntry(ctx context.Context, lease RunLease, now time
 	if err = GuardFenceTx(ctx, tx, s.Dialect, lease.Fence(), now); err != nil {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, "UPDATE work_queue SET state=?, available_at=?, last_error=? WHERE run_id=?",
+	if err = completeQueueEntryTx(ctx, tx, lease, now, state, kind, reason, availableAt); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// completeQueueEntryTx records a claim's end inside a transaction that has
+// already passed GuardFenceTx: the queue state, the released lease, and the
+// ownership log row.
+func completeQueueEntryTx(ctx context.Context, tx *sql.Tx, lease RunLease, now time.Time, state, kind, reason string, availableAt time.Time) error {
+	if availableAt.IsZero() {
+		availableAt = now
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE work_queue SET state=?, available_at=?, last_error=? WHERE run_id=?",
 		state, CoordinationTime(availableAt), reason, lease.RunID); err != nil {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, "UPDATE run_leases SET owner='', expires_at=?, heartbeat_at=? WHERE run_id=? AND owner=? AND fence=?",
+	if _, err := tx.ExecContext(ctx, "UPDATE run_leases SET owner='', expires_at=?, heartbeat_at=? WHERE run_id=? AND owner=? AND fence=?",
 		CoordinationTime(now), CoordinationTime(now), lease.RunID, lease.Owner, lease.Token); err != nil {
 		return err
 	}
@@ -216,7 +232,44 @@ func (s *Store) completeQueueEntry(ctx context.Context, lease RunLease, now time
 	if reason != "" {
 		detail["reason"] = reason
 	}
-	if err = appendOwnershipTx(ctx, tx, lease.RunID, kind, lease.Owner, lease.Token, now, detail); err != nil {
+	return appendOwnershipTx(ctx, tx, lease.RunID, kind, lease.Owner, lease.Token, now, detail)
+}
+
+// DeliveryLimitReason is the queue entry's last_error, and the worker's outcome
+// text, for a run that used up its deliveries without completing.
+func DeliveryLimitReason(deliveries, maxAttempts int) string {
+	return fmt.Sprintf("delivery limit: %d deliveries without completion (max attempts %d)", deliveries, maxAttempts)
+}
+
+// FailRunAtDeliveryLimit fails a run that was delivered more times than its
+// attempt bound allows without ever completing.
+//
+// MaxAttempts used to be checked only when execution returned an error. A worker
+// that dies reports nothing, so a run that kills its worker every time was taken
+// over forever. The claim count is the one signal a crash does leave behind.
+//
+// The run status, the ledger event, the queue entry, the released lease and the
+// ownership row commit together after GuardFenceTx, so a worker that lost the
+// run to a takeover cannot fail it. The ledger payload carries counts only: it
+// is the agent trajectory and never names a worker or a lease.
+func (s *Store) FailRunAtDeliveryLimit(ctx context.Context, lease RunLease, now time.Time, deliveries, maxAttempts int) error {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err = GuardFenceTx(ctx, tx, s.Dialect, lease.Fence(), now); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, "UPDATE runs SET status='failed' WHERE id=?", lease.RunID); err != nil {
+		return err
+	}
+	payload := map[string]any{"kind": "delivery_limit", "deliveries": deliveries, "max_attempts": maxAttempts}
+	if err = AppendEventTx(ctx, tx, lease.RunID, "error", payload); err != nil {
+		return err
+	}
+	reason := DeliveryLimitReason(deliveries, maxAttempts)
+	if err = completeQueueEntryTx(ctx, tx, lease, now, QueueFailed, OwnershipFailed, reason, time.Time{}); err != nil {
 		return err
 	}
 	return tx.Commit()

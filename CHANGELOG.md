@@ -91,6 +91,16 @@ database written by a newer build is refused rather than downgraded.
   fails the migration, which rolls back, and names the table, column and row.
   Ledger event timestamps are unchanged.
 
+- **A run that kills its worker is now failed at the delivery limit, and a takeover
+  means a displaced lease.** `MaxAttempts` was checked only when `Execute` returned
+  an error, and a crash returns nothing, so a poison run was taken over forever.
+  A claim past `MaxAttempts` deliveries now fails the run without executing it,
+  with an `error` ledger event `{"kind":"delivery_limit","deliveries":N,"max_attempts":M}`
+  and the queue entry `failed`. A run that had already completed is finished
+  instead. `Outcome.Takeover` was `attempts > 1`, so an ordinary requeue after an
+  error counted as a takeover; it is now true only when the claim displaced an
+  expired lease. Delivery remains at-least-once.
+
 ## v0.1.0 - 2026-09-30
 
 First tagged release. Everything below shipped before the tag; the sections are

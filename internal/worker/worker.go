@@ -161,8 +161,15 @@ func (w *Worker) ClaimAndRun(ctx context.Context) (Outcome, error) {
 	if err != nil {
 		return Outcome{WorkerID: w.Config.ID}, err
 	}
-	outcome := Outcome{WorkerID: w.Config.ID, RunID: lease.RunID, Fence: lease.Token, Attempt: entry.Attempts, Takeover: entry.Attempts > 1}
+	outcome := Outcome{WorkerID: w.Config.ID, RunID: lease.RunID, Fence: lease.Token, Attempt: entry.Attempts, Takeover: entry.Takeover}
 	started := now
+
+	// A crash reports no error, so the retry bound in the error path below never
+	// sees a run that kills its worker. Every claim counts as a delivery, and a
+	// run past its bound is settled here without executing it again.
+	if entry.Attempts > w.Config.MaxAttempts {
+		return w.settleOverDelivered(ctx, lease, entry, outcome)
+	}
 
 	// Renewal runs alongside execution. If the lease cannot be renewed the run
 	// has moved on, so the execution context is cancelled: continuing would
@@ -224,6 +231,31 @@ func (w *Worker) ClaimAndRun(ctx context.Context) (Outcome, error) {
 			return w.observe(outcome), fmt.Errorf("mark run finished: %w", err)
 		}
 	}
+	return w.observe(outcome), nil
+}
+
+// settleOverDelivered ends a claim for a run that has been delivered more times
+// than MaxAttempts allows. A run that already completed lost only its final
+// bookkeeping to a crash, so it is finished; anything else is failed.
+func (w *Worker) settleOverDelivered(ctx context.Context, lease store.RunLease, entry store.QueueEntry, outcome Outcome) (Outcome, error) {
+	run, err := w.Store.Run(ctx, lease.RunID)
+	if err != nil {
+		return w.observe(outcome), fmt.Errorf("read run past delivery limit: %w", err)
+	}
+	outcome.RunStatus = run.Status
+	if run.Status == "completed" {
+		outcome.Disposition = Finished
+		if err = w.Store.FinishRun(ctx, lease, w.Config.Clock.Now()); err != nil {
+			return w.observe(outcome), fmt.Errorf("mark run finished: %w", err)
+		}
+		return w.observe(outcome), nil
+	}
+	outcome.Disposition = Failed
+	outcome.Err = store.DeliveryLimitReason(entry.Attempts, w.Config.MaxAttempts)
+	if err = w.Store.FailRunAtDeliveryLimit(ctx, lease, w.Config.Clock.Now(), entry.Attempts, w.Config.MaxAttempts); err != nil {
+		return w.observe(outcome), fmt.Errorf("fail run at delivery limit: %w", err)
+	}
+	outcome.RunStatus = "failed"
 	return w.observe(outcome), nil
 }
 
