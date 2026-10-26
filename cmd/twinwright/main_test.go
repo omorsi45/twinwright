@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -17,6 +18,7 @@ import (
 	"twinwright/internal/behavior"
 	"twinwright/internal/compiler"
 	"twinwright/internal/store"
+	"twinwright/internal/worker"
 )
 
 func TestBuildRunResumeInspect(t *testing.T) {
@@ -1499,5 +1501,20 @@ func TestResumeRefusesARunLeasedByAWorker(t *testing.T) {
 	err = runCLI([]string{"resume", queued.RunID, "--agent", "scripted", "--manifest", manifest, "--db", db}, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "leased by") || !strings.Contains(err.Error(), "worker-a") {
 		t.Fatalf("resume error=%v want a refusal naming worker-a", err)
+	}
+}
+
+// TestLocalRunErrorDoesNotCallACompletedRunFailed pins the wording when the run
+// finished but its lease could not be released: the work is durable, so the
+// message must not say the run failed.
+func TestLocalRunErrorDoesNotCallACompletedRunFailed(t *testing.T) {
+	cause := errors.New("connection reset")
+	left := localRunError("R-1", errors.New("boom"))
+	if !strings.Contains(left.Error(), "run R-1 failed: ") {
+		t.Fatalf("a failed run should read as failed: %v", left)
+	}
+	done := localRunError("R-1", errors.Join(worker.ErrLeaseNotReleased, cause))
+	if strings.Contains(done.Error(), "failed") || !errors.Is(done, worker.ErrLeaseNotReleased) || !errors.Is(done, cause) {
+		t.Fatalf("completed run must not read as failed and must keep its cause: %v", done)
 	}
 }

@@ -127,6 +127,16 @@ func executeLocally(ctx context.Context, s *store.Store, manifest compiler.Manif
 	})
 }
 
+// localRunError words an ExecuteLocal error for the CLI. A run that completed
+// but could not release its lease is reported as such: its work is durable, so
+// calling it failed would mislead an operator into retrying finished work.
+func localRunError(runID string, err error) error {
+	if errors.Is(err, worker.ErrLeaseNotReleased) {
+		return err
+	}
+	return fmt.Errorf("run %s failed: %w", runID, err)
+}
+
 // workerCommand runs a worker process that claims and executes queued runs.
 func workerCommand(ctx context.Context, args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("worker", flag.ContinueOnError)

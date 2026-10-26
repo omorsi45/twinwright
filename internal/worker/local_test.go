@@ -3,6 +3,8 @@ package worker
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -145,6 +147,56 @@ func TestExecuteLocalReleasesTheLeaseWhenCancelled(t *testing.T) {
 	}
 }
 
+// TestExecuteLocalReportsAFailedReleaseAfterCancellation breaks the store so
+// the release cannot reach it. Cancellation is the Ctrl-C path, the case the
+// release exists for, and a release that fails there leaves the run locked
+// until the TTL lapses. The caller has to see that, next to the cancellation,
+// or the next resume reports a lease held by a process that has already gone.
+func TestExecuteLocalReportsAFailedReleaseAfterCancellation(t *testing.T) {
+	manifest := billingManifest(t)
+	s := openStore(context.Background(), t)
+	run := seedRun(context.Background(), t, s, manifest, "")
+
+	parent, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, err := ExecuteLocal(parent, s, run.ID, Config{Logger: quietLogger()}, func(ctx context.Context, fence store.Fence) (store.Run, error) {
+		if err := s.Close(); err != nil {
+			t.Error(err)
+		}
+		cancel()
+		<-ctx.Done()
+		return store.Run{}, ctx.Err()
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err=%v want context.Canceled kept", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "release lease on run "+run.ID) || !strings.Contains(err.Error(), "database is closed") {
+		t.Fatalf("err=%v does not report the failed release", err)
+	}
+}
+
+// TestExecuteLocalReportsAFailedReleaseOfACompletedRun covers the success
+// path: the run finished, so the error must say the lease was left behind and
+// must not say the run failed.
+func TestExecuteLocalReportsAFailedReleaseOfACompletedRun(t *testing.T) {
+	manifest := billingManifest(t)
+	s := openStore(context.Background(), t)
+	run := seedRun(context.Background(), t, s, manifest, "")
+
+	_, err := ExecuteLocal(context.Background(), s, run.ID, Config{Logger: quietLogger()}, func(context.Context, store.Fence) (store.Run, error) {
+		if err := s.Close(); err != nil {
+			t.Error(err)
+		}
+		return store.Run{}, nil
+	})
+	if !errors.Is(err, ErrLeaseNotReleased) {
+		t.Fatalf("err=%v want ErrLeaseNotReleased", err)
+	}
+	if !strings.Contains(err.Error(), "database is closed") || strings.Contains(err.Error(), "failed") {
+		t.Fatalf("err=%q should carry the cause and not claim the run failed", err)
+	}
+}
+
 // TestExecuteLocalReportsALostLease expires the lease behind the holder's back
 // with a controllable clock, then lets renewal notice. The result must wrap
 // ErrFenced and fn's context must be cancelled, so a displaced local process
@@ -161,7 +213,9 @@ func TestExecuteLocalReportsALostLease(t *testing.T) {
 	_, err := ExecuteLocal(ctx, s, run.ID, cfg, func(ctx context.Context, fence store.Fence) (store.Run, error) {
 		// The lease lapses and another owner takes the run.
 		clock.Advance(time.Minute)
-		if _, err := s.AcquireRunLease(ctx, run.ID, "worker-z", time.Minute, clock.Now()); err != nil {
+		// WithoutCancel: a renewal tick landing between Advance and this
+		// acquire cancels ctx, and the takeover must not depend on that race.
+		if _, err := s.AcquireRunLease(context.WithoutCancel(ctx), run.ID, "worker-z", time.Minute, clock.Now()); err != nil {
 			return store.Run{}, err
 		}
 		select {
@@ -187,8 +241,37 @@ func TestExecuteLocalReportsALostLease(t *testing.T) {
 }
 
 func TestLocalOwnerNamesHostAndPID(t *testing.T) {
-	owner := LocalOwner()
-	if !strings.HasPrefix(owner, "local-") || strings.Count(owner, "-") < 2 {
-		t.Fatalf("owner=%q want local-<hostname>-<pid>", owner)
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		host = "unknown"
+	}
+	if want := fmt.Sprintf("local-%s-%d", host, os.Getpid()); LocalOwner() != want {
+		t.Fatalf("owner=%q want %q", LocalOwner(), want)
+	}
+}
+
+// TestExecuteLocalDefaultsToTheShortLocalTTL pins that DefaultLocalLeaseTTL is
+// applied before withDefaults, which would otherwise substitute the fleet's
+// longer TTL. A manual clock makes the expiry exact.
+func TestExecuteLocalDefaultsToTheShortLocalTTL(t *testing.T) {
+	ctx := context.Background()
+	manifest := billingManifest(t)
+	s := openStore(ctx, t)
+	run := seedRun(ctx, t, s, manifest, "")
+	clock := newClock()
+	now := clock.Now()
+
+	_, err := ExecuteLocal(ctx, s, run.ID, Config{Clock: clock.Clock(), Logger: quietLogger()}, func(ctx context.Context, fence store.Fence) (store.Run, error) {
+		lease, err := s.RunLease(ctx, run.ID)
+		if err != nil {
+			return store.Run{}, err
+		}
+		if want := now.Add(DefaultLocalLeaseTTL); !lease.ExpiresAt.Equal(want) {
+			t.Errorf("ExpiresAt=%s want %s (now+%s)", lease.ExpiresAt, want, DefaultLocalLeaseTTL)
+		}
+		return store.Run{}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }

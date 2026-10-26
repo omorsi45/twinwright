@@ -238,7 +238,7 @@ func runCLI(args []string, out io.Writer) error {
 		}
 		result, err := executeLocally(ctx, s, manifest, provider, run.ID, *steps)
 		if err != nil {
-			return fmt.Errorf("run %s failed: %w", run.ID, err)
+			return localRunError(run.ID, err)
 		}
 		return emitResult(ctx, out, s, result, manifest)
 	case "resume":
@@ -290,7 +290,7 @@ func runCLI(args []string, out io.Writer) error {
 		}
 		result, err := executeLocally(ctx, s, manifest, provider, runID, *steps)
 		if err != nil {
-			return fmt.Errorf("run %s failed: %w", runID, err)
+			return localRunError(runID, err)
 		}
 		return emitResult(ctx, out, s, result, manifest)
 	case "checkpoints":
