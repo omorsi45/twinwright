@@ -161,8 +161,9 @@ database written by a newer build is refused rather than downgraded.
   resumed runner dispatches only calls absent from the transcript and the
   transcript entry commits with the effect. And the lease unit tests ran against
   SQLite only, not PostgreSQL. ADR 0020 carries a one-line pointer and its body is
-  unchanged. Remaining limits are listed in ADR 0029: `fork`, `counterfactual` and
-  `bench` execute their own runs without a fence, the real-process test kills one
+  unchanged. Remaining limits are listed in ADR 0029: `fork`, `counterfactual`, the
+  non-distributed `bench` modes and the shadow simulation execute their own runs
+  without a fence, the real-process test kills one
   process at a time, and the matrix covers three scenarios. The README's
   distributed semantics and limitations were updated to match.
 

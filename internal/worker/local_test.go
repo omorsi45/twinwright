@@ -60,9 +60,13 @@ func TestExecuteLocalRefusesARunLeasedByAFleetWorker(t *testing.T) {
 	if _, _, err := s.ClaimRun(ctx, "worker-a", time.Minute, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
+	held, err := s.RunLease(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	called := false
-	_, err := ExecuteLocal(ctx, s, run.ID, Config{Logger: quietLogger()}, func(context.Context, store.Fence) (store.Run, error) {
+	_, err = ExecuteLocal(ctx, s, run.ID, Config{Logger: quietLogger()}, func(context.Context, store.Fence) (store.Run, error) {
 		called = true
 		return store.Run{}, nil
 	})
@@ -71,6 +75,10 @@ func TestExecuteLocalRefusesARunLeasedByAFleetWorker(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "worker-a") {
 		t.Fatalf("error does not name the holder: %v", err)
+	}
+	wantExpiry := held.ExpiresAt.UTC().Format(time.RFC3339Nano)
+	if !strings.Contains(err.Error(), wantExpiry) {
+		t.Fatalf("error does not name the expiry %s: %v", wantExpiry, err)
 	}
 	if called {
 		t.Fatal("fn ran against a run another worker holds")

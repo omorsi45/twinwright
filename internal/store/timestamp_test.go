@@ -113,6 +113,9 @@ func TestMigrationThreeRefusesAnUnparseableTimestamp(t *testing.T) {
 	if !strings.Contains(err.Error(), "run_leases.expires_at") {
 		t.Fatalf("error does not name the column: %v", err)
 	}
+	if !strings.Contains(err.Error(), `run_id="R-1"`) {
+		t.Fatalf("error does not name the row key: %v", err)
+	}
 	if version := rawSchemaVersion(ctx, t, db); version != 2 {
 		t.Fatalf("schema version=%d want 2 (the migration should have rolled back)", version)
 	}

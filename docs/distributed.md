@@ -152,8 +152,8 @@ which test shows a second worker recovering from it. ADR 0029 has the reasoning.
 | `before-model-request` | previous step fully committed; no request for this turn | `TestCrashMatrixSQLite` |
 | `after-model-request` | `model.request` committed; no response | `TestCrashMatrixSQLite`, `TestRealProcessDeathIsRecovered` (occurrence 2) |
 | `after-model-response` | turn committed (response, step, transcript); its tool calls not dispatched | `TestCrashMatrixSQLite`, `TestRealProcessDeathIsRecovered` (occurrence 3) |
-| `before-tool-commit` | inside the tool transaction with every write staged, not committed; no refund exists | `TestCrashMatrixSQLite`, `TestRealProcessDeathIsRecovered` (`createRefund`, occurrence 1) |
-| `after-tool-commit` | tool transaction committed (effect, events, saved result, transcript); one refund exists | `TestCrashMatrixSQLite`, `TestRealProcessDeathIsRecovered` (`createRefund`, occurrence 1) |
+| `before-tool-commit` | inside the tool transaction with every write staged, not committed | `TestCrashMatrixSQLite`, `TestRealProcessDeathIsRecovered` (`createRefund`, occurrence 1) |
+| `after-tool-commit` | tool transaction committed (effect, events, saved result, transcript) | `TestCrashMatrixSQLite`, `TestRealProcessDeathIsRecovered` (`createRefund`, occurrence 1) |
 | `before-completion` | final answer committed; run not marked completed | `TestCrashMatrixSQLite` |
 | `after-completion` | run completed; queue entry not finished | `TestCrashMatrixSQLite` |
 
@@ -164,12 +164,12 @@ What each test is:
   `company-incident` (80). That is 120 cases, with zero violations. After each
   crash the lease is expired, a second worker takes over, and the harness checks
   the invariants in `internal/crashmatrix/verify.go`: a strictly higher fence and
-  a reported takeover, agent mutations equal to an uncrashed run's with no call
-  ID committed twice, per-table world row counts equal to the reference, the
-  recovered ledger verifying under `replay.Verify`, the latest checkpoint at or
-  before the crash and the final checkpoint reconstructing, model requests equal
-  to responses, and the dead worker's fence refused for a new call and for an
-  already committed one.
+  a reported takeover, the number of committed agent mutations equal to an
+  uncrashed run's with no call ID committed twice, per-table world row counts
+  equal to the reference, the recovered ledger verifying under `replay.Verify`,
+  the latest checkpoint at or before the crash and the final checkpoint
+  reconstructing, model requests equal to responses, and the dead worker's fence
+  refused for a new call and for an already committed one.
 - `TestCrashMatrixPostgres` runs the first and last occurrence of each point on
   PostgreSQL when `TWINWRIGHT_TEST_POSTGRES_DSN` is set. It is skipped without a
   server and runs in the Integration workflow. It had not run against a server
@@ -181,9 +181,10 @@ What each test is:
   crashes: `after-model-request` occurrence 2, `after-model-response`
   occurrence 3, and `before-tool-commit` and `after-tool-commit` on the first
   `createRefund`. The `before-tool-commit` case asserts no refund exists before
-  recovery and the `after-tool-commit` case that exactly one does. The kill is sent before the run context is
-  cancelled, because the other order lets `database/sql` roll the transaction
-  back in an orderly way. `TestRealProcessDeathIsRecoveredPostgres` repeats the
+  recovery and the `after-tool-commit` case that exactly one does. The kill is
+  sent before the run context is cancelled, by construction in `CrashWith`,
+  because the other order lets `database/sql` roll the transaction back in an
+  orderly way. `TestRealProcessDeathIsRecoveredPostgres` repeats the
   two tool-commit crashes against a server when a DSN is set.
 
 The three points not marked with `TestRealProcessDeathIsRecovered` are covered by
@@ -236,9 +237,11 @@ expires, so `resume` is refused for up to 15 seconds.
 
 ### Limits
 
-`fork`, `counterfactual` and `bench` execute their own new runs without a fence.
-The real-process test kills processes one at a time and does not show concurrent
-multi-process contention on one SQLite file. The matrix covers three scenarios.
+`fork`, `counterfactual` and the non-distributed `bench` modes execute their own
+new runs without a fence, and so does the shadow simulation. `bench` distributed
+mode runs through the fenced `crashmatrix` harness. The real-process test kills
+processes one at a time and does not show concurrent multi-process contention on
+one SQLite file. The matrix covers three scenarios.
 
 ## Seeing it happen
 

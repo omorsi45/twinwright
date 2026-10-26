@@ -277,8 +277,10 @@ func (d *Dispatcher) Invoke(ctx context.Context, runID, callID, operationID stri
 	if err = tx.Commit(); err != nil {
 		return Result{}, err
 	}
-	// The effect is durable from here. A crash now is recovered by the
-	// idempotency lookup answering the retried call from tool_results.
+	// The effect is durable from here, and so is the transcript entry, which
+	// commits in the same transaction. A crash now is recovered because the
+	// runner's pending() skips a call that already has a tool message, so the
+	// call is not dispatched again.
 	site.Point = crashpoint.AfterToolCommit
 	if err = crashpoint.Fire(ctx, d.Crash, site); err != nil {
 		return Result{}, err

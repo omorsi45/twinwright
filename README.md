@@ -1079,8 +1079,8 @@ one that admits a gap.
   multi-process contention on one SQLite file. `after-completion` is simulated by
   skipping `FinishRun`. The PostgreSQL matrix and real-process tests run only when
   a DSN is set, in the Integration workflow, and had not run against a server when
-  this was written. `fork`, `counterfactual` and `bench` execute their own new
-  runs without a lease.
+  this was written. `fork`, `counterfactual`, the non-distributed `bench`
+  modes and the shadow simulation execute their own new runs without a lease.
 - **The metrics endpoint is unauthenticated** and off by default. Bind it to
   loopback.
 - **Published performance numbers cover one machine, and three benchmarks have

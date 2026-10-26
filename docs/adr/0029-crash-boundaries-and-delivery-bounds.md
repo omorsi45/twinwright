@@ -49,8 +49,8 @@ occurrence of every point. For each (point, occurrence) it crashes a first
 delivery there, expires the lease, lets a second worker take over, and checks:
 
 - the run completes under a strictly higher fence and is reported as a takeover;
-- the agent's committed state mutations equal the uncrashed run's, and no call ID
-  committed two;
+- the number of committed agent mutations equals the uncrashed run's, and no call
+  ID committed two;
 - per-table world row counts equal the uncrashed run's;
 - `replay.Verify` passes on the recovered ledger;
 - the latest checkpoint at or before the crash, and the final one, reconstruct;
@@ -80,7 +80,8 @@ the same database file. It covers four crashes:
 | `before-tool-commit`, `createRefund`, occurrence 1 | no refund |
 | `after-tool-commit`, `createRefund`, occurrence 1 | one refund |
 
-The kill is issued before the run context is cancelled. The other order lets
+The kill is issued before the run context is cancelled, by construction in
+`CrashWith`. The other order lets
 `database/sql` observe the cancellation and roll the open transaction back
 cleanly, which would turn a test of a dead client into a test of an orderly one.
 `TestRealProcessDeathIsRecoveredPostgres` covers the two tool-commit rows against
@@ -232,8 +233,9 @@ Integration workflow has run it.
 
 ## Remaining limits
 
-- `fork`, `counterfactual` and `bench` execute their own new runs without a
-  fence. So does the shadow simulation. Each works on a run it created, but none
+- `fork`, `counterfactual` and the non-distributed `bench` modes execute their
+  own new runs without a fence. So does the shadow simulation. `bench`
+  distributed mode runs through the fenced `crashmatrix` harness. Each works on a run it created, but none
   holds a lease while it does.
 - The real-process test kills one process at a time. It does not show concurrent
   multi-process contention on one SQLite file.
@@ -249,8 +251,8 @@ Integration workflow has run it.
 
 ## Consequences
 
-The published guarantee is now narrower than ADR 0020's prose and exactly as wide
-as the tests. The cost is an upgrade step, stopping old workers before migration
+The published guarantee is now narrower than ADR 0020's prose and no wider
+than the tests. The cost is an upgrade step, stopping old workers before migration
 3, and a run that kills its worker three times now ends `failed` with a ledger
 event saying why, where before it was retried indefinitely. An operator who
 believes the cause was transient re-enqueues it and gets a fresh budget.
