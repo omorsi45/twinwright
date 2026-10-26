@@ -22,7 +22,7 @@ const (
 // CurrentSchemaVersion is the highest migration this build knows how to apply.
 // A database recording a HIGHER version was written by a newer Twinwright and
 // is refused rather than silently downgraded.
-const CurrentSchemaVersion = 2
+const CurrentSchemaVersion = 3
 
 // intType keeps integer widths honest per backend. SQLite's INTEGER is a
 // 64-bit signed value; PostgreSQL's INTEGER is 32-bit, which would overflow
@@ -37,11 +37,16 @@ func intType(d Dialect) string {
 // migration is one forward step. statements run in order inside a single
 // transaction; columns are added only when absent, which is what lets the
 // base migration adopt a database written before migrations were tracked.
+//
+// rewrite is for changes SQL alone cannot express, such as re-encoding stored
+// values. It runs after statements and columns, in the same transaction, so a
+// failure rolls back the schema change and the version record with it.
 type migration struct {
 	version    int
 	name       string
 	statements func(Dialect) []string
 	columns    []columnAddition
+	rewrite    func(ctx context.Context, tx *sql.Tx, d Dialect) error
 }
 
 // columnAddition is an idempotent ALTER TABLE ... ADD COLUMN.
@@ -114,7 +119,89 @@ var migrations = []migration{{
 	version:    2,
 	name:       "distributed runtime leases and work queue",
 	statements: distributedSchema,
+}, {
+	version: 3,
+	name:    "canonical coordination timestamps",
+	rewrite: canonicalizeCoordinationTimestamps,
 }}
+
+// coordinationTimeColumns lists, per coordination table, its key column and the
+// TEXT columns that hold times. Migration 3 rewrites exactly these. The names
+// are fixed here and never come from user input, so interpolating them into
+// SQL is safe.
+var coordinationTimeColumns = []struct {
+	table   string
+	key     string
+	columns []string
+}{
+	{"run_leases", "run_id", []string{"expires_at", "acquired_at", "heartbeat_at"}},
+	{"work_queue", "run_id", []string{"enqueued_at", "available_at"}},
+	{"workers", "id", []string{"started_at", "last_seen_at"}},
+}
+
+// canonicalizeCoordinationTimestamps rewrites every stored coordination time
+// into CoordinationLayout. Rows written before migration 3 used RFC3339Nano,
+// which trims trailing zeros and so does not sort as text the way the times
+// order; see CoordinationLayout.
+//
+// An empty value is left alone: it means "not set", not a bad time. Any other
+// text that does not parse fails the migration, naming the table, column and row
+// key, rather than being guessed at, because a lease or queue time that cannot be
+// read cannot be ordered either. The error rolls the migration back.
+func canonicalizeCoordinationTimestamps(ctx context.Context, tx *sql.Tx, _ Dialect) error {
+	for _, spec := range coordinationTimeColumns {
+		// Read everything before writing: a driver connection cannot run an
+		// UPDATE while a result set from the same transaction is still open.
+		query := fmt.Sprintf("SELECT %s, %s FROM %s", spec.key, strings.Join(spec.columns, ", "), spec.table)
+		rows, err := tx.QueryContext(ctx, query)
+		if err != nil {
+			return fmt.Errorf("%s: %w", spec.table, err)
+		}
+		type rewrite struct {
+			column, value string
+			key           string
+		}
+		var pending []rewrite
+		for rows.Next() {
+			var key string
+			values := make([]string, len(spec.columns))
+			dest := make([]any, 0, len(spec.columns)+1)
+			dest = append(dest, &key)
+			for i := range values {
+				dest = append(dest, &values[i])
+			}
+			if err = rows.Scan(dest...); err != nil {
+				rows.Close()
+				return fmt.Errorf("%s: %w", spec.table, err)
+			}
+			for i, column := range spec.columns {
+				if values[i] == "" {
+					continue
+				}
+				parsed, parseErr := time.Parse(time.RFC3339Nano, values[i])
+				if parseErr != nil {
+					rows.Close()
+					return fmt.Errorf("%s.%s for %s=%q: cannot parse %q as RFC 3339: %w", spec.table, column, spec.key, key, values[i], parseErr)
+				}
+				pending = append(pending, rewrite{column: column, value: CoordinationTime(parsed), key: key})
+			}
+		}
+		if err = rows.Err(); err != nil {
+			rows.Close()
+			return fmt.Errorf("%s: %w", spec.table, err)
+		}
+		if err = rows.Close(); err != nil {
+			return fmt.Errorf("%s: %w", spec.table, err)
+		}
+		for _, item := range pending {
+			stmt := fmt.Sprintf("UPDATE %s SET %s=? WHERE %s=?", spec.table, item.column, spec.key)
+			if _, err = tx.ExecContext(ctx, stmt, item.value, item.key); err != nil {
+				return fmt.Errorf("%s.%s for %s=%q: %w", spec.table, item.column, spec.key, item.key, err)
+			}
+		}
+	}
+	return nil
+}
 
 // distributedSchema adds the multi-worker runtime's own tables: fenced run
 // ownership and the work queue workers claim from.
@@ -231,6 +318,11 @@ func applyOne(ctx context.Context, db *sql.DB, dialect Dialect, m migration) err
 		stmt := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", add.table, add.column, definition)
 		if _, err = tx.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("%s: %w", stmt, err)
+		}
+	}
+	if m.rewrite != nil {
+		if err = m.rewrite(ctx, tx, dialect); err != nil {
+			return err
 		}
 	}
 	if _, err = tx.ExecContext(ctx, "INSERT INTO schema_migrations(version,name,applied_at) VALUES(?,?,?)", m.version, m.name, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {

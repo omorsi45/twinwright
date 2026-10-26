@@ -79,6 +79,18 @@ database written by a newer build is refused rather than downgraded.
   live run supplies, the stored policy and the next call number, so a shadow
   verdict and an enforced one cannot drift apart.
 
+### Fixed
+
+- **Lease expiry and queue availability now order by time, not by text.** Both are
+  compared inside SQL as text, and `time.RFC3339Nano` trims trailing zeros, so
+  `12:00:01Z` sorted after `12:00:01.5Z`. Within one second a renewal could revive
+  an expired lease, and a claim could miss an expired lease or a run that had
+  become available. Times in `run_leases`, `work_queue` and `workers` are now
+  written in a fixed-width form with nine fractional digits, and migration 3
+  (schema version 3) rewrites existing rows. A stored time that does not parse
+  fails the migration, which rolls back, and names the table, column and row.
+  Ledger event timestamps are unchanged.
+
 ## v0.1.0 - 2026-09-30
 
 First tagged release. Everything below shipped before the tag; the sections are

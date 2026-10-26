@@ -46,7 +46,7 @@ func (s *Store) Enqueue(ctx context.Context, runID string, maxSteps int, now tim
 	if runs == 0 {
 		return fmt.Errorf("run %s does not exist", runID)
 	}
-	stamp := now.UTC().Format(time.RFC3339Nano)
+	stamp := CoordinationTime(now)
 	_, err := s.DB.ExecContext(ctx, `
 INSERT INTO work_queue(run_id,state,max_steps,attempts,enqueued_at,available_at,last_error)
 VALUES(?,?,?,0,?,?,'')
@@ -119,7 +119,7 @@ func (s *Store) claimOnce(ctx context.Context, owner string, ttl time.Duration, 
 	if s.Dialect == DialectPostgres {
 		lock = " FOR UPDATE OF q SKIP LOCKED"
 	}
-	stamp := now.UTC().Format(time.RFC3339Nano)
+	stamp := CoordinationTime(now)
 	args := []any{stamp, stamp, owner, stamp}
 	// Placeholders are generated; the ids themselves are always bound values.
 	exclude := ""
@@ -205,11 +205,11 @@ func (s *Store) completeQueueEntry(ctx context.Context, lease RunLease, now time
 		return err
 	}
 	if _, err = tx.ExecContext(ctx, "UPDATE work_queue SET state=?, available_at=?, last_error=? WHERE run_id=?",
-		state, availableAt.UTC().Format(time.RFC3339Nano), reason, lease.RunID); err != nil {
+		state, CoordinationTime(availableAt), reason, lease.RunID); err != nil {
 		return err
 	}
 	if _, err = tx.ExecContext(ctx, "UPDATE run_leases SET owner='', expires_at=?, heartbeat_at=? WHERE run_id=? AND owner=? AND fence=?",
-		now.UTC().Format(time.RFC3339Nano), now.UTC().Format(time.RFC3339Nano), lease.RunID, lease.Owner, lease.Token); err != nil {
+		CoordinationTime(now), CoordinationTime(now), lease.RunID, lease.Owner, lease.Token); err != nil {
 		return err
 	}
 	detail := map[string]any{"state": state}
@@ -253,7 +253,7 @@ func (s *Store) QueueDepth(ctx context.Context) (map[string]int, error) {
 
 // RegisterWorker records a worker's presence so operators can see the fleet.
 func (s *Store) RegisterWorker(ctx context.Context, id, host string, now time.Time) error {
-	stamp := now.UTC().Format(time.RFC3339Nano)
+	stamp := CoordinationTime(now)
 	_, err := s.DB.ExecContext(ctx, `
 INSERT INTO workers(id,host,started_at,last_seen_at,claims) VALUES(?,?,?,?,0)
 ON CONFLICT(id) DO UPDATE SET host=excluded.host, last_seen_at=excluded.last_seen_at`,
@@ -263,7 +263,7 @@ ON CONFLICT(id) DO UPDATE SET host=excluded.host, last_seen_at=excluded.last_see
 
 // TouchWorker updates a worker's liveness stamp.
 func (s *Store) TouchWorker(ctx context.Context, id string, now time.Time) error {
-	_, err := s.DB.ExecContext(ctx, "UPDATE workers SET last_seen_at=? WHERE id=?", now.UTC().Format(time.RFC3339Nano), id)
+	_, err := s.DB.ExecContext(ctx, "UPDATE workers SET last_seen_at=? WHERE id=?", CoordinationTime(now), id)
 	return err
 }
 

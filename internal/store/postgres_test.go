@@ -7,6 +7,7 @@ import (
 	"errors"
 	"testing"
 
+	"twinwright/internal/pgsql"
 	"twinwright/internal/pgtest"
 )
 
@@ -144,5 +145,76 @@ func TestPostgresWorldsAreIsolatedBySeedInstance(t *testing.T) {
 func TestOpenDSNRejectsUnsupportedScheme(t *testing.T) {
 	if _, err := OpenDSN(context.Background(), "mysql://localhost/twinwright"); err == nil {
 		t.Fatal("expected an explicit unsupported-backend error")
+	}
+}
+
+// TestPostgresMigrationThreeNormalizesCoordinationTimestamps upgrades a schema
+// held at version 2 and checks the rewrite on a real server, because the
+// migration reads and writes timestamp text through the PostgreSQL driver
+// rather than SQLite's.
+func TestPostgresMigrationThreeNormalizesCoordinationTimestamps(t *testing.T) {
+	ctx := context.Background()
+	dsn := pgtest.SchemaDSN(t)
+	schema, err := searchPathSchema(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = ensureSchema(ctx, dsn, schema); err != nil {
+		t.Fatal(err)
+	}
+	pgsql.Register()
+	db, err := sql.Open(pgsql.DriverName, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err = applyMigrations(ctx, db, DialectPostgres, migrations[:2]); err != nil {
+		t.Fatalf("apply migrations 1-2: %v", err)
+	}
+	for _, stmt := range []struct {
+		sql  string
+		args []any
+	}{
+		{`INSERT INTO runs(id,world_id,scenario,provider,task,status) VALUES(?,?,?,?,?,?)`,
+			[]any{"R-1", "W-1", "duplicate-charge", "scripted", "task", "running"}},
+		{`INSERT INTO run_leases(run_id,owner,fence,committed_fence,expires_at,acquired_at,heartbeat_at) VALUES(?,?,?,?,?,?,?)`,
+			[]any{"R-1", "worker-a", 1, 0, "2026-01-01T12:00:01Z", "2026-01-01T12:00:00Z", "2026-01-01T12:00:00.25Z"}},
+		{`INSERT INTO work_queue(run_id,state,max_steps,enqueued_at,available_at) VALUES(?,?,?,?,?)`,
+			[]any{"R-1", QueueRunnable, 10, "2026-01-01T12:00:01Z", "2026-01-01T12:00:01Z"}},
+		{`INSERT INTO workers(id,host,started_at,last_seen_at) VALUES(?,?,?,?)`,
+			[]any{"worker-a", "host", "2026-01-01T12:00:00Z", "2026-01-01T12:00:01.5Z"}},
+	} {
+		if _, err = db.ExecContext(ctx, stmt.sql, stmt.args...); err != nil {
+			t.Fatalf("seed %.40s: %v", stmt.sql, err)
+		}
+	}
+
+	if err = applyMigrations(ctx, db, DialectPostgres, migrations); err != nil {
+		t.Fatalf("apply migration 3: %v", err)
+	}
+
+	for _, want := range []struct{ table, column, value string }{
+		{"run_leases", "expires_at", "2026-01-01T12:00:01.000000000Z"},
+		{"run_leases", "acquired_at", "2026-01-01T12:00:00.000000000Z"},
+		{"run_leases", "heartbeat_at", "2026-01-01T12:00:00.250000000Z"},
+		{"work_queue", "enqueued_at", "2026-01-01T12:00:01.000000000Z"},
+		{"work_queue", "available_at", "2026-01-01T12:00:01.000000000Z"},
+		{"workers", "started_at", "2026-01-01T12:00:00.000000000Z"},
+		{"workers", "last_seen_at", "2026-01-01T12:00:01.500000000Z"},
+	} {
+		var got string
+		if err = db.QueryRowContext(ctx, "SELECT "+want.column+" FROM "+want.table+" LIMIT 1").Scan(&got); err != nil {
+			t.Fatalf("%s.%s: %v", want.table, want.column, err)
+		}
+		if got != want.value {
+			t.Errorf("%s.%s=%q want %q", want.table, want.column, got, want.value)
+		}
+	}
+	var version int
+	if err = db.QueryRowContext(ctx, "SELECT MAX(version) FROM schema_migrations").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != 3 {
+		t.Fatalf("schema version=%d want 3", version)
 	}
 }

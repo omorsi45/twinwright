@@ -209,11 +209,11 @@ func TestCrashedWorkerIsTakenOverAndRunCompletesOnce(t *testing.T) {
 	// Simulate the harder case too: put the entry back into the leased state
 	// with A still nominally owning it, which is what a hard kill produces.
 	if _, err = s.DB.ExecContext(ctx, "UPDATE work_queue SET state=?, available_at=? WHERE run_id=?",
-		store.QueueLeased, clock.Now().UTC().Format(time.RFC3339Nano), run.ID); err != nil {
+		store.QueueLeased, store.CoordinationTime(clock.Now()), run.ID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = s.DB.ExecContext(ctx, "UPDATE run_leases SET owner=?, expires_at=? WHERE run_id=?",
-		"worker-a", clock.Now().Add(time.Minute).UTC().Format(time.RFC3339Nano), run.ID); err != nil {
+		"worker-a", store.CoordinationTime(clock.Now().Add(time.Minute)), run.ID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -406,7 +406,10 @@ func TestIndependentRunsProgressInParallel(t *testing.T) {
 	ids := make([]string, 0, runs)
 	for i := 0; i < runs; i++ {
 		run := seedRun(ctx, t, s, manifest, "")
-		if err := s.Enqueue(ctx, run.ID, 10, clock.Now().Add(time.Duration(i)*time.Millisecond)); err != nil {
+		// Enqueue times are distinct but already past, so every run is claimable
+		// at clock.Now(). A future enqueue time would make later runs correctly
+		// unavailable now that availability orders by time rather than by text.
+		if err := s.Enqueue(ctx, run.ID, 10, clock.Now().Add(time.Duration(i-runs)*time.Millisecond)); err != nil {
 			t.Fatal(err)
 		}
 		ids = append(ids, run.ID)

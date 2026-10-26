@@ -129,8 +129,8 @@ func acquireRunLeaseTx(ctx context.Context, tx *sql.Tx, dialect Dialect, runID, 
 	if _, err = tx.ExecContext(ctx, `
 INSERT INTO run_leases(run_id,owner,fence,committed_fence,expires_at,acquired_at,heartbeat_at) VALUES(?,?,?,?,?,?,?)
 ON CONFLICT(run_id) DO UPDATE SET owner=excluded.owner, fence=excluded.fence, expires_at=excluded.expires_at, acquired_at=excluded.acquired_at, heartbeat_at=excluded.heartbeat_at`,
-		runID, owner, next.Token, committed, next.ExpiresAt.Format(time.RFC3339Nano),
-		now.UTC().Format(time.RFC3339Nano), now.UTC().Format(time.RFC3339Nano)); err != nil {
+		runID, owner, next.Token, committed, CoordinationTime(next.ExpiresAt),
+		CoordinationTime(now), CoordinationTime(now)); err != nil {
 		return RunLease{}, err
 	}
 	if err = appendOwnershipTx(ctx, tx, runID, OwnershipAcquired, owner, next.Token, now, map[string]any{
@@ -154,8 +154,8 @@ func (s *Store) RenewRunLease(ctx context.Context, lease RunLease, ttl time.Dura
 	expires := now.Add(ttl).UTC()
 	result, err := s.DB.ExecContext(ctx, `
 UPDATE run_leases SET expires_at=?, heartbeat_at=? WHERE run_id=? AND owner=? AND fence=? AND expires_at > ?`,
-		expires.Format(time.RFC3339Nano), now.UTC().Format(time.RFC3339Nano),
-		lease.RunID, lease.Owner, lease.Token, now.UTC().Format(time.RFC3339Nano))
+		CoordinationTime(expires), CoordinationTime(now),
+		lease.RunID, lease.Owner, lease.Token, CoordinationTime(now))
 	if err != nil {
 		return RunLease{}, err
 	}
@@ -177,7 +177,7 @@ UPDATE run_leases SET expires_at=?, heartbeat_at=? WHERE run_id=? AND owner=? AN
 func (s *Store) ReleaseRunLease(ctx context.Context, lease RunLease, now time.Time) error {
 	result, err := s.DB.ExecContext(ctx, `
 UPDATE run_leases SET owner='', expires_at=?, heartbeat_at=? WHERE run_id=? AND owner=? AND fence=?`,
-		now.UTC().Format(time.RFC3339Nano), now.UTC().Format(time.RFC3339Nano),
+		CoordinationTime(now), CoordinationTime(now),
 		lease.RunID, lease.Owner, lease.Token)
 	if err != nil {
 		return err
