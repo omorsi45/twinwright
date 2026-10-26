@@ -236,8 +236,7 @@ func runCLI(args []string, out io.Writer) error {
 				"backend":  string(s.Dialect),
 			})
 		}
-		runner := agent.Runner{Store: s, Dispatch: &dispatch.Dispatcher{Store: s, Manifest: manifest}, Manifest: manifest, Provider: provider}
-		result, err := runner.Execute(ctx, run.ID, *steps)
+		result, err := executeLocally(ctx, s, manifest, provider, run.ID, *steps)
 		if err != nil {
 			return fmt.Errorf("run %s failed: %w", run.ID, err)
 		}
@@ -289,8 +288,7 @@ func runCLI(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		runner := agent.Runner{Store: s, Dispatch: &dispatch.Dispatcher{Store: s, Manifest: manifest}, Manifest: manifest, Provider: provider}
-		result, err := runner.Execute(ctx, runID, *steps)
+		result, err := executeLocally(ctx, s, manifest, provider, runID, *steps)
 		if err != nil {
 			return fmt.Errorf("run %s failed: %w", runID, err)
 		}

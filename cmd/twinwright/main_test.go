@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -11,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"twinwright/internal/behavior"
 	"twinwright/internal/compiler"
@@ -1459,5 +1461,43 @@ func TestContainerCLILocal(t *testing.T) {
 	out.Reset()
 	if err := runCLI([]string{"container", "stop", "--config", cfgPath}, &out); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestResumeRefusesARunLeasedByAWorker proves the local path takes the same
+// fence as the fleet: a worker holding a live lease keeps the run, and resume
+// refuses instead of executing alongside it.
+func TestResumeRefusesARunLeasedByAWorker(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join("..", "..", "examples", "billing")
+	manifest := filepath.Join(dir, "manifest.json")
+	db := filepath.Join(dir, "world.db")
+	if err := runCLI([]string{"build", filepath.Join(root, "openapi.yaml"), "--out", manifest}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := runCLI([]string{"run", "duplicate-charge", "--agent", "scripted", "--manifest", manifest, "--db", db, "--enqueue"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var queued struct {
+		RunID string `json:"run_id"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &queued); err != nil || queued.RunID == "" {
+		t.Fatalf("enqueue output: %v %s", err, out.String())
+	}
+
+	ctx := context.Background()
+	s, err := store.OpenDSN(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = s.ClaimRun(ctx, "worker-a", time.Minute, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	err = runCLI([]string{"resume", queued.RunID, "--agent", "scripted", "--manifest", manifest, "--db", db}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "leased by") || !strings.Contains(err.Error(), "worker-a") {
+		t.Fatalf("resume error=%v want a refusal naming worker-a", err)
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"twinwright/internal/agent"
+	"twinwright/internal/compiler"
 	"twinwright/internal/dispatch"
 	"twinwright/internal/metrics"
 	"twinwright/internal/store"
@@ -105,6 +106,24 @@ func queueCommand(ctx context.Context, args []string, out io.Writer) error {
 		"workers":  workers,
 		"delivery": "at_least_once",
 		"backend":  string(s.Dialect),
+	})
+}
+
+// executeLocally runs a run from the CLI under the same fenced lease a worker
+// holds, so `run` and `resume` cannot execute alongside a fleet worker on the
+// same run. Ctrl-C and SIGTERM cancel the run and still release the lease.
+func executeLocally(ctx context.Context, s *store.Store, manifest compiler.Manifest, provider agent.Provider, runID string, steps int) (store.Run, error) {
+	signalCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return worker.ExecuteLocal(signalCtx, s, runID, worker.Config{}, func(runCtx context.Context, fence store.Fence) (store.Run, error) {
+		runner := agent.Runner{
+			Store:    s,
+			Dispatch: &dispatch.Dispatcher{Store: s, Manifest: manifest, Fence: &fence},
+			Manifest: manifest,
+			Provider: provider,
+			Fence:    &fence,
+		}
+		return runner.Execute(runCtx, runID, steps)
 	})
 }
 
