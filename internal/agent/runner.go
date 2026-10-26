@@ -10,6 +10,7 @@ import (
 
 	"twinwright/internal/authz"
 	"twinwright/internal/compiler"
+	"twinwright/internal/crashpoint"
 	"twinwright/internal/dispatch"
 	"twinwright/internal/store"
 )
@@ -56,6 +57,11 @@ type Runner struct {
 	// tests; nil means time.Now.
 	Fence *store.Fence
 	Clock store.Clock
+	// Crash, when set, is offered the model-call and completion boundaries so
+	// a harness can simulate process death at each. When it fires, Execute
+	// returns the crash at once and writes nothing more, as a dead process
+	// would.
+	Crash crashpoint.Hook
 }
 
 func (r Runner) Execute(ctx context.Context, runID string, maxSteps int) (store.Run, error) {
@@ -80,6 +86,11 @@ func (r Runner) Execute(ctx context.Context, runID string, maxSteps int) (store.
 		}
 		if call, ok := pending(history); ok {
 			if _, err = r.Dispatch.Invoke(ctx, runID, call.ID, call.OperationID, call.Arguments); err != nil {
+				if errors.Is(err, crashpoint.ErrCrashed) {
+					// A simulated death records nothing: no error event, no
+					// failed status.
+					return store.Run{}, err
+				}
 				payload := map[string]any{"kind": "dispatch", "call_id": call.ID, "operation_id": call.OperationID, "message": err.Error()}
 				if saveErr := r.Store.SaveStatusGuarded(ctx, r.Fence, r.Clock, runID, "failed", "error", payload); saveErr != nil {
 					return store.Run{}, fmt.Errorf("dispatch error: %v; recording error: %w", err, saveErr)
@@ -89,6 +100,9 @@ func (r Runner) Execute(ctx context.Context, runID string, maxSteps int) (store.
 			continue
 		}
 		if len(history) > 0 && history[len(history)-1].Role == "assistant" && len(history[len(history)-1].ToolCalls) == 0 {
+			if err = crashpoint.Fire(ctx, r.Crash, crashpoint.Site{Point: crashpoint.BeforeCompletion, RunID: runID, Step: run.Step}); err != nil {
+				return store.Run{}, err
+			}
 			if err = r.Store.SaveStatusGuarded(ctx, r.Fence, r.Clock, runID, "completed", "execution.completed", map[string]any{"step": run.Step}); err != nil {
 				return store.Run{}, err
 			}
@@ -105,7 +119,16 @@ func (r Runner) Execute(ctx context.Context, runID string, maxSteps int) (store.
 			return store.Run{}, err
 		}
 		request := map[string]any{"task": run.Task, "provider": run.Provider, "model": run.Model, "history": history, "operations": operations}
+		site := crashpoint.Site{RunID: runID, Step: run.Step}
+		site.Point = crashpoint.BeforeModelRequest
+		if err = crashpoint.Fire(ctx, r.Crash, site); err != nil {
+			return store.Run{}, err
+		}
 		if err = r.startModelCall(ctx, runID, request); err != nil {
+			return store.Run{}, err
+		}
+		site.Point = crashpoint.AfterModelRequest
+		if err = crashpoint.Fire(ctx, r.Crash, site); err != nil {
 			return store.Run{}, err
 		}
 		next, err := r.callProvider(ctx, run.Task, history, operations)
@@ -138,6 +161,10 @@ func (r Runner) Execute(ctx context.Context, runID string, maxSteps int) (store.
 			return store.Run{}, err
 		}
 		if err = r.Store.SaveTurnGuarded(ctx, r.Fence, r.Clock, runID, run.Step+1, string(transcript), next, interruptionPayloads(next.Interruptions)); err != nil {
+			return store.Run{}, err
+		}
+		site.Point = crashpoint.AfterModelResponse
+		if err = crashpoint.Fire(ctx, r.Crash, site); err != nil {
 			return store.Run{}, err
 		}
 		used++
