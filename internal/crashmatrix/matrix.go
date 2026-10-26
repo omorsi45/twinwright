@@ -178,6 +178,21 @@ type CrashOutcome struct {
 // status is written. It is simulated by running to completion and not calling
 // FinishRun, leaving a completed run whose queue entry is still leased.
 func Crash(ctx context.Context, s *store.Store, t Target, runID string, c Case, clock *Clock, ttl time.Duration) (CrashOutcome, error) {
+	return CrashWith(ctx, s, t, runID, c, clock, ttl, nil)
+}
+
+// CrashWith is Crash with an extra action at the crash site. When onCrash is
+// non-nil it runs inside the crash hook, after the context is cancelled and
+// before the hook returns its error, so it executes exactly where the worker
+// would die.
+//
+// It exists for a real-process test, which has to die at the site: a SIGKILL
+// delivered after Execute returned would come too late to show what a process
+// that vanished mid-run leaves behind. Keeping the claim and runner wiring here,
+// instead of repeating it in that test, means the in-process and real-process
+// crashes cannot drift apart. onCrash is not called for AfterCompletion, which
+// has no site in the code.
+func CrashWith(ctx context.Context, s *store.Store, t Target, runID string, c Case, clock *Clock, ttl time.Duration, onCrash func()) (CrashOutcome, error) {
 	var out CrashOutcome
 	lease, _, err := s.ClaimRun(ctx, doomedOwner, ttl, clock.Now())
 	if err != nil {
@@ -192,6 +207,9 @@ func Crash(ctx context.Context, s *store.Store, t Target, runID string, c Case, 
 		hook = CrashHook(c, func() {
 			out.Crashed = true
 			cancel()
+			if onCrash != nil {
+				onCrash()
+			}
 		})
 	}
 	fence := lease.Fence()

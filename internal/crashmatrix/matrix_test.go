@@ -264,3 +264,46 @@ func anyContains(list []string, needle string) bool {
 	}
 	return false
 }
+
+// TestCrashWithCallsOnCrashAtTheSite proves CrashWith's one extra promise over
+// Crash: onCrash runs exactly once, at the case's crash site, before the hook
+// returns its error. The real-process test depends on that to die at the site
+// rather than somewhere after it. The ledger length seen from onCrash shows it
+// ran at the site: the crash is injected at after-model-request #2, so
+// anything later would already have written more events.
+func TestCrashWithCallsOnCrashAtTheSite(t *testing.T) {
+	sc := scenarioNamed(t, "duplicate-charge")
+	c := Case{Point: crashpoint.AfterModelRequest, Occurrence: 2}
+	ctx := context.Background()
+	s := openSQLite(t)
+	run, err := sc.Seed(ctx, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := NewClock(caseStart)
+	if err = s.Enqueue(ctx, run.ID, sc.Target.Steps, clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+	calls, seenAtCall := 0, -1
+	crash, err := CrashWith(ctx, s, sc.Target, run.ID, c, clock, matrixTTL, func() {
+		calls++
+		last, lerr := s.LastEvent(ctx, run.ID)
+		if lerr != nil {
+			t.Errorf("read ledger inside onCrash: %v", lerr)
+			return
+		}
+		seenAtCall = last.Seq
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("onCrash ran %d times, want exactly 1", calls)
+	}
+	if !crash.Crashed {
+		t.Fatal("CrashWith did not report the crash")
+	}
+	if seenAtCall != crash.CrashSeq {
+		t.Fatalf("ledger was at seq %d inside onCrash but %d after CrashWith returned: onCrash did not run at the site", seenAtCall, crash.CrashSeq)
+	}
+}

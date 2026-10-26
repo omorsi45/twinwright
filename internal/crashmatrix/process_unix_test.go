@@ -54,8 +54,8 @@ func TestMain(m *testing.M) {
 // worker only in how it dies. It returns an exit code only when the kill did
 // not happen, because a surviving helper means the test proved nothing.
 //
-// It cannot call Crash, whose death is a cancelled context. It builds the same
-// claim and runner Crash does, with CrashHook delivering the signal instead.
+// It calls CrashWith, the same claim and runner wiring the in-process matrix
+// uses, with the signal as its onCrash so the death happens at the site.
 func runDoomedWorker() int {
 	fail := func(code int, format string, args ...any) int {
 		fmt.Fprintf(os.Stderr, "doomed worker: "+format+"\n", args...)
@@ -88,18 +88,11 @@ func runDoomedWorker() int {
 		Occurrence: occurrence,
 		Operation:  os.Getenv("TW_CM_OPERATION"),
 	}
-	clock := NewClock(time.Now())
-	lease, _, err := s.ClaimRun(ctx, doomedOwner, time.Minute, clock.Now())
-	if err != nil {
-		return fail(helperSetupFailedExit, "claim run: %v", err)
-	}
-	fence := lease.Fence()
-	hook := CrashHook(c, func() {
+	_, err = CrashWith(ctx, s, *target, os.Getenv("TW_CM_RUN"), c, NewClock(time.Now()), time.Minute, func() {
 		_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
 		select {} // the signal is asynchronous; never return into the runner first
 	})
-	_, err = newRunner(s, *target, &fence, clock, hook).Execute(ctx, os.Getenv("TW_CM_RUN"), target.Steps)
-	return fail(helperSurvivedExit, "survived %s #%d: execute returned %v", c.Point, c.Occurrence, err)
+	return fail(helperSurvivedExit, "survived %s #%d: CrashWith returned %v", c.Point, c.Occurrence, err)
 }
 
 // processDeathCase is one crash of a real process.
