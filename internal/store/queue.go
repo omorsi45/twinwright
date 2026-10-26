@@ -38,8 +38,12 @@ type QueueEntry struct {
 }
 
 // Enqueue makes a run claimable by any worker. Enqueueing a run that is
-// already queued resets it to runnable and clears its backoff, which is how an
-// operator retries a run that failed.
+// already queued resets it to runnable, clears its backoff and its delivery
+// count, which is how an operator retries a run that failed. The count is reset
+// because an explicit retry deserves a fresh delivery budget: left in place, a
+// run that failed at the delivery limit would be refused again on the next claim
+// without executing. Which workers held the run before stays in
+// run_ownership_log.
 func (s *Store) Enqueue(ctx context.Context, runID string, maxSteps int, now time.Time) error {
 	if maxSteps < 1 {
 		return fmt.Errorf("maxSteps must be positive")
@@ -55,7 +59,7 @@ func (s *Store) Enqueue(ctx context.Context, runID string, maxSteps int, now tim
 	_, err := s.DB.ExecContext(ctx, `
 INSERT INTO work_queue(run_id,state,max_steps,attempts,enqueued_at,available_at,last_error)
 VALUES(?,?,?,0,?,?,'')
-ON CONFLICT(run_id) DO UPDATE SET state=excluded.state, max_steps=excluded.max_steps, available_at=excluded.available_at, last_error=''`,
+ON CONFLICT(run_id) DO UPDATE SET state=excluded.state, max_steps=excluded.max_steps, attempts=0, available_at=excluded.available_at, last_error=''`,
 		runID, QueueRunnable, maxSteps, stamp, stamp)
 	return err
 }

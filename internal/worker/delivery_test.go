@@ -239,6 +239,64 @@ func TestCompletedRunPastTheDeliveryLimitIsFinishedNotFailed(t *testing.T) {
 	}
 }
 
+// TestReenqueuedFailedRunGetsAFreshDeliveryBudget covers the operator retry that
+// Enqueue exists for. A run failed at the delivery limit carries attempts past
+// MaxAttempts, so without a reset the next claim would refuse it again before it
+// executed. An explicit retry starts a new delivery budget; the earlier
+// ownership history stays in run_ownership_log.
+func TestReenqueuedFailedRunGetsAFreshDeliveryBudget(t *testing.T) {
+	ctx := context.Background()
+	manifest := billingManifest(t)
+	s := openStore(ctx, t)
+	clock := newClock()
+	run := seedRun(ctx, t, s, manifest, "")
+	if err := s.Enqueue(ctx, run.ID, 10, clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+	const maxAttempts = 3
+	for i := 1; i <= maxAttempts; i++ {
+		killDelivery(ctx, t, s, clock, i)
+		clock.Advance(2 * time.Minute)
+	}
+	neverRuns := func(context.Context, store.RunLease, store.QueueEntry) (store.Run, error) {
+		t.Fatal("a run past its delivery limit was executed")
+		return store.Run{}, nil
+	}
+	limiter := New(s, neverRuns, Config{ID: "worker-limit", LeaseTTL: time.Minute, MaxAttempts: maxAttempts, Clock: clock.Clock(), Logger: quietLogger()})
+	if err := limiter.Register(ctx); err != nil {
+		t.Fatal(err)
+	}
+	failed, err := limiter.ClaimAndRun(ctx)
+	if err != nil {
+		t.Fatalf("claim at the limit: %v", err)
+	}
+	if failed.Disposition != Failed {
+		t.Fatalf("outcome=%+v want failed at the delivery limit", failed)
+	}
+
+	if err = s.Enqueue(ctx, run.ID, 10, clock.Now()); err != nil {
+		t.Fatalf("re-enqueue: %v", err)
+	}
+	retry := New(s, realExecutor(s, manifest, clock.Clock()), Config{ID: "worker-retry", LeaseTTL: time.Minute, MaxAttempts: maxAttempts, Clock: clock.Clock(), Logger: quietLogger()})
+	if err = retry.Register(ctx); err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := retry.ClaimAndRun(ctx)
+	if err != nil {
+		t.Fatalf("claim after re-enqueue: %v", err)
+	}
+	if outcome.Disposition != Finished || outcome.Attempt != 1 {
+		t.Fatalf("outcome=%+v want finished at attempt 1", outcome)
+	}
+	current, err := s.Run(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Status != "completed" {
+		t.Fatalf("run status=%q want completed", current.Status)
+	}
+}
+
 // completeUnderFence runs the scripted agent to completion under lease's fence
 // and stops there, without FinishRun: the worker died after completion.
 func completeUnderFence(ctx context.Context, t *testing.T, s *store.Store, manifest compiler.Manifest, clock *testClock, lease store.RunLease) {

@@ -99,7 +99,9 @@ database written by a newer build is refused rather than downgraded.
   and the queue entry `failed`. A run that had already completed is finished
   instead. `Outcome.Takeover` was `attempts > 1`, so an ordinary requeue after an
   error counted as a takeover; it is now true only when the claim displaced an
-  expired lease. Delivery remains at-least-once.
+  expired lease. Re-enqueueing a run resets its delivery count, so an operator
+  retry of a run that failed at the limit executes instead of being refused
+  again. Delivery remains at-least-once.
 
 ## v0.1.0 - 2026-09-30
 
