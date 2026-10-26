@@ -12,8 +12,8 @@
 
 ## Global Constraints
 
-- Work only in `/Users/omarmorsi/Desktop/Github/twinwright/.worktrees/cloud-m1-reliability-core` on branch `cloud/m1-reliability-core`.
-- Every shell starts with `export PATH="/usr/bin:/opt/homebrew/bin:$PATH"` (`/usr/local/bin/git` is a broken x86 binary on this host).
+- Work on branch `cloud/m1-reliability-core` from the repository root.
+- Use Go 1.27.2 and a working git on PATH.
 - Go 1.27.2. No new module dependencies: `go.mod` and `go.sum` stay byte-identical, `go mod tidy` produces no diff.
 - `go test ./...` stays hermetic: no network, API key, Docker or PostgreSQL. PostgreSQL tests skip unless `TWINWRIGHT_TEST_POSTGRES_DSN` is set and use `internal/pgtest` (`pgtest.Available()`, `pgtest.SchemaDSN(t)`). Real-process tests carry `//go:build unix`.
 - Each commit passes `make check` and `go test -count=1 ./...`. The last task also passes `go test -race -count=1 ./...`, `./scripts/e2e.sh` and `make bench-smoke`.
