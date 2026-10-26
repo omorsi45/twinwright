@@ -233,10 +233,20 @@ Integration workflow has run it.
 
 ## Remaining limits
 
-- `fork`, `counterfactual` and the non-distributed `bench` modes execute their
-  own new runs without a fence. So does the shadow simulation. `bench`
-  distributed mode runs through the fenced `crashmatrix` harness. Each works on a run it created, but none
-  holds a lease while it does.
+- `fork`, `counterfactual`, the shadow simulation and `bench` in its
+  non-distributed modes execute their own new runs without a fence. Each works
+  on a run it created, but none of them holds a lease while it does. `bench`
+  distributed mode is not in this list: it runs through the fenced `crashmatrix`
+  harness.
+- A run retried after hitting the delivery limit can complete but cannot be
+  verified by replay. Its ledger records the `delivery_limit` error and, before
+  it, a model request that was never answered. The retry appends a new model
+  request instead of reusing the unanswered one, because the runner reuses a
+  request only when it is the last event, and replay refuses any error kind other
+  than an injected 503. `replay.Verify` therefore returns `run contains
+  unsupported delivery_limit error`. `TestRetryAfterTheDeliveryLimitCompletesButDoesNotReplay`
+  pins this. Changing replay or the runner to accept such a ledger is deferred to
+  milestone 3 and needs its own decision record.
 - The real-process test kills one process at a time. It does not show concurrent
   multi-process contention on one SQLite file.
 - The matrix covers three scenarios. A fourth world or a different tool shape is

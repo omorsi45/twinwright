@@ -527,7 +527,9 @@ durable at each point, and which test proves it, is in
 `MaxAttempts` (default 3). A run claimed after that is not executed: if it had
 already completed its queue entry is finished, and otherwise it is marked `failed`
 with an `error` ledger event `{"kind":"delivery_limit","deliveries":N,"max_attempts":M}`.
-Re-enqueueing the run gives it a fresh budget.
+Re-enqueueing the run gives it a fresh budget. A run retried this way can
+complete but cannot be verified by replay, because its ledger records the
+`delivery_limit` error and an unanswered model request.
 
 **Local execution.** `run` without `--enqueue`, and `resume`, hold a lease owned by
 `local-<host>-<pid>` with a 15 second TTL, renewed while they run and released on
@@ -1073,6 +1075,11 @@ one that admits a gap.
   prevented. That covers world mutations only: a crash before a model response is
   recorded repeats the provider call and its cost, and provider spend, logs and
   metrics are not fenced.
+- **A run retried after the delivery limit is not replay-verifiable.** Re-enqueueing
+  a run that failed at the delivery limit starts a fresh delivery budget and the
+  run can complete, but its ledger records the `delivery_limit` error and an
+  unanswered model request, which `replay` refuses. Accepting such a ledger is
+  deferred to a later milestone; ADR 0029 lists it under remaining limits.
 - **Crash recovery claims are bounded.** The crash matrix
   covers seven named boundaries across three scenarios, and the real-process test
   kills one process at a time at four points, so it does not show concurrent

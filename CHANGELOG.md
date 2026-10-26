@@ -146,7 +146,11 @@ database written by a newer build is refused rather than downgraded.
   error counted as a takeover; it is now true only when the claim displaced an
   expired lease. Re-enqueueing a run resets its delivery count, so an operator
   retry of a run that failed at the limit executes instead of being refused
-  again. Delivery remains at-least-once.
+  again. Delivery remains at-least-once. **Known limit:** a run retried after
+  hitting the delivery limit can complete but cannot be verified by replay,
+  because its ledger records the `delivery_limit` error and an unanswered model
+  request. A test pins the behaviour and ADR 0029 lists it under remaining
+  limits.
 
 ### Changed
 

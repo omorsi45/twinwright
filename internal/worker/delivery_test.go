@@ -5,12 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"twinwright/internal/agent"
 	"twinwright/internal/compiler"
+	"twinwright/internal/crashpoint"
 	"twinwright/internal/dispatch"
+	"twinwright/internal/replay"
 	"twinwright/internal/store"
 )
 
@@ -316,5 +319,138 @@ func completeUnderFence(ctx context.Context, t *testing.T, s *store.Store, manif
 	}
 	if run.Status != "completed" {
 		t.Fatalf("doomed delivery ended as %q want completed", run.Status)
+	}
+}
+
+// TestTheLastAllowedDeliveryStillExecutes pins the boundary of the delivery
+// bound. MaxAttempts counts the deliveries a run may have, so the delivery that
+// reaches MaxAttempts is the last one that executes, and only the next one is
+// settled without running. Two doomed claims leave the third as that last
+// allowed delivery; a bound written as `Attempts >= MaxAttempts` would refuse
+// it, fail a run that still had a delivery left, and pass every other test here.
+func TestTheLastAllowedDeliveryStillExecutes(t *testing.T) {
+	ctx := context.Background()
+	manifest := billingManifest(t)
+	s := openStore(ctx, t)
+	clock := newClock()
+	run := seedRun(ctx, t, s, manifest, "")
+	if err := s.Enqueue(ctx, run.ID, 10, clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+	const maxAttempts = 3
+	for i := 1; i < maxAttempts; i++ {
+		killDelivery(ctx, t, s, clock, i)
+		clock.Advance(2 * time.Minute)
+	}
+	w := New(s, realExecutor(s, manifest, clock.Clock()), Config{ID: "worker-last", LeaseTTL: time.Minute, MaxAttempts: maxAttempts, Clock: clock.Clock(), Logger: quietLogger()})
+	if err := w.Register(ctx); err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := w.ClaimAndRun(ctx)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if outcome.Attempt != maxAttempts || outcome.Disposition != Finished {
+		t.Fatalf("outcome=%+v want finished at attempt %d", outcome, maxAttempts)
+	}
+	current, err := s.Run(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Status != "completed" {
+		t.Fatalf("run status=%q want completed", current.Status)
+	}
+}
+
+// crashAfterModelRequest is the crash hook for a delivery that dies right after
+// it recorded a model request and before it asked the model for an answer.
+func crashAfterModelRequest(_ context.Context, site crashpoint.Site) error {
+	if site.Point == crashpoint.AfterModelRequest {
+		return errors.New("worker process died after the model request")
+	}
+	return nil
+}
+
+// TestRetryAfterTheDeliveryLimitCompletesButDoesNotReplay documents a limit of
+// the delivery bound; it does not endorse the outcome. A run that is failed at
+// the delivery limit and then retried with Enqueue can complete, but its ledger
+// keeps the delivery_limit error and the model request that was never answered
+// before it, and the retry appends a new request instead of reusing that one.
+// Replay refuses an error of that kind, so the completed run cannot be verified.
+//
+// Changing replay or the runner to accept this is milestone 3 work with its own
+// decision record; until then this test pins what actually happens so the
+// documented limit (ADR 0029, Remaining limits) cannot drift unnoticed. If a
+// later change makes the run verifiable, this test should fail and be rewritten
+// together with that ADR.
+func TestRetryAfterTheDeliveryLimitCompletesButDoesNotReplay(t *testing.T) {
+	ctx := context.Background()
+	manifest := billingManifest(t)
+	s := openStore(ctx, t)
+	clock := newClock()
+	run := seedRun(ctx, t, s, manifest, "")
+	if err := s.Enqueue(ctx, run.ID, 10, clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+	const maxAttempts = 3
+	for i := 1; i <= maxAttempts; i++ {
+		lease, _, err := s.ClaimRun(ctx, fmt.Sprintf("doomed-%d", i), time.Minute, clock.Now())
+		if err != nil {
+			t.Fatalf("doomed claim %d: %v", i, err)
+		}
+		fence := lease.Fence()
+		runner := agent.Runner{
+			Store:    s,
+			Dispatch: &dispatch.Dispatcher{Store: s, Manifest: manifest, Fence: &fence, Clock: clock.Clock()},
+			Manifest: manifest,
+			Provider: agent.ScriptedProvider{},
+			Fence:    &fence,
+			Clock:    clock.Clock(),
+			Crash:    crashAfterModelRequest,
+		}
+		if _, err = runner.Execute(ctx, run.ID, 10); !errors.Is(err, crashpoint.ErrCrashed) {
+			t.Fatalf("doomed delivery %d err=%v want a simulated crash", i, err)
+		}
+		clock.Advance(2 * time.Minute)
+	}
+
+	neverRuns := func(context.Context, store.RunLease, store.QueueEntry) (store.Run, error) {
+		t.Fatal("a run past its delivery limit was executed")
+		return store.Run{}, nil
+	}
+	limiter := New(s, neverRuns, Config{ID: "worker-limit", LeaseTTL: time.Minute, MaxAttempts: maxAttempts, Clock: clock.Clock(), Logger: quietLogger()})
+	if err := limiter.Register(ctx); err != nil {
+		t.Fatal(err)
+	}
+	failed, err := limiter.ClaimAndRun(ctx)
+	if err != nil || failed.Disposition != Failed {
+		t.Fatalf("claim at the limit: outcome=%+v err=%v want failed", failed, err)
+	}
+
+	if err = s.Enqueue(ctx, run.ID, 10, clock.Now()); err != nil {
+		t.Fatalf("re-enqueue: %v", err)
+	}
+	retry := New(s, realExecutor(s, manifest, clock.Clock()), Config{ID: "worker-retry", LeaseTTL: time.Minute, MaxAttempts: maxAttempts, Clock: clock.Clock(), Logger: quietLogger()})
+	if err = retry.Register(ctx); err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := retry.ClaimAndRun(ctx)
+	if err != nil || outcome.Disposition != Finished {
+		t.Fatalf("retry: outcome=%+v err=%v want finished", outcome, err)
+	}
+	current, err := s.Run(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Status != "completed" {
+		t.Fatalf("run status=%q want completed", current.Status)
+	}
+
+	report, err := replay.Verify(ctx, s, run.ID, manifest)
+	if err == nil {
+		t.Fatalf("replay verified a run retried after the delivery limit: %+v", report)
+	}
+	if !strings.Contains(err.Error(), "delivery_limit") {
+		t.Fatalf("replay err=%v want it to name the delivery_limit error", err)
 	}
 }

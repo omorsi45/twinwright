@@ -216,7 +216,11 @@ transaction, which appends the ledger event
 `{"kind":"delivery_limit","deliveries":N,"max_attempts":M}` and fails the queue
 entry. `Outcome.Takeover` is true only when the claim displaced an expired lease,
 and re-enqueueing a run resets its count, so an operator retry gets a fresh
-budget. The tests are in `internal/worker/delivery_test.go`.
+budget. A run retried that way can complete but cannot be verified by replay,
+because its ledger records the `delivery_limit` error and an unanswered model
+request; `TestRetryAfterTheDeliveryLimitCompletesButDoesNotReplay` pins it and
+ADR 0029 lists it under remaining limits. The tests are in
+`internal/worker/delivery_test.go`.
 
 ### Timestamps
 
