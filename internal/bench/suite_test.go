@@ -1,6 +1,7 @@
 package bench
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -61,7 +62,7 @@ func TestParseStandardSuiteFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if suite.Name != "standard" || len(suite.Cases) != 20 {
+	if suite.Name != "standard" || len(suite.Cases) != 21 {
 		t.Fatalf("suite=%s len=%d", suite.Name, len(suite.Cases))
 	}
 	seen := map[string]bool{}
@@ -82,5 +83,99 @@ func TestParseRequiresExamplesRoot(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "not-dir"), []byte("x"), 0644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestIntegerCrashAtKeepsItsMeaning(t *testing.T) {
+	root := filepath.Join("..", "..", "examples")
+	raw := []byte(`
+version: 1
+suite: crash-at
+cases:
+  - id: integer-crash
+    category: distributed
+    world: billing
+    scenario: duplicate-charge
+    mode: distributed
+    crash_at: 3
+    assertions: assertions/duplicate-charge.yaml
+    dimensions: [task, recovery, duplicate_effects]
+`)
+	suite, err := Parse(raw, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := suite.Cases[0].CrashPoint; got != "" {
+		t.Fatalf("CrashPoint=%q; a bare crash_at must leave it empty, meaning after-model-request", got)
+	}
+	report, err := Run(context.Background(), suite, Options{
+		ExamplesRoot: root,
+		WorkDir:      t.TempDir(),
+		Agent:        "scripted",
+		ProviderFor:  scriptedProviders,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := report.Cases[0]
+	if result.Status != "passed" {
+		t.Fatalf("status=%s err=%s failed=%v", result.Status, result.Error, result.FailedChecks)
+	}
+	d := result.Distributed
+	if d == nil {
+		t.Fatal("no distributed measurements")
+	}
+	if d.CrashPoint != "after-model-request" || d.Occurrence != 3 {
+		t.Errorf("crash point=%q occurrence=%d want after-model-request 3", d.CrashPoint, d.Occurrence)
+	}
+	// The same values TestRunStandardSuiteScripted holds the integer cases to.
+	if !d.WorkerCrashed || !d.Takeover || !d.ReplayVerified || d.Deliveries != 2 || d.RecoveryFence <= d.CrashedFence {
+		t.Errorf("distributed=%+v; want crash, takeover, replay verified, 2 deliveries, recovery fence above the crashed one", *d)
+	}
+	if d.FencingRejections != 1 {
+		t.Errorf("fencing rejections=%d want 1", d.FencingRejections)
+	}
+	if len(d.Violations) != 0 {
+		t.Errorf("violations=%v", d.Violations)
+	}
+}
+
+func TestCrashPointOutsideDistributedModeIsRefused(t *testing.T) {
+	root := filepath.Join("..", "..", "examples")
+	for _, field := range []string{"crash_point: after-tool-commit", "crash_operation: createRefund"} {
+		raw := "version: 1\nsuite: x\ncases:\n  - id: a\n    category: reasoning\n    world: billing\n    scenario: duplicate-charge\n    " + field + "\n    dimensions: [task]\n"
+		_, err := Parse([]byte(raw), root)
+		if err == nil {
+			t.Errorf("%s: accepted on a local case", field)
+			continue
+		}
+		name := strings.SplitN(field, ":", 2)[0]
+		if !strings.Contains(err.Error(), name) {
+			t.Errorf("%s: error %q does not name the field", field, err)
+		}
+	}
+}
+
+func TestUnknownCrashPointIsRefused(t *testing.T) {
+	root := filepath.Join("..", "..", "examples")
+	raw := "version: 1\nsuite: x\ncases:\n  - id: a\n    category: distributed\n    world: billing\n    scenario: duplicate-charge\n    mode: distributed\n    crash_point: mid-flight\n    crash_at: 1\n    dimensions: [task]\n"
+	_, err := Parse([]byte(raw), root)
+	if err == nil {
+		t.Fatal("accepted crash_point mid-flight")
+	}
+	if !strings.Contains(err.Error(), "crash_point") || !strings.Contains(err.Error(), "mid-flight") {
+		t.Errorf("error %q does not name the field and the value", err)
+	}
+}
+
+func TestCrashOperationNeedsACrashPoint(t *testing.T) {
+	root := filepath.Join("..", "..", "examples")
+	raw := "version: 1\nsuite: x\ncases:\n  - id: a\n    category: distributed\n    world: billing\n    scenario: duplicate-charge\n    mode: distributed\n    crash_operation: createRefund\n    crash_at: 1\n    dimensions: [task]\n"
+	_, err := Parse([]byte(raw), root)
+	if err == nil {
+		t.Fatal("accepted crash_operation without crash_point")
+	}
+	if !strings.Contains(err.Error(), "crash_operation") {
+		t.Errorf("error %q does not name the field", err)
 	}
 }

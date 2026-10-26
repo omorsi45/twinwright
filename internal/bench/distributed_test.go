@@ -2,6 +2,7 @@ package bench
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -180,7 +181,7 @@ cases:
 	if result.Status != "error" || result.Passed {
 		t.Fatalf("status=%s passed=%v; a case with no injected crash must not pass", result.Status, result.Passed)
 	}
-	if !strings.Contains(result.Error, "completed before model turn 99") {
+	if !strings.Contains(result.Error, "completed before after-model-request #99") {
 		t.Fatalf("error=%q does not say the crash never happened", result.Error)
 	}
 	if result.Distributed != nil && result.Distributed.WorkerCrashed {
@@ -230,5 +231,46 @@ cases:
 				t.Fatalf("err=%q want it to mention %q", err, spec.wantErr)
 			}
 		})
+	}
+}
+
+// The flagship suite crashes the four-service incident at three turns. Each case
+// now runs through the crash matrix's verifier, so "recovered" means every
+// recovery invariant held rather than that the run happened to finish.
+func TestFlagshipSuiteRecoversEveryCrashCase(t *testing.T) {
+	root := filepath.Join("..", "..", "examples")
+	raw, err := os.ReadFile(filepath.Join(root, "bench", "flagship.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	suite, err := Parse(raw, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := Run(context.Background(), suite, Options{
+		ExamplesRoot: root,
+		WorkDir:      t.TempDir(),
+		Agent:        "scripted",
+		ProviderFor:  scriptedProviders,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Cases) == 0 {
+		t.Fatal("flagship suite has no cases")
+	}
+	for _, c := range report.Cases {
+		if !c.AsExpected {
+			t.Errorf("%s: status=%s as_expected=false err=%s failed=%v", c.ID, c.Status, c.Error, c.FailedChecks)
+		}
+		if c.Category != "distributed" {
+			continue
+		}
+		if c.Distributed == nil || !c.Distributed.ReplayVerified {
+			t.Errorf("%s: recovered run does not verify under replay", c.ID)
+		}
+		if c.Distributed != nil && len(c.Distributed.Violations) != 0 {
+			t.Errorf("%s: violations %v", c.ID, c.Distributed.Violations)
+		}
 	}
 }

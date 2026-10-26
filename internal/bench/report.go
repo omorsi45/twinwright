@@ -101,6 +101,16 @@ type DistributedResult struct {
 	// that survives a crash but can no longer be audited has lost the property
 	// the project exists to provide.
 	ReplayVerified bool `json:"replay_verified"`
+	// CrashPoint is the boundary the first worker died at. A bare crash_at is
+	// reported as after-model-request, the point it has always meant.
+	CrashPoint string `json:"crash_point"`
+	// CrashOperation is the tool operation the crash was narrowed to, if any.
+	CrashOperation string `json:"crash_operation,omitempty"`
+	// Occurrence is which crossing of CrashPoint killed the worker.
+	Occurrence int `json:"occurrence"`
+	// Violations are the recovery invariants the crash matrix's verifier found
+	// broken. A case with any is an error case, not a measurement.
+	Violations []string `json:"violations,omitempty"`
 }
 
 // CounterfactualResult records what an intervention analysis found. The parent

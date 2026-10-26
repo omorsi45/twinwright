@@ -14,6 +14,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"twinwright/internal/crashpoint"
 )
 
 // Suite is a versioned list of benchmark cases.
@@ -50,9 +52,19 @@ type Case struct {
 	// distributed runs it through the worker runtime with an injected crash, and
 	// counterfactual runs it locally and then explains its failure.
 	Mode string
-	// CrashAt is the model turn at which the first worker dies. Distributed mode
-	// only.
+	// CrashAt is which crossing of the crash point kills the first worker. With
+	// no CrashPoint the point is after-model-request, so CrashAt is the model
+	// turn, which is the meaning it had before named points existed. Distributed
+	// mode only.
 	CrashAt int
+	// CrashPoint names the durable boundary the first worker dies at, one of the
+	// crashpoint names. Empty means after-model-request. Distributed mode only.
+	CrashPoint string
+	// CrashOperation narrows CrashPoint to sites for one tool operation, so a
+	// case can target "the first createRefund commit". It needs a CrashPoint:
+	// model-turn points carry no operation, so it would never match. Distributed
+	// mode only.
+	CrashOperation string
 	// Interventions is the intervention set applied by a counterfactual case.
 	Interventions string
 }
@@ -71,23 +83,25 @@ type rawSuite struct {
 }
 
 type rawCase struct {
-	ID            string   `yaml:"id"`
-	Category      string   `yaml:"category"`
-	World         string   `yaml:"world"`
-	Scenario      string   `yaml:"scenario"`
-	Chaos         string   `yaml:"chaos"`
-	Auth          string   `yaml:"auth"`
-	Assertions    string   `yaml:"assertions"`
-	Recovery      string   `yaml:"recovery"`
-	Fault         string   `yaml:"fault"`
-	Steps         *int     `yaml:"steps"`
-	Resume        *bool    `yaml:"resume"`
-	ResumeAt      *int     `yaml:"resume_at"`
-	Dimensions    []string `yaml:"dimensions"`
-	Expect        string   `yaml:"expect"`
-	Mode          string   `yaml:"mode"`
-	CrashAt       *int     `yaml:"crash_at"`
-	Interventions string   `yaml:"interventions"`
+	ID             string   `yaml:"id"`
+	Category       string   `yaml:"category"`
+	World          string   `yaml:"world"`
+	Scenario       string   `yaml:"scenario"`
+	Chaos          string   `yaml:"chaos"`
+	Auth           string   `yaml:"auth"`
+	Assertions     string   `yaml:"assertions"`
+	Recovery       string   `yaml:"recovery"`
+	Fault          string   `yaml:"fault"`
+	Steps          *int     `yaml:"steps"`
+	Resume         *bool    `yaml:"resume"`
+	ResumeAt       *int     `yaml:"resume_at"`
+	Dimensions     []string `yaml:"dimensions"`
+	Expect         string   `yaml:"expect"`
+	Mode           string   `yaml:"mode"`
+	CrashAt        *int     `yaml:"crash_at"`
+	CrashPoint     string   `yaml:"crash_point"`
+	CrashOperation string   `yaml:"crash_operation"`
+	Interventions  string   `yaml:"interventions"`
 }
 
 var (
@@ -235,6 +249,22 @@ func parseCase(input rawCase, root string, index int) (Case, error) {
 		}
 		crashAt = *input.CrashAt
 	}
+	if input.CrashPoint != "" {
+		if mode != ModeDistributed {
+			return Case{}, fmt.Errorf("case %q: crash_point requires mode distributed", input.ID)
+		}
+		if _, err := crashpoint.ParsePoint(input.CrashPoint); err != nil {
+			return Case{}, fmt.Errorf("case %q: crash_point: %w", input.ID, err)
+		}
+	}
+	if input.CrashOperation != "" {
+		if mode != ModeDistributed {
+			return Case{}, fmt.Errorf("case %q: crash_operation requires mode distributed", input.ID)
+		}
+		if input.CrashPoint == "" {
+			return Case{}, fmt.Errorf("case %q: crash_operation requires crash_point", input.ID)
+		}
+	}
 	if mode == ModeDistributed && crashAt == 0 {
 		return Case{}, fmt.Errorf("case %q: mode distributed requires crash_at", input.ID)
 	}
@@ -297,7 +327,8 @@ func parseCase(input rawCase, root string, index int) (Case, error) {
 		Chaos: chaos, Auth: auth, Assertions: assertions, Recovery: recovery, Fault: input.Fault,
 		Steps: steps, Resume: resume, ResumeAt: resumeAt, Dimensions: dimensions,
 		Expect: expect,
-		Mode:   mode, CrashAt: crashAt, Interventions: interventions,
+		Mode:   mode, CrashAt: crashAt, CrashPoint: input.CrashPoint, CrashOperation: input.CrashOperation,
+		Interventions: interventions,
 	}, nil
 }
 
