@@ -195,13 +195,60 @@ func TestExecuteLocalReportsAFailedReleaseOfACompletedRun(t *testing.T) {
 		if err := s.Close(); err != nil {
 			t.Error(err)
 		}
-		return store.Run{}, nil
+		return store.Run{ID: run.ID, Status: "completed"}, nil
 	})
 	if !errors.Is(err, ErrLeaseNotReleased) {
 		t.Fatalf("err=%v want ErrLeaseNotReleased", err)
 	}
 	if !strings.Contains(err.Error(), "database is closed") || strings.Contains(err.Error(), "failed") {
 		t.Fatalf("err=%q should carry the cause and not claim the run failed", err)
+	}
+}
+
+// TestExecuteLocalDoesNotCallAPausedRunCompleted covers the same path for a run
+// that stopped at its step budget. fn returned no error, but the run is paused,
+// so the message about the lease left behind must say what status the run
+// reached and not that it completed.
+func TestExecuteLocalDoesNotCallAPausedRunCompleted(t *testing.T) {
+	manifest := billingManifest(t)
+	s := openStore(context.Background(), t)
+	run := seedRun(context.Background(), t, s, manifest, "")
+
+	_, err := ExecuteLocal(context.Background(), s, run.ID, Config{Logger: quietLogger()}, func(context.Context, store.Fence) (store.Run, error) {
+		if err := s.Close(); err != nil {
+			t.Error(err)
+		}
+		return store.Run{ID: run.ID, Status: "paused"}, nil
+	})
+	if !errors.Is(err, ErrLeaseNotReleased) {
+		t.Fatalf("err=%v want ErrLeaseNotReleased", err)
+	}
+	if strings.Contains(err.Error(), "completed") || !strings.Contains(err.Error(), `which ended with status "paused"`) {
+		t.Fatalf("err=%q should report the run's own status and not call it completed", err)
+	}
+}
+
+// TestReleaseContextSurvivesCancellationButIsBounded checks the context the
+// local release runs under. It must outlive the Ctrl-C that cancelled the
+// command, or the lease would be left behind in exactly the case the release is
+// for, and it must carry a deadline, or a stalled database would hang the
+// process after the interrupt. The test does not prove ExecuteLocal passes this
+// context to ReleaseRunLease: no test double sits between them.
+func TestReleaseContextSurvivesCancellationButIsBounded(t *testing.T) {
+	parent, cancel := context.WithCancel(context.Background())
+	cancel()
+	before := time.Now()
+	ctx, stop := releaseContext(parent)
+	defer stop()
+	if err := ctx.Err(); err != nil {
+		t.Fatalf("release context inherited the cancellation: %v", err)
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("release context has no deadline")
+	}
+	if remaining := deadline.Sub(before); remaining <= 0 || remaining > releaseTimeout+time.Second {
+		t.Fatalf("release deadline is %v away, want at most about %v", remaining, releaseTimeout)
 	}
 }
 

@@ -115,6 +115,11 @@ func queueCommand(ctx context.Context, args []string, out io.Writer) error {
 func executeLocally(ctx context.Context, s *store.Store, manifest compiler.Manifest, provider agent.Provider, runID string, steps int) (store.Run, error) {
 	signalCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// NotifyContext keeps swallowing signals until stop is called, so a second
+	// Ctrl-C during a slow release would do nothing. Stopping as soon as the
+	// first signal arrives hands later signals back to the default handler,
+	// which ends the process.
+	context.AfterFunc(signalCtx, stop)
 	return worker.ExecuteLocal(signalCtx, s, runID, worker.Config{}, func(runCtx context.Context, fence store.Fence) (store.Run, error) {
 		runner := agent.Runner{
 			Store:    s,
@@ -127,12 +132,28 @@ func executeLocally(ctx context.Context, s *store.Store, manifest compiler.Manif
 	})
 }
 
-// localRunError words an ExecuteLocal error for the CLI. A run that completed
-// but could not release its lease is reported as such: its work is durable, so
-// calling it failed would mislead an operator into retrying finished work.
+// localRunError words an ExecuteLocal error for the CLI so it says what
+// happened to the run. Every wording wraps err, so errors.Is still sees the
+// cause.
+//
+//   - A run whose work is durable but whose lease was not released is reported
+//     as such: calling it failed would mislead an operator into retrying
+//     finished work.
+//   - A lost lease is a failure even though it cancels the run's context, so it
+//     is matched before cancellation.
+//   - A refusal because another owner holds the lease means the run never
+//     started.
+//   - Cancellation is Ctrl-C or SIGTERM, which leaves a run that resume picks up.
 func localRunError(runID string, err error) error {
-	if errors.Is(err, worker.ErrLeaseNotReleased) {
+	switch {
+	case errors.Is(err, worker.ErrLeaseNotReleased):
 		return err
+	case errors.Is(err, store.ErrFenced):
+		return fmt.Errorf("run %s failed: %w", runID, err)
+	case errors.Is(err, store.ErrLeaseHeld):
+		return fmt.Errorf("run %s not started: %w", runID, err)
+	case errors.Is(err, context.Canceled):
+		return fmt.Errorf("run %s interrupted; resume it with `twinwright resume %s`: %w", runID, runID, err)
 	}
 	return fmt.Errorf("run %s failed: %w", runID, err)
 }

@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -1516,5 +1517,70 @@ func TestLocalRunErrorDoesNotCallACompletedRunFailed(t *testing.T) {
 	done := localRunError("R-1", errors.Join(worker.ErrLeaseNotReleased, cause))
 	if strings.Contains(done.Error(), "failed") || !errors.Is(done, worker.ErrLeaseNotReleased) || !errors.Is(done, cause) {
 		t.Fatalf("completed run must not read as failed and must keep its cause: %v", done)
+	}
+}
+
+// TestLocalRunErrorSaysWhatActuallyHappened covers the two outcomes that are
+// not failures. Ctrl-C leaves a resumable run, and a refusal because another
+// owner holds the lease never started the run, so "failed" is wrong for both.
+// A lost lease also wraps context.Canceled, because losing it cancels the run's
+// context, and that one is a failure, so it must keep the failed wording.
+func TestLocalRunErrorSaysWhatActuallyHappened(t *testing.T) {
+	held := fmt.Errorf("%w: run R-1 is leased by %q until %s", store.ErrLeaseHeld, "worker-a", "2026-01-01T00:00:00Z")
+	lost := fmt.Errorf("%w: lease on run R-1 was lost during local execution: %w", store.ErrFenced, context.Canceled)
+	for _, tc := range []struct {
+		name     string
+		err      error
+		contains []string
+		excludes []string
+		is       []error
+	}{
+		{
+			name:     "interrupted",
+			err:      context.Canceled,
+			contains: []string{"run R-1 interrupted; resume it with `twinwright resume R-1`"},
+			excludes: []string{"failed"},
+			is:       []error{context.Canceled},
+		},
+		{
+			name:     "interrupted with a release that also failed",
+			err:      errors.Join(context.Canceled, errors.New("release lease on run R-1: connection reset")),
+			contains: []string{"run R-1 interrupted; resume it with `twinwright resume R-1`", "connection reset"},
+			excludes: []string{"failed"},
+			is:       []error{context.Canceled},
+		},
+		{
+			name:     "lease held by another owner",
+			err:      held,
+			contains: []string{"run R-1 not started: ", "leased by", "worker-a"},
+			excludes: []string{"failed"},
+			is:       []error{store.ErrLeaseHeld},
+		},
+		{
+			name:     "lease lost during execution",
+			err:      lost,
+			contains: []string{"run R-1 failed: "},
+			excludes: []string{"interrupted"},
+			is:       []error{store.ErrFenced, context.Canceled},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := localRunError("R-1", tc.err)
+			for _, want := range tc.contains {
+				if !strings.Contains(got.Error(), want) {
+					t.Errorf("error %q does not contain %q", got, want)
+				}
+			}
+			for _, banned := range tc.excludes {
+				if strings.Contains(got.Error(), banned) {
+					t.Errorf("error %q contains %q", got, banned)
+				}
+			}
+			for _, target := range tc.is {
+				if !errors.Is(got, target) {
+					t.Errorf("error %q no longer wraps %v", got, target)
+				}
+			}
+		})
 	}
 }

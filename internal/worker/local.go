@@ -16,9 +16,22 @@ import (
 // (a third of the TTL) still has several chances to land.
 const DefaultLocalLeaseTTL = 15 * time.Second
 
-// ErrLeaseNotReleased marks a local run that completed but whose lease could
-// not be released. The work is done and durable; only the lock is left to
-// lapse, so callers must not report the run itself as failed.
+// releaseTimeout bounds the release at the end of a local run. The release
+// deliberately ignores the command's cancellation, so without a deadline of its
+// own a stalled database would hold the process open after Ctrl-C. The lease
+// then lapses on its own TTL, which is what a failed release already falls
+// back to.
+const releaseTimeout = 5 * time.Second
+
+// releaseContext returns the context for the final release: cancellation of ctx
+// does not reach it, and it ends after releaseTimeout.
+func releaseContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), releaseTimeout)
+}
+
+// ErrLeaseNotReleased marks a local run whose function returned without error
+// but whose lease could not be released. The work is durable; only the lock is
+// left to lapse, so callers must not report the run itself as failed.
 var ErrLeaseNotReleased = errors.New("lease not released")
 
 // LocalOwner names the lease owner for a command run directly from the CLI.
@@ -87,7 +100,9 @@ func ExecuteLocal(ctx context.Context, s *store.Store, runID string, cfg Config,
 	// below from the renewal signal and must not hide fn's own outcome. Any
 	// other release error (a dropped connection, a database fault) leaves the
 	// run locked until the TTL lapses, so it is reported, never discarded.
-	releaseErr := s.ReleaseRunLease(context.WithoutCancel(ctx), lease, cfg.Clock.Now())
+	releaseCtx, stopRelease := releaseContext(ctx)
+	defer stopRelease()
+	releaseErr := s.ReleaseRunLease(releaseCtx, lease, cfg.Clock.Now())
 	if errors.Is(releaseErr, store.ErrFenced) {
 		releaseErr = nil
 	}
@@ -109,7 +124,8 @@ func ExecuteLocal(ctx context.Context, s *store.Store, runID string, cfg Config,
 	case outcome != nil:
 		return run, errors.Join(outcome, fmt.Errorf("release lease on run %s: %w", runID, releaseErr))
 	}
-	// The run finished and its work is durable. Say the lease was left behind,
-	// not that the run failed.
-	return run, fmt.Errorf("%w on run %s, which completed: %w", ErrLeaseNotReleased, runID, releaseErr)
+	// fn returned no error, so its work is durable. Say the lease was left
+	// behind, not that the run failed, and name the status fn reported: the run
+	// may have completed or only paused at its step budget.
+	return run, fmt.Errorf("%w on run %s, which ended with status %q: %w", ErrLeaseNotReleased, runID, run.Status, releaseErr)
 }
