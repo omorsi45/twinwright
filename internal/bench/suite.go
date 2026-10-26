@@ -59,12 +59,15 @@ type Case struct {
 	CrashAt int
 	// CrashPoint names the durable boundary the first worker dies at, one of the
 	// crashpoint names. Empty means after-model-request. Distributed mode only.
-	CrashPoint string
+	// Like CrashOperation it is omitted from the JSON when empty, because the
+	// suite digest hashes this struct and a suite that does not use the field
+	// must keep the digest it had before the field existed.
+	CrashPoint string `json:",omitempty"`
 	// CrashOperation narrows CrashPoint to sites for one tool operation, so a
-	// case can target "the first createRefund commit". It needs a CrashPoint:
-	// model-turn points carry no operation, so it would never match. Distributed
-	// mode only.
-	CrashOperation string
+	// case can target "the first createRefund commit". Only before-tool-commit
+	// and after-tool-commit carry an operation id, so any other CrashPoint would
+	// never match. Distributed mode only.
+	CrashOperation string `json:",omitempty"`
 	// Interventions is the intervention set applied by a counterfactual case.
 	Interventions string
 }
@@ -261,9 +264,15 @@ func parseCase(input rawCase, root string, index int) (Case, error) {
 		if mode != ModeDistributed {
 			return Case{}, fmt.Errorf("case %q: crash_operation requires mode distributed", input.ID)
 		}
-		if input.CrashPoint == "" {
-			return Case{}, fmt.Errorf("case %q: crash_operation requires crash_point", input.ID)
+		if input.CrashPoint != string(crashpoint.BeforeToolCommit) && input.CrashPoint != string(crashpoint.AfterToolCommit) {
+			return Case{}, fmt.Errorf("case %q: crash_operation requires crash_point %s or %s, because no other point carries an operation, got %q",
+				input.ID, crashpoint.BeforeToolCommit, crashpoint.AfterToolCommit, input.CrashPoint)
 		}
+	}
+	// after-completion is crossed once per run, so a later occurrence would never
+	// be reached.
+	if input.CrashPoint == string(crashpoint.AfterCompletion) && crashAt > 1 {
+		return Case{}, fmt.Errorf("case %q: crash_at must be 1 with crash_point %s, which is reached once per run", input.ID, crashpoint.AfterCompletion)
 	}
 	if mode == ModeDistributed && crashAt == 0 {
 		return Case{}, fmt.Errorf("case %q: mode distributed requires crash_at", input.ID)

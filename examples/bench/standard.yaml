@@ -140,12 +140,16 @@ cases:
   # Distributed cases run through the worker runtime and kill the first worker
   # at a named crash point. Four cases rather than one, because the boundaries
   # differ. With crash_at alone the point is after-model-request and crash_at is
-  # the model turn: turn 2 dies before any tool call commits, turn 3 dies after
-  # a read, and turn 4 still dies with no mutation committed. In this fixture the
-  # refund commits only before model turn 5, so none of these turn crashes
-  # follows it. The last case does, with crash_point
-  # after-tool-commit on the first createRefund, which is the delivery that must
-  # not produce a second refund.
+  # the model turn. The scripted agent reads before it writes, and the runner
+  # commits each requested call before the next model request, so what has
+  # committed when the worker dies is, by observation of this fixture:
+  #   turn 2: one read (getCustomer), no mutation
+  #   turn 3: two reads (getCustomer, listInvoices), no mutation
+  #   turn 4: three reads (adding listCharges), still no mutation
+  # The refund commits only before model turn 5, so none of these turn crashes
+  # follows it. The last case does, with crash_point after-tool-commit on the
+  # first createRefund: four tool calls and one mutation have committed, which
+  # is the delivery that must not produce a second refund.
   - id: distributed-crash-before-effects
     category: distributed
     world: billing

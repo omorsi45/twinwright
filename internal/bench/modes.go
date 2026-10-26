@@ -85,14 +85,15 @@ func runDistributed(ctx context.Context, s *store.Store, c Case, manifest compil
 		if readErr != nil {
 			return run, measured, readErr
 		}
-		return finished, measured, fmt.Errorf("the run completed before %s #%d was reached, so no crash was injected", point, c.CrashAt)
+		return finished, measured, fmt.Errorf("the run stopped with status %q before %s #%d was reached, so no crash was injected", finished.Status, point, c.CrashAt)
 	}
 
 	// The dead worker's lease lapses and a second worker takes the run over.
 	clock.Advance(2 * benchLeaseTTL)
 	outcome, err := crashmatrix.Recover(ctx, s, target, clock, benchLeaseTTL)
 	if err != nil {
-		return run, measured, fmt.Errorf("takeover claim: %w", err)
+		// Recover's own errors already say which step failed.
+		return run, measured, err
 	}
 
 	verdict := crashmatrix.Verify(ctx, s, target, nil, run.ID, crash, outcome)
