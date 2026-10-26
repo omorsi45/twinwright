@@ -129,7 +129,7 @@ func (s *Store) claimOnce(ctx context.Context, owner string, ttl time.Duration, 
 		lock = " FOR UPDATE OF q SKIP LOCKED"
 	}
 	stamp := CoordinationTime(now)
-	args := []any{stamp, stamp, owner, stamp}
+	args := []any{stamp, stamp, stamp, owner, stamp}
 	// Placeholders are generated; the ids themselves are always bound values.
 	exclude := ""
 	if len(skip) > 0 {
@@ -141,8 +141,13 @@ func (s *Store) claimOnce(ctx context.Context, owner string, ttl time.Duration, 
 		exclude = "\n  AND q.run_id NOT IN (" + strings.Join(marks, ",") + ")"
 	}
 	var entry QueueEntry
+	// displaced is read from the lease row and not from the queue state. Enqueue
+	// resets a live run to runnable without touching its lease, so a claim that
+	// takes over from a dead owner can arrive through the runnable branch.
+	var displaced int
 	err = tx.QueryRowContext(ctx, `
-SELECT q.run_id, q.state, q.max_steps, q.attempts, q.enqueued_at, q.available_at
+SELECT q.run_id, q.state, q.max_steps, q.attempts, q.enqueued_at, q.available_at,
+       CASE WHEN l.owner <> '' AND l.expires_at <= ? THEN 1 ELSE 0 END
 FROM work_queue q
 LEFT JOIN run_leases l ON l.run_id = q.run_id
 WHERE q.available_at <= ?
@@ -151,7 +156,7 @@ WHERE q.available_at <= ?
   AND ( l.run_id IS NULL OR l.owner = '' OR l.owner = ? OR l.expires_at <= ? )`+exclude+`
 ORDER BY q.enqueued_at, q.run_id
 LIMIT 1`+lock, args...).
-		Scan(&entry.RunID, &entry.State, &entry.MaxSteps, &entry.Attempts, &entry.EnqueuedAt, &entry.AvailableAt)
+		Scan(&entry.RunID, &entry.State, &entry.MaxSteps, &entry.Attempts, &entry.EnqueuedAt, &entry.AvailableAt, &displaced)
 	if errors.Is(err, sql.ErrNoRows) {
 		return RunLease{}, QueueEntry{}, ErrNoWork
 	}
@@ -159,7 +164,9 @@ LIMIT 1`+lock, args...).
 		return RunLease{}, QueueEntry{}, err
 	}
 
-	takeover := entry.State == QueueLeased
+	// The same value goes to the ownership log and to the caller, so the two
+	// cannot disagree about whether this claim displaced a previous owner.
+	takeover := displaced == 1
 	lease, err := acquireRunLeaseTx(ctx, tx, s.Dialect, entry.RunID, owner, ttl, now, takeover)
 	if err != nil {
 		// entry carries the run id so the caller can skip this run and look at

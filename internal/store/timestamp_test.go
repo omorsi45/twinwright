@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -144,5 +145,35 @@ func TestMigrationThreeLeavesEmptyTimestampsAlone(t *testing.T) {
 	}
 	if expires != "" {
 		t.Fatalf("expires_at=%q want empty", expires)
+	}
+}
+
+// TestMigratedLeaseIsOrderedByTime opens a migrated version 2 database and
+// shows that its lease is compared by time and not by text. The legacy expiry
+// "2026-01-01T12:00:01Z" sorts after "2026-01-01T12:00:01.500000000Z" as a
+// string, because 'Z' follows '.', so a lease left in the old layout would
+// look live half a second after it expired. The canonical text is what makes
+// both the renewal and the takeover below see the expiry.
+func TestMigratedLeaseIsOrderedByTime(t *testing.T) {
+	ctx := context.Background()
+	db := openRawAtVersionTwo(ctx, t)
+	seedV2Coordination(ctx, t, db, "2026-01-01T12:00:01Z")
+	if err := applyMigrations(ctx, db, DialectSQLite, migrations); err != nil {
+		t.Fatalf("apply migration 3: %v", err)
+	}
+	s := &Store{DB: db, Dialect: DialectSQLite}
+	halfPast := time.Date(2026, 1, 1, 12, 0, 1, 500_000_000, time.UTC)
+
+	stale := RunLease{RunID: "R-1", Owner: "worker-a", Token: 1}
+	if _, err := s.RenewRunLease(ctx, stale, time.Minute, halfPast); !errors.Is(err, ErrFenced) {
+		t.Fatalf("renew of a lease that expired half a second ago err=%v want ErrFenced", err)
+	}
+
+	lease, _, err := s.ClaimRun(ctx, "worker-b", time.Minute, halfPast)
+	if err != nil {
+		t.Fatalf("claim of the migrated run: %v", err)
+	}
+	if lease.Token != 2 || lease.Owner != "worker-b" {
+		t.Fatalf("lease=%+v want fence 2 held by worker-b", lease)
 	}
 }
