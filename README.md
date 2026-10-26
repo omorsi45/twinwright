@@ -489,15 +489,51 @@ as auditable as a local one.
 
 Delivery is **at-least-once**. A crashed worker's run is taken over and the same
 work is attempted again. Exactly-once is not claimed anywhere, because it is not
-achievable across a process boundary and a database. Duplicates are safe for two
-independent reasons:
+achievable across a process boundary and a database. A duplicate delivery does
+not duplicate a committed world mutation, for these reasons:
 
+- **Atomic commit.** A tool call's effect, its ledger events, its saved result and
+  its transcript entry commit in one transaction. A resumed run dispatches only
+  the calls its transcript does not yet record, so a committed call is not
+  presented again.
 - **Idempotency by call ID.** A repeated tool call returns the result recorded the
   first time and commits nothing. The same call ID with different arguments is
-  refused rather than answered from the cache.
+  refused rather than answered from the cache, and a provider turn that reuses a
+  call ID already used in the run fails the turn.
 - **Fencing.** Every durable write proves, inside the same transaction as the
   write, that this worker still owns the run. A worker that stalled past its lease
   cannot commit after a newer worker took over.
+
+What that does and does not cover: a world mutation commits at most once per
+(run, call ID). Model calls are at-least-once, so a crash before a response is
+recorded repeats the provider call and its cost. A retry with a new call ID is a
+new logical action and is not deduplicated, which is what the `ambiguous-commit`
+scenario measures. Provider spend, logs and metrics are not fenced.
+
+**Crash boundaries.** A run can die at seven named points: `before-model-request`,
+`after-model-request`, `after-model-response`, `before-tool-commit`,
+`after-tool-commit`, `before-completion` and `after-completion`.
+`TestCrashMatrixSQLite` crashes every occurrence of every point across three
+scenarios (120 cases) and checks that a second worker finishes the run with no
+duplicated mutation, a ledger that still replays, checkpoints that still
+reconstruct, and a stale worker that cannot commit. `TestCrashMatrixPostgres` runs
+the first and last occurrence of each point when `TWINWRIGHT_TEST_POSTGRES_DSN` is
+set, in the Integration workflow. `TestRealProcessDeathIsRecovered` (unix) kills a
+real worker process with `SIGKILL` at four of those points. The table of what is
+durable at each point, and which test proves it, is in
+[docs/distributed.md](docs/distributed.md#crash-boundaries).
+
+**Delivery bound.** A delivery that never reports back counts toward the worker's
+`MaxAttempts` (default 3). A run claimed after that is not executed: if it had
+already completed its queue entry is finished, and otherwise it is marked `failed`
+with an `error` ledger event `{"kind":"delivery_limit","deliveries":N,"max_attempts":M}`.
+Re-enqueueing the run gives it a fresh budget.
+
+**Local execution.** `run` without `--enqueue`, and `resume`, hold a lease owned by
+`local-<host>-<pid>` with a 15 second TTL, renewed while they run and released on
+exit, including on Ctrl-C. A run leased by a live fleet worker is refused, naming
+the owner and expiry. After `kill -9` the lease has to expire, up to 15 seconds,
+before `resume` is accepted.
 
 Every lease acquisition raises the fence, including re-acquisition by the same
 owner, so a reconnected worker cannot reuse an old token. The check rejects both a
@@ -515,8 +551,9 @@ Keeping the ledger purely about the agent is what lets every
 recovered run still replay, which the crash-recovery tests assert by replaying each
 one.
 
-See `docs/adr/0019-postgres-storage.md` and
-`docs/adr/0020-multi-worker-runtime.md`.
+See `docs/adr/0019-postgres-storage.md`,
+`docs/adr/0020-multi-worker-runtime.md` and
+`docs/adr/0029-crash-boundaries-and-delivery-bounds.md`.
 
 ### Storage
 
@@ -530,7 +567,12 @@ own bookkeeping row, so a failed migration leaves neither a partial schema nor a
 false record of success. A database written before migration tracking is adopted
 in place; a database recording a newer version is refused rather than downgraded.
 Timestamps are stored as RFC 3339 text on both backends so replay comparisons
-stay byte-identical.
+stay byte-identical. Times in `run_leases`, `work_queue` and `workers` use the
+fixed-width form `2006-01-02T15:04:05.000000000Z` so that comparing them as text
+in SQL orders them as times; migration 3 (schema version 3) rewrites existing
+rows and refuses a value it cannot parse. **Upgrading:** stop workers running an
+older build before applying it, because an older build keeps writing the
+variable-width form and mixed forms misorder within a second.
 
 ## Observability
 
@@ -966,14 +1008,15 @@ database is `twinwright.db` and is ignored by Git.
 
 ## Architecture decisions
 
-Every runtime contract is documented as an ADR under `docs/adr/`, 28 of them, each
+Every runtime contract is documented as an ADR under `docs/adr/`, 29 of them, each
 recording what was decided, what was rejected, and the limits that came with it.
 The ones that constrain everything else: `0001` Go and SQLite, `0002` OpenAPI plus
 explicit behavior bindings, `0003` atomic tool effects and checkpoints, `0004`
 isolated verification replay, `0009` runtime principal authorization, `0017` the
 single-node guarantees frozen as the contract a distributed runtime had to preserve,
 `0020` multi-worker execution with fenced ownership, `0025` honest bench
-aggregation, and `0028` the security review.
+aggregation, `0028` the security review, and `0029` crash boundaries, the delivery
+bound and what is idempotent, which corrects what `0020` overstated.
 
 ## Safety and scope
 
@@ -1026,7 +1069,18 @@ one that admits a gap.
   multi-region, has no broker, and does not shard. A worker is a process that
   needs a DSN; how it is scheduled is an operational choice.
 - **Delivery is at-least-once.** Exactly-once is never claimed. Duplicate
-  deliveries are made safe by call-ID idempotency and fencing, not prevented.
+  deliveries are made safe by atomic commit, call-ID idempotency and fencing, not
+  prevented. That covers world mutations only: a crash before a model response is
+  recorded repeats the provider call and its cost, and provider spend, logs and
+  metrics are not fenced.
+- **Crash recovery claims are bounded.** The crash matrix
+  covers seven named boundaries across three scenarios, and the real-process test
+  kills one process at a time at four points, so it does not show concurrent
+  multi-process contention on one SQLite file. `after-completion` is simulated by
+  skipping `FinishRun`. The PostgreSQL matrix and real-process tests run only when
+  a DSN is set, in the Integration workflow, and had not run against a server when
+  this was written. `fork`, `counterfactual` and `bench` execute their own new
+  runs without a lease.
 - **The metrics endpoint is unauthenticated** and off by default. Bind it to
   loopback.
 - **Published performance numbers cover one machine, and three benchmarks have

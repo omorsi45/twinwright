@@ -72,7 +72,8 @@ database. The effect is made idempotent instead: the dispatcher looks up the
 call by its identifier before executing, and a repeated call returns the
 recorded status and body while committing nothing. The same identifier with
 different arguments is refused rather than answered from the cache, so a cache
-hit can never stand in for a different request.
+hit can never stand in for a different request. How far that idempotency
+reaches, and where it does not, is under Crash boundaries below.
 
 ```mermaid
 sequenceDiagram
@@ -138,6 +139,106 @@ token, because the run may have been taken over and handed back in between.
 While a run executes the worker renews on a timer, and a rejected renewal
 cancels the execution context immediately. Continuing would spend model calls on
 work this worker is no longer permitted to commit.
+
+## Crash boundaries
+
+A process can die at seven places in a run. Each is a named point in
+`internal/crashpoint`, fired by a hook on the runner and the dispatcher that is
+nil in production. The table says what is durable at the moment of death and
+which test shows a second worker recovering from it. ADR 0029 has the reasoning.
+
+| Point | Durable state at death | Proven by |
+| --- | --- | --- |
+| `before-model-request` | previous step fully committed; no request for this turn | `TestCrashMatrixSQLite` |
+| `after-model-request` | `model.request` committed; no response | `TestCrashMatrixSQLite`, `TestRealProcessDeathIsRecovered` (occurrence 2) |
+| `after-model-response` | turn committed (response, step, transcript); its tool calls not dispatched | `TestCrashMatrixSQLite`, `TestRealProcessDeathIsRecovered` (occurrence 3) |
+| `before-tool-commit` | inside the tool transaction with every write staged, not committed; no refund exists | `TestCrashMatrixSQLite`, `TestRealProcessDeathIsRecovered` (`createRefund`, occurrence 1) |
+| `after-tool-commit` | tool transaction committed (effect, events, saved result, transcript); one refund exists | `TestCrashMatrixSQLite`, `TestRealProcessDeathIsRecovered` (`createRefund`, occurrence 1) |
+| `before-completion` | final answer committed; run not marked completed | `TestCrashMatrixSQLite` |
+| `after-completion` | run completed; queue entry not finished | `TestCrashMatrixSQLite` |
+
+What each test is:
+
+- `TestCrashMatrixSQLite` crashes every occurrence of every point for three
+  scenarios: `duplicate-charge` (25 cases), `ambiguous-commit` (15) and
+  `company-incident` (80). That is 120 cases, with zero violations. After each
+  crash the lease is expired, a second worker takes over, and the harness checks
+  the invariants in `internal/crashmatrix/verify.go`: a strictly higher fence and
+  a reported takeover, agent mutations equal to an uncrashed run's with no call
+  ID committed twice, per-table world row counts equal to the reference, the
+  recovered ledger verifying under `replay.Verify`, the latest checkpoint at or
+  before the crash and the final checkpoint reconstructing, model requests equal
+  to responses, and the dead worker's fence refused for a new call and for an
+  already committed one.
+- `TestCrashMatrixPostgres` runs the first and last occurrence of each point on
+  PostgreSQL when `TWINWRIGHT_TEST_POSTGRES_DSN` is set. It is skipped without a
+  server and runs in the Integration workflow. It had not run against a server
+  when this section was written, so the PostgreSQL half of the table is
+  unproven until it has.
+- `TestRealProcessDeathIsRecovered` (unix only) re-executes the test binary as a
+  worker that sends itself `SIGKILL` at the crash point, so the database has to
+  cope with a client that vanished, possibly mid-transaction. It covers four
+  crashes: `after-model-request` occurrence 2, `after-model-response`
+  occurrence 3, and `before-tool-commit` and `after-tool-commit` on the first
+  `createRefund`. The `before-tool-commit` case asserts no refund exists before
+  recovery and the `after-tool-commit` case that exactly one does. The kill is sent before the run context is
+  cancelled, because the other order lets `database/sql` roll the transaction
+  back in an orderly way. `TestRealProcessDeathIsRecoveredPostgres` repeats the
+  two tool-commit crashes against a server when a DSN is set.
+
+The three points not marked with `TestRealProcessDeathIsRecovered` are covered by
+the in-process matrix only. `after-completion` is never reached by code, since
+nothing runs after the completed status is written; the harness simulates it by
+skipping `FinishRun`.
+
+### What these tests do and do not say about duplicates
+
+A world mutation commits at most once per (run, call ID): the effect, its ledger
+events, its saved result and its transcript entry commit in one transaction that
+first proves lease ownership. A resumed runner dispatches only calls with no tool
+message in the transcript, and that message commits with the effect, so recovery
+does not present a committed call again. The saved-result lookup still answers a
+repeated (run, call ID) pair, and a provider turn that reuses a call ID within a
+run is refused (`TestProviderCallIDReuseFailsTheTurn`).
+
+Model calls are at-least-once. A crash before a response is recorded repeats the
+provider call, and its cost. A retry with a new call ID is a new logical action
+and is not deduplicated, which is what the `ambiguous-commit` scenario measures.
+Provider spend, logs and metrics are not fenced.
+
+### The delivery bound
+
+A delivery that never reports back counts toward `MaxAttempts` (default 3). When
+a claim's attempts exceed it, the worker does not execute the run. A run that is
+already `completed` is finished normally. Any other run is failed in one fenced
+transaction, which appends the ledger event
+`{"kind":"delivery_limit","deliveries":N,"max_attempts":M}` and fails the queue
+entry. `Outcome.Takeover` is true only when the claim displaced an expired lease,
+and re-enqueueing a run resets its count, so an operator retry gets a fresh
+budget. The tests are in `internal/worker/delivery_test.go`.
+
+### Timestamps
+
+Times in `run_leases`, `work_queue` and `workers` are written as
+`2006-01-02T15:04:05.000000000Z` in UTC, so that comparing them as text in SQL
+orders them as times. Migration 3 rewrites existing rows and refuses a value it
+cannot parse, naming the table, column and row. Stop workers running an older
+build before applying it: an older build keeps writing the variable-width form,
+and mixed forms misorder within a second.
+
+### Local execution
+
+`run` without `--enqueue`, and `resume`, hold a lease owned by
+`local-<host>-<pid>` with a 15 second TTL, renewed while they execute and released
+on exit, including on Ctrl-C and `SIGTERM`. A run leased by a live fleet worker is
+refused with the owner and expiry named. After `kill -9` the lease stays until it
+expires, so `resume` is refused for up to 15 seconds.
+
+### Limits
+
+`fork`, `counterfactual` and `bench` execute their own new runs without a fence.
+The real-process test kills processes one at a time and does not show concurrent
+multi-process contention on one SQLite file. The matrix covers three scenarios.
 
 ## Seeing it happen
 

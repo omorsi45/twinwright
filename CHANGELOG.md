@@ -78,8 +78,50 @@ database written by a newer build is refused rather than downgraded.
   without consuming one. `authz.Decide` is now `Screen` plus the two things only a
   live run supplies, the stored policy and the next call number, so a shadow
   verdict and an enforced one cannot drift apart.
+- **Crash points, an exhaustive crash matrix, and a real-process kill.** Recovery
+  had been tested by cancelling a context inside a provider call, which is one of
+  seven places a worker can die. `internal/crashpoint` names all seven
+  (`before-model-request`, `after-model-request`, `after-model-response`,
+  `before-tool-commit`, `after-tool-commit`, `before-completion`,
+  `after-completion`), `agent.Runner` and `dispatch.Dispatcher` take a hook that is
+  nil in production, and `internal/crashmatrix` crashes every occurrence of every
+  point, expires the lease, lets a second worker take over, and checks the
+  recovery. `TestCrashMatrixSQLite` runs 120 cases over three scenarios
+  (`duplicate-charge` 25, `ambiguous-commit` 15, `company-incident` 80) with zero
+  violations; `TestCrashMatrixPostgres` runs the first and last occurrence of each
+  point when `TWINWRIGHT_TEST_POSTGRES_DSN` is set and had not run against a
+  server when this was written. `TestRealProcessDeathIsRecovered` (unix)
+  SIGKILLs a re-executed test binary at `after-model-request` #2,
+  `after-model-response` #3, and `before-tool-commit` and `after-tool-commit` on
+  the first `createRefund`, then recovers with a second worker;
+  `TestRealProcessDeathIsRecoveredPostgres` covers the two tool-commit points
+  against a server. `after-completion` is simulated by skipping `FinishRun`. See
+  ADR 0029.
+- **`bench` distributed cases name a crash boundary.** Distributed mode now runs on
+  the crash matrix and accepts `crash_point` and `crash_operation`
+  (`crash_operation` only with `before-tool-commit` or `after-tool-commit`;
+  `after-completion` only with `crash_at` 1). An integer `crash_at` alone still
+  means `after-model-request` at that turn. The standard suite is 21 cases and
+  gains `distributed-crash-after-refund-commit`, which crashes right after the
+  refund commits, and a comment that claimed a turn crash followed the refund was
+  corrected. `TestFlagshipSuiteRecoversEveryCrashCase` runs `flagship.yaml` in
+  `go test`.
+- **A crash boundary table in `docs/distributed.md`.** For each of the seven
+  points, what is durable at death and the test that proves recovery from it.
 
 ### Fixed
+
+- **A provider turn that reuses a call ID now fails the turn.** A call ID already
+  used in the run, or repeated within one turn, used to be skipped; it is refused
+  with an explicit error. See `TestProviderCallIDReuseFailsTheTurn`.
+- **`run` and `resume` execute under a fenced lease.** Without `--enqueue` they ran
+  with no fence and could write to a run at the same time as a fleet worker that
+  had claimed it. They now hold a lease owned by `local-<host>-<pid>` with a 15
+  second TTL, renewed while they run and released on exit including Ctrl-C and
+  `SIGTERM`. A run leased by a live fleet worker is refused, naming the owner and
+  expiry; after `kill -9` the lease has to expire before `resume` is accepted;
+  a failed release is reported rather than swallowed. Command output and exit
+  codes are otherwise unchanged.
 
 - **Lease expiry and queue availability now order by time, not by text.** Both are
   compared inside SQL as text, and `time.RFC3339Nano` trims trailing zeros, so
@@ -89,7 +131,10 @@ database written by a newer build is refused rather than downgraded.
   written in a fixed-width form with nine fractional digits, and migration 3
   (schema version 3) rewrites existing rows. A stored time that does not parse
   fails the migration, which rolls back, and names the table, column and row.
-  Ledger event timestamps are unchanged.
+  Ledger event timestamps are unchanged. **Upgrading:** stop workers running an
+  older build before applying migration 3. An older build keeps writing the
+  variable-width form, and a database holding both forms misorders times within a
+  second.
 
 - **A run that kills its worker is now failed at the delivery limit, and a takeover
   means a displaced lease.** `MaxAttempts` was checked only when `Execute` returned
@@ -102,6 +147,24 @@ database written by a newer build is refused rather than downgraded.
   expired lease. Re-enqueueing a run resets its delivery count, so an operator
   retry of a run that failed at the limit executes instead of being refused
   again. Delivery remains at-least-once.
+
+### Changed
+
+- **The published recovery guarantees now match what the tests prove, including
+  where ADR 0020 overstated them.** ADR 0029 states exactly what is idempotent: a
+  world mutation commits at most once per (run, call ID); model calls are
+  at-least-once, so a crash before a recorded response repeats the provider call
+  and its cost; a retry with a new call ID is a new action; provider spend, logs
+  and metrics are not fenced. It corrects three claims in ADR 0020. "Crash
+  recovery at every model turn" was a crash inside the provider call, one boundary
+  of seven. The call-ID cache is not what protects a recovered run, because the
+  resumed runner dispatches only calls absent from the transcript and the
+  transcript entry commits with the effect. And the lease unit tests ran against
+  SQLite only, not PostgreSQL. ADR 0020 carries a one-line pointer and its body is
+  unchanged. Remaining limits are listed in ADR 0029: `fork`, `counterfactual` and
+  `bench` execute their own runs without a fence, the real-process test kills one
+  process at a time, and the matrix covers three scenarios. The README's
+  distributed semantics and limitations were updated to match.
 
 ## v0.1.0 - 2026-09-30
 
