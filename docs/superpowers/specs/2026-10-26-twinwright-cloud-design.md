@@ -224,7 +224,8 @@ Decided:
    completes under a strictly higher fence and is reported as a takeover; the
    scenario judge passes; agent-attributed state mutations equal the reference
    run's and no call ID has two; per-table world row counts equal the reference;
-   `replay.Verify` passes; every listed checkpoint reconstructs; model requests
+   `replay.Verify` passes; the latest checkpoint at or before the crash and the
+   final checkpoint both reconstruct; model requests
    equal responses; and the dead worker's fence is refused both for a new
    mutating call and for an already-committed call ID. Scenarios:
    `duplicate-charge` (billing), `company-incident` (company world), and
