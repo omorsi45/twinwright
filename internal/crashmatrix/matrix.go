@@ -182,9 +182,15 @@ func Crash(ctx context.Context, s *store.Store, t Target, runID string, c Case, 
 }
 
 // CrashWith is Crash with an extra action at the crash site. When onCrash is
-// non-nil it runs inside the crash hook, after the context is cancelled and
+// non-nil it runs inside the crash hook, before the run context is cancelled and
 // before the hook returns its error, so it executes exactly where the worker
 // would die.
+//
+// onCrash runs first because database/sql rolls back an open transaction on its
+// own goroutine as soon as the context that began it is done. At
+// before-tool-commit that transaction is open, so cancelling first would let an
+// orderly rollback race a kill and the database might never see a client that
+// vanished mid-transaction. Crash passes nil, so cancelling stays its only effect.
 //
 // It exists for a real-process test, which has to die at the site: a SIGKILL
 // delivered after Execute returned would come too late to show what a process
@@ -206,10 +212,10 @@ func CrashWith(ctx context.Context, s *store.Store, t Target, runID string, c Ca
 	if c.Point != crashpoint.AfterCompletion {
 		hook = CrashHook(c, func() {
 			out.Crashed = true
-			cancel()
 			if onCrash != nil {
 				onCrash()
 			}
+			cancel()
 		})
 	}
 	fence := lease.Fence()

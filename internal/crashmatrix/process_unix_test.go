@@ -92,7 +92,10 @@ func runDoomedWorker() int {
 		_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
 		select {} // the signal is asynchronous; never return into the runner first
 	})
-	return fail(helperSurvivedExit, "survived %s #%d: CrashWith returned %v", c.Point, c.Occurrence, err)
+	if err != nil {
+		return fail(helperSetupFailedExit, "CrashWith failed before the crash point: %v", err)
+	}
+	return fail(helperSurvivedExit, "survived %s #%d: CrashWith returned without the kill", c.Point, c.Occurrence)
 }
 
 // processDeathCase is one crash of a real process.
@@ -106,7 +109,7 @@ type processDeathCase struct {
 // killedProcess runs the doomed worker as a child process and requires that it
 // died of SIGKILL. A child killed by the timeout also reports SIGKILL, so the
 // context is checked first: a hung helper must not read as a successful crash.
-func killedProcess(t *testing.T, dsn, runID string, c Case) {
+func killedProcess(t *testing.T, scenario, dsn, runID string, c Case) {
 	t.Helper()
 	dir, err := os.Getwd()
 	if err != nil {
@@ -119,7 +122,7 @@ func killedProcess(t *testing.T, dsn, runID string, c Case) {
 	cmd.Env = append(os.Environ(),
 		helperEnv+"=1",
 		"TW_CM_DSN="+dsn,
-		"TW_CM_SCENARIO=duplicate-charge",
+		"TW_CM_SCENARIO="+scenario,
 		"TW_CM_RUN="+runID,
 		"TW_CM_POINT="+string(c.Point),
 		"TW_CM_OCCURRENCE="+strconv.Itoa(c.Occurrence),
@@ -174,7 +177,7 @@ func runProcessDeath(t *testing.T, dsn func(*testing.T) string, cases []processD
 				t.Fatal(err)
 			}
 
-			killedProcess(t, target, run.ID, tc.c)
+			killedProcess(t, sc.Name, target, run.ID, tc.c)
 
 			s, err = store.OpenDSN(ctx, target)
 			if err != nil {

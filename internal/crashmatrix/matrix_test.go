@@ -266,11 +266,13 @@ func anyContains(list []string, needle string) bool {
 }
 
 // TestCrashWithCallsOnCrashAtTheSite proves CrashWith's one extra promise over
-// Crash: onCrash runs exactly once, at the case's crash site, before the hook
-// returns its error. The real-process test depends on that to die at the site
-// rather than somewhere after it. The ledger length seen from onCrash shows it
-// ran at the site: the crash is injected at after-model-request #2, so
-// anything later would already have written more events.
+// Crash: onCrash runs exactly once, and at the case's crash site rather than at
+// a later one. The real-process test depends on that to die at the site. The
+// ledger length seen from onCrash shows it: the crash is injected at
+// after-model-request #2, so a later site would already have written more
+// events. This does not prove onCrash runs before the context is cancelled or
+// before Execute returns; that ordering is not observable from here without a
+// race, and is argued in CrashWith's doc comment.
 func TestCrashWithCallsOnCrashAtTheSite(t *testing.T) {
 	sc := scenarioNamed(t, "duplicate-charge")
 	c := Case{Point: crashpoint.AfterModelRequest, Occurrence: 2}
