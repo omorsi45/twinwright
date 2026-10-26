@@ -142,12 +142,7 @@ func (r Runner) Execute(ctx context.Context, runID string, maxSteps int) (store.
 			err = fmt.Errorf("provider returned role %q", next.Role)
 		}
 		if err == nil {
-			for _, call := range next.ToolCalls {
-				if call.ID == "" || r.Manifest.Operation(call.OperationID) == nil {
-					err = fmt.Errorf("provider returned invalid tool call")
-					break
-				}
-			}
+			err = r.validateCalls(history, next)
 		}
 		if err != nil {
 			if saveErr := r.Store.FailModelTurnGuarded(ctx, r.Fence, r.Clock, runID, next, interruptionPayloads(next.Interruptions), err.Error()); saveErr != nil {
@@ -169,6 +164,38 @@ func (r Runner) Execute(ctx context.Context, runID string, maxSteps int) (store.
 		}
 		used++
 	}
+}
+
+// validateCalls checks the tool calls of a turn the provider just returned.
+//
+// Every call needs an ID and a compiled operation. An ID may also be used only
+// once in a run. pending() treats a call as done once any tool message carries
+// its ID, so a reused ID would be skipped without ever being dispatched and the
+// model would never receive a result for that call. Failing the turn is the
+// only outcome that does not hide that from the model and the ledger.
+func (r Runner) validateCalls(history []Message, next Message) error {
+	seen := map[string]bool{}
+	for _, message := range history {
+		if message.Role == "assistant" {
+			for _, call := range message.ToolCalls {
+				seen[call.ID] = true
+			}
+		}
+	}
+	inTurn := map[string]bool{}
+	for _, call := range next.ToolCalls {
+		if call.ID == "" || r.Manifest.Operation(call.OperationID) == nil {
+			return fmt.Errorf("provider returned invalid tool call")
+		}
+		if inTurn[call.ID] {
+			return fmt.Errorf("provider returned invalid tool call: call ID %q appears twice in one turn", call.ID)
+		}
+		if seen[call.ID] {
+			return fmt.Errorf("provider reused call ID %q from an earlier turn", call.ID)
+		}
+		inTurn[call.ID] = true
+	}
+	return nil
 }
 
 // providerAttempts is how many times one model turn is attempted.
