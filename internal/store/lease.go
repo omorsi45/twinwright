@@ -23,11 +23,12 @@ var ErrLeaseHeld = errors.New("run is leased by another worker")
 //
 // Delivery in the multi-worker runtime is at-least-once: a crashed worker's run
 // is taken over and the same unit of work may be attempted twice. Two
-// mechanisms keep that safe. Tool effects are idempotent by call ID, so a
-// repeated tool call returns the recorded result instead of committing a second
-// effect. Durable writes are fenced, so a worker whose lease lapsed cannot
-// commit after a newer worker has taken over. Exactly-once delivery is not
-// claimed anywhere.
+// mechanisms keep that safe. A tool call's effect, events, saved result and
+// transcript entry commit in one fenced transaction, and resume skips calls that
+// already have a tool message, so a committed call is not dispatched again; the
+// call-ID cache guards a repeated dispatch of the same call. Durable writes are
+// fenced, so a worker whose lease lapsed cannot commit after a newer worker has
+// taken over. Exactly-once delivery is not claimed anywhere.
 type RunLease struct {
 	RunID     string    `json:"run_id"`
 	Owner     string    `json:"owner"`

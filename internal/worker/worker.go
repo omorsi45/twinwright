@@ -6,8 +6,13 @@
 // unit of work is attempted again. Two properties make the repeat safe, and
 // neither of them is exactly-once delivery, which this package does not claim:
 //
-//   - Tool effects are idempotent by call ID. A repeated tool call returns the
-//     result recorded the first time instead of committing a second effect.
+//   - A tool call's effect, its ledger events, its saved result and its
+//     transcript entry commit in one fenced transaction. Resume dispatches only
+//     calls that have no tool message in the transcript, so a committed call is
+//     not presented again. The call-ID cache is a second guard: it answers a
+//     repeated dispatch of the same call with the recorded result instead of a
+//     second effect. Model calls are not covered; a crash before a response is
+//     recorded repeats the provider call. ADR 0029 has the full account.
 //   - Durable writes are fenced. A worker whose lease lapsed cannot commit
 //     after a newer worker owns the run, so a process that stalls and wakes up
 //     later cannot corrupt the run it lost.
@@ -54,8 +59,10 @@ type Config struct {
 	PollInterval time.Duration
 	// Backoff delays a requeued run so a failing run cannot spin.
 	Backoff time.Duration
-	// MaxAttempts bounds retries before a run is marked failed. At-least-once
-	// delivery without a bound is an infinite retry loop.
+	// MaxAttempts bounds deliveries before a run is marked failed, including
+	// deliveries whose worker crashed and reported nothing. A claim beyond it
+	// settles the run without executing it. At-least-once delivery without a
+	// bound is an infinite retry loop.
 	MaxAttempts int
 	// Clock is for deterministic tests; nil means time.Now.
 	Clock store.Clock
