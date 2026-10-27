@@ -154,6 +154,11 @@ database written by a newer build is refused rather than downgraded.
 
 ### Changed
 
+- **The Go directive is 1.27.3 to take the fix for GO-2026-6809.** The advisory
+  is in `crypto/x509` and `govulncheck` reports it against go1.27.2, so the
+  vulnerability check failed on any build of that toolchain. The `require` lines
+  and `go.sum` are unchanged.
+
 - **The published recovery guarantees now match what the tests prove, including
   where ADR 0020 overstated them.** ADR 0029 states exactly what is idempotent: a
   world mutation commits at most once per (run, call ID); model calls are
