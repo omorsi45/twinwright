@@ -1707,3 +1707,124 @@ func TestBenchCLIRefusesNonPositiveTrials(t *testing.T) {
 		}
 	}
 }
+
+// writeGateReport saves a minimal v2 bench report whose only case has the given
+// status, so the gate's exit codes can be driven without running a suite.
+func writeGateReport(t *testing.T, dir, name, suite, status string) string {
+	t.Helper()
+	passed := status == "passed"
+	report := bench.Report{
+		Suite: suite, SchemaVersion: 2, ContentDigest: "content-1",
+		Cases: []bench.CaseResult{{
+			ID: "refund", Status: status, Passed: passed, AsExpected: passed,
+			Trials: 1, Mutations: 1, FailedChecks: []string{"refund_once"},
+		}},
+	}
+	if passed {
+		report.Cases[0].Passes = 1
+		report.Cases[0].FailedChecks = nil
+	}
+	data, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestGateExitCodes(t *testing.T) {
+	dir := t.TempDir()
+	good := writeGateReport(t, dir, "good.json", "standard", "passed")
+	bad := writeGateReport(t, dir, "bad.json", "standard", "failed")
+	other := writeGateReport(t, dir, "other.json", "other", "passed")
+	notReport := filepath.Join(dir, "not-a-report.json")
+	if err := os.WriteFile(notReport, []byte(`{"hello":1}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name string
+		args []string
+		want int
+	}{
+		{"identical reports", []string{"--baseline", good, "--candidate", good}, 0},
+		{"regression", []string{"--baseline", good, "--candidate", bad}, 1},
+		{"missing candidate file", []string{"--baseline", good, "--candidate", filepath.Join(dir, "absent.json")}, 2},
+		{"missing baseline file", []string{"--baseline", filepath.Join(dir, "absent.json"), "--candidate", good}, 2},
+		{"not a bench report", []string{"--baseline", notReport, "--candidate", good}, 2},
+		{"suite name mismatch", []string{"--baseline", good, "--candidate", other}, 2},
+		{"baseline flag omitted", []string{"--candidate", good}, 2},
+		{"unknown flag", []string{"--baseline", good, "--candidate", good, "--bogus"}, 2},
+		{"invalid trajectory mode", []string{"--baseline", good, "--candidate", good, "--trajectory", "loud"}, 2},
+		{"tolerance out of range", []string{"--baseline", good, "--candidate", good, "--tolerance", "2"}, 2},
+		{"stray positional argument", []string{"--baseline", good, "--candidate", good, "extra"}, 2},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			err := runCLI(append([]string{"gate"}, tc.args...), &out)
+			if got := exitCode(err); got != tc.want {
+				t.Fatalf("exit code = %d (err %v), want %d", got, err, tc.want)
+			}
+			if tc.want == 0 && err != nil {
+				t.Fatalf("exit 0 must carry no error, got %v", err)
+			}
+			if tc.want == 1 {
+				var result struct {
+					Passed      bool `json:"passed"`
+					Regressions []struct {
+						Kind string `json:"kind"`
+					} `json:"regressions"`
+				}
+				if jsonErr := json.Unmarshal(out.Bytes(), &result); jsonErr != nil {
+					t.Fatalf("stdout must be the Result JSON even on a regression: %v\n%s", jsonErr, out.String())
+				}
+				if result.Passed || len(result.Regressions) != 1 || result.Regressions[0].Kind != "newly_failing" {
+					t.Fatalf("unexpected result: %+v", result)
+				}
+			}
+		})
+	}
+}
+
+func TestGateWritesMarkdownAndJUnit(t *testing.T) {
+	dir := t.TempDir()
+	good := writeGateReport(t, dir, "good.json", "standard", "passed")
+	bad := writeGateReport(t, dir, "bad.json", "standard", "failed")
+	markdown := filepath.Join(dir, "gate.md")
+	junit := filepath.Join(dir, "gate.xml")
+	var out bytes.Buffer
+	err := runCLI([]string{"gate", "--baseline", good, "--candidate", bad, "--markdown", markdown, "--junit", junit}, &out)
+	if exitCode(err) != 1 {
+		t.Fatalf("want exit 1, got %d (%v)", exitCode(err), err)
+	}
+	if data, readErr := os.ReadFile(markdown); readErr != nil || !strings.Contains(string(data), "newly_failing") {
+		t.Fatalf("markdown file: %v\n%s", readErr, data)
+	}
+	if data, readErr := os.ReadFile(junit); readErr != nil || !strings.Contains(string(data), "<testsuites") {
+		t.Fatalf("junit file: %v\n%s", readErr, data)
+	}
+
+	// PATH "-" writes to the command's output after the Result JSON.
+	out.Reset()
+	err = runCLI([]string{"gate", "--baseline", good, "--candidate", bad, "--markdown", "-", "--junit", "-"}, &out)
+	if exitCode(err) != 1 {
+		t.Fatalf("want exit 1, got %d (%v)", exitCode(err), err)
+	}
+	for _, want := range []string{`"passed": false`, "FAILED", "<testsuites"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
+func TestExitCodeDefaultsToOne(t *testing.T) {
+	if got := exitCode(errors.New("plain failure")); got != 1 {
+		t.Fatalf("an ordinary error must keep exit code 1, got %d", got)
+	}
+	if got := exitCode(nil); got != 0 {
+		t.Fatalf("no error is exit code 0, got %d", got)
+	}
+}
