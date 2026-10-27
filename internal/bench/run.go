@@ -287,7 +287,7 @@ func runTrial(ctx context.Context, c Case, manifests worldManifests, options Opt
 	}
 	model := options.Model
 	if options.Agent == "scripted" {
-		model = scriptedModel(c)
+		model = scriptedModel(c, options.Model)
 	} else if model == "" {
 		result.Error = "model is required for non-scripted agents"
 		result.WallMS = time.Since(start).Milliseconds()
@@ -495,7 +495,13 @@ func manifestFor(world string, manifests worldManifests) (compiler.Manifest, err
 	}
 }
 
-func scriptedModel(c Case) string {
+// scriptedModel is the fixture a scripted case runs. Asking for the regressed
+// fixture applies it to every case: the gate check wants one deliberately
+// broken run of the whole suite, not a mix of healthy and broken cases.
+func scriptedModel(c Case, requested string) string {
+	if requested == agent.RegressedModel {
+		return requested
+	}
 	if c.Scenario == "ambiguous-commit" {
 		return "fixture-" + c.Recovery + "-v1"
 	}

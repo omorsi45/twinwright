@@ -13,6 +13,19 @@ database written by a newer build is refused rather than downgraded.
 
 ### Added
 
+- **A regression gate over bench reports, proven able to fail and run in CI.**
+  `twinwright gate` compares a candidate report with an approved baseline and exits
+  0 for no regressions, 1 for regressions and 2 when it cannot decide. The approved
+  baseline is `examples/bench/baselines/standard-scripted.json`. `--model
+  fixture-regressed-v1` selects a scripted fixture that investigates and then
+  claims the issue is resolved without making the first write, so the gate can be
+  shown to fail. The `regression-gate` CI job gates the current build against the
+  baseline and requires the gate to exit exactly 1 on the regressed fixture.
+  `TestRegressedBenchFailsTheGate` holds the same pair in `go test`, the demo gains
+  a twelfth step that shows the gate refusing the regressed fixture, and `make
+  gate` runs the first half locally. `run --fail-on-eval` exits non-zero after
+  printing the result when the evaluation fails; it is opt-in. See ADR 0030.
+
 - **A documented security review, gated by a test.** `SECURITY.md` was the policy
   and there was no record of anyone having looked: nothing under `docs/` matching
   secur, audit, review or threat, and no ADR. `docs/security-review.md` is the pass

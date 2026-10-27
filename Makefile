@@ -61,6 +61,11 @@ bench-postgres: ## measure runtime primitives on SQLite and PostgreSQL
 bench-smoke: ## run every benchmark once, to prove they still compile and pass
 	go test -run '^$$' -bench . -benchtime=1x -timeout 900s ./internal/store ./internal/worker ./internal/replay
 
+.PHONY: gate
+gate: build ## bench the scripted suite and gate it against the approved baseline
+	./twinwright bench --suite standard --agent scripted --examples examples --out bench-candidate.json > /dev/null
+	./twinwright gate --baseline examples/bench/baselines/standard-scripted.json --candidate bench-candidate.json
+
 .PHONY: up
 up: ## start PostgreSQL and an OpenTelemetry collector
 	docker compose up -d
@@ -82,4 +87,4 @@ verify-full: check test-race test-postgres e2e e2e-postgres ## everything, inclu
 clean: ## remove build output and local databases
 	rm -f twinwright twinwright.exe
 	rm -f twinwright*.db twinwright*.db-wal twinwright*.db-shm
-	rm -f twinwright.manifest.json *.world.manifest.json bench-report.json
+	rm -f twinwright.manifest.json *.world.manifest.json bench-report.json bench-candidate.json

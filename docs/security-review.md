@@ -135,9 +135,10 @@ run's own ledger rather than from the final assistant message.
 - `cmd/twinwright/main_test.go` - `TestSecurityScenarioFromCLI` walks the whole
   path through the CLI, including that an invalid policy is refused before a
   database file is created.
-- `cmd/twinwright/demo_test.go` - `TestDemo` asserts all eleven walkthrough steps
-  appear in order, the last being "block a prompt injection and an over-privileged
-  request", and `TestDemoStopsAtTheFirstUnverifiedStep` holds that a step which
+- `cmd/twinwright/demo_test.go` - `TestDemo` asserts all twelve walkthrough steps
+  appear in order, the security step being "block a prompt injection and an
+  over-privileged request" and the last "block a regressed agent at the CI gate",
+  and `TestDemoStopsAtTheFirstUnverifiedStep` holds that a step which
   cannot produce its evidence stops the walkthrough.
 
 ## 3. Secret redaction, at write time and at read time

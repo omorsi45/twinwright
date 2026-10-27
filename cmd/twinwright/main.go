@@ -146,6 +146,7 @@ func runCLI(args []string, out io.Writer) error {
 		recovery := fs.String("recovery", "safe", "scripted ambiguous-commit recovery: safe or unsafe")
 		steps := fs.Int("steps", 20, "maximum model turns in this invocation")
 		enqueue := fs.Bool("enqueue", false, "create the run and queue it for a worker instead of executing it here")
+		failOnEval := fs.Bool("fail-on-eval", false, "exit non-zero when the run's evaluation fails, after printing the result")
 		if err := fs.Parse(args[2:]); err != nil {
 			return err
 		}
@@ -243,7 +244,14 @@ func runCLI(args []string, out io.Writer) error {
 		if err != nil {
 			return localRunError(run.ID, err)
 		}
-		return emitResult(ctx, out, s, result, manifest)
+		passed, err := emitResult(ctx, out, s, result, manifest)
+		if err != nil {
+			return err
+		}
+		if *failOnEval && !passed {
+			return fmt.Errorf("evaluation failed for run %s", result.ID)
+		}
+		return nil
 	case "resume":
 		if len(args) < 2 {
 			return fmt.Errorf("usage: twinwright resume <run-id> [options]")
@@ -295,7 +303,8 @@ func runCLI(args []string, out io.Writer) error {
 		if err != nil {
 			return localRunError(runID, err)
 		}
-		return emitResult(ctx, out, s, result, manifest)
+		_, err = emitResult(ctx, out, s, result, manifest)
+		return err
 	case "checkpoints":
 		if len(args) < 2 {
 			return fmt.Errorf("usage: twinwright checkpoints <run-id> [--manifest path] [--db path]")
@@ -1011,22 +1020,33 @@ func providerTimeoutFlag(fs *flag.FlagSet) *time.Duration {
 	return fs.Duration("provider-timeout", agent.DefaultCallTimeout, "per-attempt provider call deadline")
 }
 
+// scriptedFixture is the healthy scripted provider for a scenario.
+func scriptedFixture(model, scenario string) agent.Provider {
+	if scenario == "ambiguous-commit" {
+		return agent.AmbiguousScriptedProvider{Unsafe: model == "fixture-unsafe-v1"}
+	}
+	if scenario == securityScenario {
+		return agent.SecurityScriptedProvider{}
+	}
+	if scenario != "duplicate-charge" {
+		return agent.CompanyScriptedProvider{Scenario: scenario, Unsafe: model == "fixture-unsafe-v1"}
+	}
+	return agent.ScriptedProvider{}
+}
+
 func selectProvider(name, model, scenario, baseURL string, timeout time.Duration) (agent.Provider, error) {
 	if timeout <= 0 {
 		return nil, fmt.Errorf("provider timeout must be positive")
 	}
 	switch name {
 	case "scripted":
-		if scenario == "ambiguous-commit" {
-			return agent.AmbiguousScriptedProvider{Unsafe: model == "fixture-unsafe-v1"}, nil
+		fixture := scriptedFixture(model, scenario)
+		if model == agent.RegressedModel {
+			// The manifest is not known here; the runner hands the wrapper the
+			// operations it needs on every turn.
+			return agent.RegressedProvider{Inner: fixture}, nil
 		}
-		if scenario == securityScenario {
-			return agent.SecurityScriptedProvider{}, nil
-		}
-		if scenario != "duplicate-charge" {
-			return agent.CompanyScriptedProvider{Scenario: scenario, Unsafe: model == "fixture-unsafe-v1"}, nil
-		}
-		return agent.ScriptedProvider{}, nil
+		return fixture, nil
 	case "openai":
 		if os.Getenv("OPENAI_API_KEY") == "" {
 			return nil, fmt.Errorf("OPENAI_API_KEY is required for openai")
@@ -1055,20 +1075,23 @@ func selectProvider(name, model, scenario, baseURL string, timeout time.Duration
 		return nil, fmt.Errorf("unknown agent %q", name)
 	}
 }
-func emitResult(ctx context.Context, out io.Writer, s *store.Store, run store.Run, manifest compiler.Manifest) error {
+
+// emitResult prints a run's evaluation and analysis and returns whether the
+// evaluation passed, so a caller can turn a failed evaluation into an exit code.
+func emitResult(ctx context.Context, out io.Writer, s *store.Store, run store.Run, manifest compiler.Manifest) (bool, error) {
 	report, err := eval.Evaluate(ctx, s, run.WorldID, run.Scenario)
 	if err != nil {
-		return err
+		return false, err
 	}
 	analysis, err := eval.AnalyzeRun(ctx, s, run.ID)
 	if err != nil {
-		return err
+		return false, err
 	}
 	result := map[string]any{"run": run, "evaluation": report, "analysis": analysis}
 	if err := addSecurity(ctx, result, s, run, manifest); err != nil {
-		return err
+		return false, err
 	}
-	return emit(out, result)
+	return report.Passed, emit(out, result)
 }
 
 const securityScenario = "prompt-injection-ticket"

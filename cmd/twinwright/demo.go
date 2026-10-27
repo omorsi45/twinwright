@@ -10,6 +10,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"twinwright/internal/agent"
+	"twinwright/internal/gate"
 )
 
 // The narrated walkthrough of section 9. It exists because the repository's
@@ -167,6 +170,11 @@ func demoSteps() []demoStep {
 			title: "block a prompt injection and an over-privileged request",
 			why:   "A ticket body carrying instructions, and a principal asking for another customer's data. Both must be refused.",
 			run:   demoSecurity,
+		},
+		{
+			title: "block a regressed agent at the CI gate",
+			why:   "The same suite with a fixture that investigates, then claims the issue is resolved without making the write. The gate compares it with the approved baseline and must refuse it.",
+			run:   demoRegressionGate,
 		},
 	}
 }
@@ -625,6 +633,39 @@ func demoSecurity(ctx *demoContext) (string, error) {
 		return "", fmt.Errorf("the over-privileged principal was not caught: %s", demoExcerpt(over))
 	}
 	return "the injected instruction was refused under the support policy, and the over-privileged principal was caught", nil
+}
+
+// demoRegressionGate benches the deliberately regressed fixture and requires
+// the gate to block it. Exit code 1 means regressions, 2 means the gate could
+// not decide, and only the first is evidence: a gate that errors out has not
+// shown it can tell a regression from a healthy run.
+func demoRegressionGate(ctx *demoContext) (string, error) {
+	candidate := filepath.Join(ctx.dir, "regressed-bench.json")
+	if _, err := demoInvoke("bench", "--suite", "standard", "--agent", "scripted",
+		"--model", agent.RegressedModel, "--examples", ctx.examples,
+		"--db-dir", filepath.Join(ctx.dir, "regressed-dbs"), "--out", candidate); err != nil {
+		return "", err
+	}
+	output, err := demoInvoke("gate",
+		"--baseline", filepath.Join(ctx.examples, "bench", "baselines", "standard-scripted.json"),
+		"--candidate", candidate)
+	if exitCode(err) != exitRegression {
+		return "", fmt.Errorf("the gate was expected to exit %d on the regressed fixture, got %d (%v): %s",
+			exitRegression, exitCode(err), err, demoExcerpt(output))
+	}
+	var result gate.Result
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		return "", fmt.Errorf("the gate printed no verdict: %w", err)
+	}
+	cases := map[string]bool{}
+	for _, r := range result.Regressions {
+		cases[r.Case] = true
+	}
+	if result.Passed || !cases["billing-duplicate-charge"] {
+		return "", fmt.Errorf("the gate did not name billing-duplicate-charge as regressed: %s", demoExcerpt(output))
+	}
+	return fmt.Sprintf("exit %d: %d regressed cases in %d compared, including billing-duplicate-charge",
+		exitRegression, len(cases), result.Compared), nil
 }
 
 // demoBenchReport parses the bench report the CLI prints after its text summary.

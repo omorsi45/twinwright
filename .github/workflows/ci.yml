@@ -120,6 +120,45 @@ jobs:
           go build -o /tmp/twinwright ./cmd/twinwright
           /tmp/twinwright demo --dir "$(mktemp -d)/demo"
 
+  regression-gate:
+    name: bench regression gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: build the CLI
+        run: go build -o twinwright ./cmd/twinwright
+      # Scripted fixtures never call a provider, so a failure here is a change in
+      # this repository and not a different answer from a model. The default
+      # trajectory mode is warn: a reordered tool call shows in the job summary
+      # without blocking the merge.
+      - name: bench the standard suite and gate it against the approved baseline
+        run: |
+          ./twinwright bench --suite standard --agent scripted --examples examples --out candidate.json > /dev/null
+          ./twinwright gate \
+            --baseline examples/bench/baselines/standard-scripted.json \
+            --candidate candidate.json \
+            --markdown "$GITHUB_STEP_SUMMARY"
+      # A gate that has only ever passed has not been shown to catch anything.
+      # This fixture claims success instead of making the first write, so the gate
+      # must exit exactly 1. Exit 0 means it missed the regression, and exit 2
+      # means it could not decide; both fail the job.
+      - name: the gate blocks a deliberately regressed agent
+        run: |
+          ./twinwright bench --suite standard --agent scripted --model fixture-regressed-v1 --examples examples --out regressed.json > /dev/null
+          code=0
+          ./twinwright gate \
+            --baseline examples/bench/baselines/standard-scripted.json \
+            --candidate regressed.json > /dev/null || code=$?
+          if [ "$code" -ne 1 ]; then
+            echo "expected the gate to exit 1 on the regressed fixture, got $code"
+            exit 1
+          fi
+
   security:
     name: secret and vulnerability scan
     runs-on: ubuntu-latest

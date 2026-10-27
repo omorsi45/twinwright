@@ -52,6 +52,7 @@ func TestDemo(t *testing.T) {
 			"fail the same incident on purpose",
 			"explain the failure with a counterfactual",
 			"block a prompt injection and an over-privileged request",
+			"block a regressed agent at the CI gate",
 		}
 		at := 0
 		for _, step := range want {
@@ -60,6 +61,17 @@ func TestDemo(t *testing.T) {
 				t.Fatalf("demo never reached %q (or reached it out of order)\nfull output:\n%s", step, text)
 			}
 			at += idx + len(step)
+		}
+	})
+
+	// The count is part of the claim the README and AGENTS.md make, so a step
+	// added or dropped without updating them fails here.
+	t.Run("has twelve steps", func(t *testing.T) {
+		if got := len(demoSteps()); got != 12 {
+			t.Fatalf("demo has %d steps, want 12", got)
+		}
+		if !strings.Contains(text, "=== 12/12 ") {
+			t.Fatalf("demo never printed its last step\n%s", text)
 		}
 	})
 
@@ -77,6 +89,7 @@ func TestDemo(t *testing.T) {
 			"stale commit refused",
 			"resourceSpans",  // the trace is real OTLP, not a prose summary
 			"counterfactual", // the failure is explained, not just reported
+			"regressed case", // the gate named the case the regression broke
 		} {
 			if !strings.Contains(text, evidence) {
 				t.Fatalf("demo output is missing the evidence %q\nfull output:\n%s", evidence, text)

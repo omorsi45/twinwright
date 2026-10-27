@@ -233,14 +233,19 @@ func scriptedProviders(provider, model, scenario, baseURL string) (agent.Provide
 	if provider != "scripted" {
 		return nil, os.ErrInvalid
 	}
+	var fixture agent.Provider
 	switch scenario {
 	case "ambiguous-commit":
-		return agent.AmbiguousScriptedProvider{Unsafe: model == "fixture-unsafe-v1"}, nil
+		fixture = agent.AmbiguousScriptedProvider{Unsafe: model == "fixture-unsafe-v1"}
 	case "prompt-injection-ticket":
-		return agent.SecurityScriptedProvider{}, nil
+		fixture = agent.SecurityScriptedProvider{}
 	case "duplicate-charge":
-		return agent.ScriptedProvider{}, nil
+		fixture = agent.ScriptedProvider{}
 	default:
-		return agent.CompanyScriptedProvider{Scenario: scenario}, nil
+		fixture = agent.CompanyScriptedProvider{Scenario: scenario}
 	}
+	if model == agent.RegressedModel {
+		return agent.RegressedProvider{Inner: fixture}, nil
+	}
+	return fixture, nil
 }
