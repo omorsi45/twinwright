@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -21,6 +20,9 @@ type OpenAIProvider struct {
 	Client *http.Client
 	// Timeout is the per-attempt deadline. Zero means DefaultCallTimeout.
 	Timeout time.Duration
+	// MaxOutputTokens is the output ceiling sent with each request. Zero sends
+	// none and leaves the server's own limit in force.
+	MaxOutputTokens int
 }
 
 func (p OpenAIProvider) Next(ctx context.Context, task string, history []Message, ops []compiler.Operation) (Message, error) {
@@ -74,6 +76,9 @@ func (p OpenAIProvider) Next(ctx context.Context, task string, history []Message
 		tools = append(tools, map[string]any{"type": "function", "name": op.ID, "description": description(descriptionKey), "parameters": map[string]any{"type": "object", "properties": properties, "required": op.Required, "additionalProperties": false}, "strict": len(op.Required) == len(op.Properties)})
 	}
 	payload := map[string]any{"model": p.Model, "store": false, "parallel_tool_calls": false, "include": []string{"reasoning.encrypted_content"}, "input": input, "tools": tools}
+	if p.MaxOutputTokens > 0 {
+		payload["max_output_tokens"] = p.MaxOutputTokens
+	}
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return Message{}, err
@@ -86,10 +91,10 @@ func (p OpenAIProvider) Next(ctx context.Context, task string, history []Message
 	req.Header.Set("Content-Type", "application/json")
 	res, err := client.Do(req)
 	if err != nil {
-		return Message{}, interrupted(ctx, attemptCtx, deadline, err)
+		return Message{}, interrupted(ctx, attemptCtx, deadline, safeTransportError(err, p.APIKey))
 	}
 	defer res.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(res.Body, 4<<20))
+	body, err := readBody(res)
 	if err != nil {
 		return Message{}, interrupted(ctx, attemptCtx, deadline, err)
 	}
@@ -98,6 +103,8 @@ func (p OpenAIProvider) Next(ctx context.Context, task string, history []Message
 		return Message{RawBody: text}, fmt.Errorf("OpenAI response HTTP %d: %s", res.StatusCode, text)
 	}
 	var wire struct {
+		ID     string            `json:"id"`
+		Model  string            `json:"model"`
 		Output []json.RawMessage `json:"output"`
 		Usage  *Usage            `json:"usage"`
 		// The Responses API reports a cut-short generation with a top-level
@@ -122,7 +129,8 @@ func (p OpenAIProvider) Next(ctx context.Context, task string, history []Message
 		}
 		return Message{RawBody: redact.String(string(body), p.APIKey)}, truncatedCompletion(reason)
 	}
-	message := Message{Role: "assistant", RawOutput: wire.Output, Usage: wire.Usage}
+	wire.Output = redactOutput(wire.Output, p.APIKey)
+	message := Message{Role: "assistant", RawOutput: wire.Output, Usage: wire.Usage, ResponseID: wire.ID, ServerModel: wire.Model, FinishReason: wire.Status, HTTPStatus: res.StatusCode}
 	var texts []string
 	for _, raw := range wire.Output {
 		var item struct {

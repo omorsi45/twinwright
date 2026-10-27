@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -23,6 +22,9 @@ type ChatCompletionsProvider struct {
 	Client  *http.Client
 	// Timeout is the per-attempt deadline. Zero means DefaultCallTimeout.
 	Timeout time.Duration
+	// MaxOutputTokens is the output ceiling sent with each request. Zero sends
+	// none and leaves the server's own limit in force.
+	MaxOutputTokens int
 }
 
 func (p ChatCompletionsProvider) Next(ctx context.Context, task string, history []Message, ops []compiler.Operation) (Message, error) {
@@ -77,6 +79,9 @@ func (p ChatCompletionsProvider) Next(ctx context.Context, task string, history 
 		}})
 	}
 	payload := map[string]any{"model": p.Model, "messages": messages}
+	if p.MaxOutputTokens > 0 {
+		payload["max_tokens"] = p.MaxOutputTokens
+	}
 	if len(tools) > 0 {
 		payload["tools"] = tools
 	}
@@ -95,10 +100,10 @@ func (p ChatCompletionsProvider) Next(ctx context.Context, task string, history 
 	req.Header.Set("Content-Type", "application/json")
 	res, err := client.Do(req)
 	if err != nil {
-		return Message{}, interrupted(ctx, attemptCtx, deadline, err)
+		return Message{}, interrupted(ctx, attemptCtx, deadline, safeTransportError(err, p.APIKey))
 	}
 	defer res.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(res.Body, 4<<20))
+	body, err := readBody(res)
 	if err != nil {
 		return Message{}, interrupted(ctx, attemptCtx, deadline, err)
 	}
@@ -107,6 +112,8 @@ func (p ChatCompletionsProvider) Next(ctx context.Context, task string, history 
 		return Message{RawBody: text}, fmt.Errorf("chat completions HTTP %d: %s", res.StatusCode, text)
 	}
 	var wire struct {
+		ID      string `json:"id"`
+		Model   string `json:"model"`
 		Choices []struct {
 			Message json.RawMessage `json:"message"`
 			// finish_reason carries the truncation signal here. "length" is
@@ -127,6 +134,7 @@ func (p ChatCompletionsProvider) Next(ctx context.Context, task string, history 
 	if reason := wire.Choices[0].FinishReason; reason == "length" || reason == "model_length" {
 		return Message{RawBody: redact.String(string(body), p.APIKey)}, truncatedCompletion(reason)
 	}
+	raw := redactOutput([]json.RawMessage{wire.Choices[0].Message}, p.APIKey)
 	var message struct {
 		Content   *string `json:"content"`
 		ToolCalls []struct {
@@ -137,10 +145,10 @@ func (p ChatCompletionsProvider) Next(ctx context.Context, task string, history 
 			} `json:"function"`
 		} `json:"tool_calls"`
 	}
-	if err = json.Unmarshal(wire.Choices[0].Message, &message); err != nil {
+	if err = json.Unmarshal(raw[0], &message); err != nil {
 		return Message{RawBody: redact.String(string(body), p.APIKey)}, err
 	}
-	out := Message{Role: "assistant", RawOutput: []json.RawMessage{wire.Choices[0].Message}}
+	out := Message{Role: "assistant", RawOutput: raw, ResponseID: wire.ID, ServerModel: wire.Model, FinishReason: wire.Choices[0].FinishReason, HTTPStatus: res.StatusCode}
 	if message.Content != nil {
 		out.Content = *message.Content
 	}

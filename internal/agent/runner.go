@@ -30,6 +30,13 @@ type Message struct {
 	RawOutput   []json.RawMessage `json:"raw_output,omitempty"`
 	RawBody     string            `json:"raw_body,omitempty"`
 	Usage       *Usage            `json:"usage,omitempty"`
+	// The provider's own account of the response, recorded so a live run can be
+	// compared with a later one. Each is omitted when empty, which is why a
+	// scripted run's ledger is byte-identical to what it was before they existed.
+	ResponseID   string `json:"response_id,omitempty"`
+	ServerModel  string `json:"server_model,omitempty"`
+	FinishReason string `json:"finish_reason,omitempty"`
+	HTTPStatus   int    `json:"http_status,omitempty"`
 	// Interruptions are the attempts that produced no turn before this one did.
 	// They live on the message because the message is what the ledger records and
 	// what a replay reads back: the recorded turn is what makes the interruption

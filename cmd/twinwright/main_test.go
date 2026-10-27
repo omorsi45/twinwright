@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"twinwright/internal/agent"
 	"twinwright/internal/behavior"
 	"twinwright/internal/bench"
 	"twinwright/internal/compiler"
@@ -1831,5 +1833,67 @@ func TestExitCodeDefaultsToOne(t *testing.T) {
 	}
 	if got := exitCode(nil); got != 0 {
 		t.Fatalf("no error is exit code 0, got %d", got)
+	}
+}
+
+// Every command that can reach a provider registers its flags through
+// providerFlags, so a rename or a changed default here would silently break
+// scripts that already pass --base-url or --provider-timeout.
+func TestProviderFlagsKeepTheirNamesAndDefaults(t *testing.T) {
+	t.Setenv("OPENAI_BASE_URL", "http://env.example/v1")
+	fs := flag.NewFlagSet("t", flag.ContinueOnError)
+	cfg := providerFlags(fs)
+	if err := fs.Parse(nil); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Timeout != 90*time.Second || cfg.Timeout != agent.DefaultCallTimeout {
+		t.Fatalf("--provider-timeout defaults to %v, want 90s", cfg.Timeout)
+	}
+	if cfg.BaseURL != "http://env.example/v1" {
+		t.Fatalf("--base-url defaults to %q, want $OPENAI_BASE_URL", cfg.BaseURL)
+	}
+	if cfg.MaxOutputTokens != 0 {
+		t.Fatalf("--max-output-tokens defaults to %d, want 0 (the adapter default)", cfg.MaxOutputTokens)
+	}
+
+	fs = flag.NewFlagSet("t", flag.ContinueOnError)
+	cfg = providerFlags(fs)
+	if err := fs.Parse([]string{"--base-url", "http://flag.example/v1", "--provider-timeout", "5s", "--max-output-tokens", "321"}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.BaseURL != "http://flag.example/v1" || cfg.Timeout != 5*time.Second || cfg.MaxOutputTokens != 321 {
+		t.Fatalf("parsed config = %+v", *cfg)
+	}
+}
+
+func TestSelectProviderCarriesTheOutputCeiling(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("ANTHROPIC_API_KEY", "test-key")
+	base := providerConfig{Scenario: "duplicate-charge", Timeout: time.Second, MaxOutputTokens: 321}
+
+	cfg := base
+	cfg.Name, cfg.Model = "openai", "gpt-test"
+	if p, err := selectProvider(cfg); err != nil {
+		t.Fatal(err)
+	} else if got, ok := p.(agent.OpenAIProvider); !ok || got.MaxOutputTokens != 321 {
+		t.Fatalf("openai = %+v", p)
+	}
+	cfg = base
+	cfg.Name, cfg.Model, cfg.BaseURL = "openai-compatible", "local", "http://127.0.0.1:1/v1"
+	if p, err := selectProvider(cfg); err != nil {
+		t.Fatal(err)
+	} else if got, ok := p.(agent.ChatCompletionsProvider); !ok || got.MaxOutputTokens != 321 {
+		t.Fatalf("openai-compatible = %+v", p)
+	}
+	cfg = base
+	cfg.Name, cfg.Model = "anthropic", "claude-test"
+	if p, err := selectProvider(cfg); err != nil {
+		t.Fatal(err)
+	} else if got, ok := p.(agent.AnthropicProvider); !ok || got.MaxOutputTokens != 321 {
+		t.Fatalf("anthropic = %+v", p)
+	}
+	cfg.MaxOutputTokens = -1
+	if _, err := selectProvider(cfg); err == nil {
+		t.Fatal("a negative --max-output-tokens was accepted")
 	}
 }

@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 
@@ -113,10 +112,10 @@ func (p AnthropicProvider) Next(ctx context.Context, task string, history []Mess
 	req.Header.Set("Content-Type", "application/json")
 	res, err := client.Do(req)
 	if err != nil {
-		return Message{}, interrupted(ctx, attemptCtx, deadline, err)
+		return Message{}, interrupted(ctx, attemptCtx, deadline, safeTransportError(err, p.APIKey))
 	}
 	defer res.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(res.Body, 4<<20))
+	body, err := readBody(res)
 	if err != nil {
 		return Message{}, interrupted(ctx, attemptCtx, deadline, err)
 	}
@@ -125,6 +124,8 @@ func (p AnthropicProvider) Next(ctx context.Context, task string, history []Mess
 		return Message{RawBody: text}, fmt.Errorf("Anthropic HTTP %d: %s", res.StatusCode, text)
 	}
 	var wire struct {
+		ID      string            `json:"id"`
+		Model   string            `json:"model"`
 		Content []json.RawMessage `json:"content"`
 		// stop_reason carries the truncation signal on this API. max_tokens is
 		// the caller's ceiling; model_context_window_exceeded is the model's own
@@ -142,7 +143,8 @@ func (p AnthropicProvider) Next(ctx context.Context, task string, history []Mess
 	if wire.StopReason == "max_tokens" || wire.StopReason == "model_context_window_exceeded" {
 		return Message{RawBody: redact.String(string(body), p.APIKey)}, truncatedCompletion(wire.StopReason)
 	}
-	out := Message{Role: "assistant", RawOutput: wire.Content}
+	wire.Content = redactOutput(wire.Content, p.APIKey)
+	out := Message{Role: "assistant", RawOutput: wire.Content, ResponseID: wire.ID, ServerModel: wire.Model, FinishReason: wire.StopReason, HTTPStatus: res.StatusCode}
 	var texts []string
 	for _, raw := range wire.Content {
 		var block struct {
