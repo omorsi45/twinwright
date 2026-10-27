@@ -160,10 +160,11 @@ Sub-choices, all our call:
 
 ## Milestones
 
-Ordered by dependency. Each is a separately reviewable branch stacked on the
-previous one, with its own plan, review and finish. Milestone 1 is specified
-fully below; later milestones are specified to the level a plan can start from
-and are re-checked against the code when their plan is written.
+Ordered by dependency. Milestone 1 is its own branch. At the owner's request
+(2026-10-27), milestones 2 to 7 below are delivered as one final milestone on
+one stacked branch, `cloud/m2-platform`, with one plan, per-task reviews and
+one whole-branch review. Their sections stay as the requirements; the section
+"Final milestone: scope decisions" records what was cut to finish faster.
 
 | # | Milestone | Depends on | Why this position |
 |---|---|---|---|
@@ -370,3 +371,49 @@ layout.
   linking each claim to its test or CI job; an architecture document; security,
   trust-boundary and limitations documentation; benchmark methodology and
   results; CHANGELOG and a release tag decision left to the owner.
+
+## Final milestone: scope decisions (2026-10-27)
+
+Milestones 2 to 7 are built as one branch. These calls narrow them so the
+release finishes sooner without dropping any goal or success criterion; all are
+our call.
+
+- **Gate fingerprint:** the per-case fingerprint is the tool trajectory
+  (operation and status per call), the agent's committed mutation count, failed
+  checks, unsafe-retry and successful-violation counts. The normalised
+  final-state digest is cut; replay and assertions already cover state.
+- **Trials:** `trials` above 1 is supported for local-mode cases only; distributed
+  and counterfactual cases refuse it.
+- **Deliberate regression:** a scripted model `fixture-regressed-v1` wraps any
+  scripted fixture and answers instead of making the run's first mutating call,
+  so every scenario that must write regresses the same visible way.
+- **Provider resilience:** 429, 5xx and transport failures become recorded
+  interruptions retried within the existing two-attempt budget, waiting the
+  server's `Retry-After` (capped at 30 seconds) or one second. The attempt count
+  is unchanged.
+- **Error-run replay is cut.** Runs that hit the delivery limit or a non-retried
+  provider error stay unreplayable and documented as such; transient provider
+  failures no longer end a turn, which removes the common case.
+- **Cassettes:** recorded as JSON lines; offline reconstruction is
+  `twinwright replay <run> --cassette <file>`, which drives the real adapter from
+  the cassette and must reproduce the ledger exactly.
+- **Real model:** a pinned Ollama image with a small tool-calling model (chosen
+  when the model is pulled and recorded with its digest) runs in an Integration
+  job and once on the development Mac. The run's evaluation outcome is reported
+  as measured, pass or fail; the job gates on recording and offline
+  reconstruction, not on the model's competence.
+- **Agent protocol:** the `exec` provider starts the agent process once per turn
+  and exchanges one JSON request and one JSON response. The child gets a minimal
+  environment (PATH, HOME, and only variables named with `--agent-env`). The
+  command is not persisted; resume and workers take it again.
+- **Agent isolation:** `--agent-container <image>` runs the same protocol under
+  `docker run --rm -i` with a read-only root, all capabilities dropped,
+  no-new-privileges, a non-root user, resource limits and no network unless
+  `--agent-network` names one.
+- **Benchmarks:** `twinwright perf` measures throughput with in-process workers,
+  recovery latency with an in-process crash on a real clock (the real-process
+  crash evidence stays the milestone 1 test), replay consistency and the crash
+  matrix. SQLite figures come from the development Mac and PostgreSQL figures
+  from a GitHub runner, each labelled with its machine.
+- **Fleet gauges:** database-derived gauges stay served by every worker; the docs
+  say to scrape one worker or aggregate with `max`. Re-architecting them is cut.
