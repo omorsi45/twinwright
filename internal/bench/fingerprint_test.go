@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"twinwright/internal/store"
 )
@@ -141,6 +142,37 @@ cases:
 	}
 	if _, err := os.Stat(filepath.Join(workDir, "billing-duplicate.db")); err == nil {
 		t.Error("a multi-trial case must not use the single-trial database name")
+	}
+}
+
+// TestMultiTrialWallMSIsTheFirstTrial pins that a repeated case reports one
+// trial's latency, not the sum. Summary latency percentiles read WallMS, so a
+// sum would make --trials N look N times slower. With five identical trials the
+// bench.Run call lasts about five trial durations, so a first-trial WallMS is
+// near a fifth of the elapsed time and a summed one is near all of it. The
+// threshold of half sits between the two with wide margin on either side.
+func TestMultiTrialWallMSIsTheFirstTrial(t *testing.T) {
+	started := time.Now()
+	report, _ := runSuiteForFingerprint(t, []byte(`
+version: 1
+suite: trials
+cases:
+  - id: billing-duplicate
+    category: reasoning
+    world: billing
+    scenario: duplicate-charge
+    assertions: assertions/duplicate-charge.yaml
+    dimensions: [task]
+    trials: 5
+`), Options{})
+	elapsed := time.Since(started)
+	result := report.Cases[0]
+	if result.Trials != 5 || result.Status != "passed" {
+		t.Fatalf("trials=%d status=%s", result.Trials, result.Status)
+	}
+	wall := time.Duration(result.WallMS) * time.Millisecond
+	if wall*2 >= elapsed {
+		t.Fatalf("WallMS=%v is at least half of the %v the five-trial run took; it looks summed over trials, want the first trial only", wall, elapsed)
 	}
 }
 

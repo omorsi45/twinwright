@@ -159,16 +159,20 @@ type CounterfactualResult struct {
 
 // CaseResult is one case outcome.
 type CaseResult struct {
-	ID               string   `json:"id"`
-	Category         string   `json:"category"`
-	Status           string   `json:"status"`
-	RunID            string   `json:"run_id,omitempty"`
-	Model            string   `json:"model,omitempty"`
-	FailedChecks     []string `json:"failed_checks,omitempty"`
-	ToolCalls        int      `json:"tool_calls"`
-	ModelTurns       int      `json:"model_turns"`
-	WallMS           int64    `json:"wall_ms"`
-	DuplicateRefunds int      `json:"duplicate_refunds,omitempty"`
+	ID           string   `json:"id"`
+	Category     string   `json:"category"`
+	Status       string   `json:"status"`
+	RunID        string   `json:"run_id,omitempty"`
+	Model        string   `json:"model,omitempty"`
+	FailedChecks []string `json:"failed_checks,omitempty"`
+	ToolCalls    int      `json:"tool_calls"`
+	ModelTurns   int      `json:"model_turns"`
+	// WallMS is the wall time of the run in milliseconds. For a case with
+	// several trials it is the first trial's time, not the sum, so it stays
+	// comparable with a one-trial run and the latency percentiles are not
+	// inflated by the trial count.
+	WallMS           int64 `json:"wall_ms"`
+	DuplicateRefunds int   `json:"duplicate_refunds,omitempty"`
 	// AgentRefunds is how many refunds the agent itself committed, read from the
 	// ledger rather than from the refunds table. It exists because
 	// DuplicateRefunds counts every row in the world and so cannot tell the

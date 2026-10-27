@@ -198,13 +198,14 @@ func caseTrials(c Case, options Options) int {
 // is the strictest one: the case passes only if every trial did, and when one
 // did not, the verdict fields (status, failed checks, error) come from the first
 // trial that did not pass, so the report names a real failure instead of
-// averaging it away. WallMS is the total across trials.
+// averaging it away. WallMS is the first trial's wall time, like the rest of the
+// fingerprint: Summary latency percentiles read it, and a sum over trials would
+// make a --trials N run look N times slower than the same suite run once.
 func runCase(ctx context.Context, c Case, manifests worldManifests, options Options, seed int64) CaseResult {
 	trials := caseTrials(c, options)
 	var result CaseResult
 	var failing *CaseResult
 	passes := 0
-	var wallMS int64
 	for trial := 1; trial <= trials; trial++ {
 		// A single trial keeps the historical database name. Repeats get a name
 		// per trial so each seeds and runs against fresh state.
@@ -213,7 +214,6 @@ func runCase(ctx context.Context, c Case, manifests worldManifests, options Opti
 			dbName = fmt.Sprintf("%s-%d.db", c.ID, trial)
 		}
 		one := runTrial(ctx, c, manifests, options, seed, dbName)
-		wallMS += one.WallMS
 		if one.Passed {
 			passes++
 		} else if failing == nil {
@@ -232,7 +232,6 @@ func runCase(ctx context.Context, c Case, manifests worldManifests, options Opti
 	}
 	result.Trials = trials
 	result.Passes = passes
-	result.WallMS = wallMS
 	return result
 }
 
