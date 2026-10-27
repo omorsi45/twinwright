@@ -192,20 +192,9 @@ func caseTrials(c Case, options Options) int {
 }
 
 // runCase runs a case once per trial and folds the trials into one result.
-//
-// Run identity, model, fingerprint and counts come from the first trial, so a
-// one-trial case reports exactly what it did before trials existed. The verdict
-// is the strictest one: the case passes only if every trial did, and when one
-// did not, the verdict fields (status, failed checks, error) come from the first
-// trial that did not pass, so the report names a real failure instead of
-// averaging it away. WallMS is the first trial's wall time, like the rest of the
-// fingerprint: Summary latency percentiles read it, and a sum over trials would
-// make a --trials N run look N times slower than the same suite run once.
 func runCase(ctx context.Context, c Case, manifests worldManifests, options Options, seed int64) CaseResult {
 	trials := caseTrials(c, options)
-	var result CaseResult
-	var failing *CaseResult
-	passes := 0
+	results := make([]CaseResult, 0, trials)
 	for trial := 1; trial <= trials; trial++ {
 		// A single trial keeps the historical database name. Repeats get a name
 		// per trial so each seeds and runs against fresh state.
@@ -213,25 +202,66 @@ func runCase(ctx context.Context, c Case, manifests worldManifests, options Opti
 		if trials > 1 {
 			dbName = fmt.Sprintf("%s-%d.db", c.ID, trial)
 		}
-		one := runTrial(ctx, c, manifests, options, seed, dbName)
-		if one.Passed {
+		results = append(results, runTrial(ctx, c, manifests, options, seed, dbName))
+	}
+	return foldTrials(results)
+}
+
+// foldTrials folds the per-trial results of one case, in trial order, into the
+// case's result. It is pure so the precedence can be tested without running
+// anything. The caller passes at least one result.
+//
+// Run identity, model, fingerprint and counts come from the first trial, so a
+// one-trial case reports exactly what it did before trials existed. WallMS is
+// the first trial's too: Summary latency percentiles read it, and a sum over
+// trials would make a --trials N run look N times slower than the same suite
+// run once.
+//
+// The verdict does not depend on trial order, because Aggregate drops errored
+// cases from every rate and an order-dependent fold would score the same
+// trials differently. A case is "failed" when any trial reached a failing
+// verdict, "error" when none failed but at least one trial stopped without a
+// verdict (a pass elsewhere cannot make the case passed, and the unscored
+// trial must not be hidden), and "passed" only when every trial passed. The
+// verdict fields (FailedChecks, Error) and VerdictTrial come from the first
+// trial of the winning kind, so the report names a real failure and says which
+// trial's database to open.
+//
+// The duplicate-effects inputs cover every trial rather than the first: a
+// retry that happened in trial 2 is still a retry, so UnsafeRetry is true if
+// any trial retried unsafely and the refund counts take the maximum.
+func foldTrials(trials []CaseResult) CaseResult {
+	result := trials[0]
+	result.Trials = len(trials)
+	passes := 0
+	failing, errored := -1, -1
+	for i, one := range trials {
+		switch {
+		case one.Status == "passed" && one.Passed:
 			passes++
-		} else if failing == nil {
-			failed := one
-			failing = &failed
+		case one.Status == "failed" && failing < 0:
+			failing = i
+		case one.Status != "failed" && errored < 0:
+			errored = i
 		}
-		if trial == 1 {
-			result = one
-		}
+		result.UnsafeRetry = result.UnsafeRetry || one.UnsafeRetry
+		result.AgentRefunds = max(result.AgentRefunds, one.AgentRefunds)
+		result.DuplicateRefunds = max(result.DuplicateRefunds, one.DuplicateRefunds)
 	}
-	if failing != nil {
-		result.Status = failing.Status
-		result.Passed = failing.Passed
-		result.FailedChecks = failing.FailedChecks
-		result.Error = failing.Error
-	}
-	result.Trials = trials
 	result.Passes = passes
+	verdict := failing
+	if verdict < 0 {
+		verdict = errored
+	}
+	if verdict >= 0 {
+		result.Status = trials[verdict].Status
+		result.Passed = false
+		result.FailedChecks = trials[verdict].FailedChecks
+		result.Error = trials[verdict].Error
+		if len(trials) > 1 {
+			result.VerdictTrial = verdict + 1
+		}
+	}
 	return result
 }
 

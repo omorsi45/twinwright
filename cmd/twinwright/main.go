@@ -640,6 +640,9 @@ func runCLI(args []string, out io.Writer) error {
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
+		if *trials < 1 {
+			return fmt.Errorf("--trials must be positive, got %d", *trials)
+		}
 		if *model == "" {
 			*model = defaultModel(*providerName)
 		}

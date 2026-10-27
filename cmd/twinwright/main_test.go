@@ -1697,3 +1697,13 @@ cases:
 		}
 	}
 }
+
+func TestBenchCLIRefusesNonPositiveTrials(t *testing.T) {
+	examples := filepath.Join("..", "..", "examples")
+	for _, value := range []string{"0", "-1"} {
+		err := runCLI([]string{"bench", "--examples", examples, "--agent", "scripted", "--db-dir", t.TempDir(), "--trials", value}, &bytes.Buffer{})
+		if err == nil || !strings.Contains(err.Error(), "--trials must be positive") {
+			t.Errorf("--trials %s: err=%v want an error naming --trials", value, err)
+		}
+	}
+}

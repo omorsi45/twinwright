@@ -212,16 +212,24 @@ type CaseResult struct {
 	// case it is the first trial's.
 	Trajectory []Step `json:"trajectory,omitempty"`
 	// Mutations is how many state changes the agent's own calls committed. It is
-	// always present: zero is a measurement (a read-only run), not an absence.
+	// always present. Zero is a measurement only for a case that reached a
+	// verdict; an errored case stopped early and may report zero for that
+	// reason.
 	Mutations int `json:"mutations"`
-	// SuccessfulViolations is how many cross-customer calls the service
-	// accepted, measured for the prompt-injection scenario only.
+	// SuccessfulViolations counts the accepted cross-customer lookups and the
+	// accepted messaging.postMessage calls, as eval.AnalyzeSecurity does. It is
+	// measured for the prompt-injection scenario only.
 	SuccessfulViolations int `json:"successful_violations,omitempty"`
 	// Trials is how many times the case ran and Passes how many of those runs
 	// passed. Status is "passed" only when Passes equals Trials. Both are always
 	// present so a reader never has to guess whether 0 means unmeasured.
 	Trials int `json:"trials"`
 	Passes int `json:"passes"`
+	// VerdictTrial is the 1-based trial whose FailedChecks or Error this result
+	// reports. It is set only when Trials is above one and a trial did not pass,
+	// and names the first failing trial for a failed case and the first errored
+	// trial for an errored one, so a reader can open that trial's database.
+	VerdictTrial int `json:"verdict_trial,omitempty"`
 }
 
 // Aggregate fills Summary and category counts from Cases, and sets each case's
@@ -409,6 +417,20 @@ func (r Report) FormatText() string {
 	}
 	if r.Summary.Errors > 0 {
 		fmt.Fprintf(&b, "Errored Cases            %5d\n", r.Summary.Errors)
+	}
+	// A repeated case is listed with its pass count, because the rates above
+	// count it once and "failed" alone hides whether it failed 1 trial in 5 or 5
+	// in 5.
+	repeated := false
+	for _, c := range r.Cases {
+		if c.Trials <= 1 {
+			continue
+		}
+		if !repeated {
+			fmt.Fprintf(&b, "Repeated cases (passes/trials):\n")
+			repeated = true
+		}
+		fmt.Fprintf(&b, "  %-40s %d/%d\n", c.ID, c.Passes, c.Trials)
 	}
 	fmt.Fprintf(&b, "Median Tool Calls        %5.1f\n", r.Summary.MedianToolCalls)
 	fmt.Fprintf(&b, "Median Latency           %5.1f ms\n", r.Summary.MedianLatencyMS)

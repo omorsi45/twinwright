@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"twinwright/internal/store"
 )
@@ -145,37 +144,6 @@ cases:
 	}
 }
 
-// TestMultiTrialWallMSIsTheFirstTrial pins that a repeated case reports one
-// trial's latency, not the sum. Summary latency percentiles read WallMS, so a
-// sum would make --trials N look N times slower. With five identical trials the
-// bench.Run call lasts about five trial durations, so a first-trial WallMS is
-// near a fifth of the elapsed time and a summed one is near all of it. The
-// threshold of half sits between the two with wide margin on either side.
-func TestMultiTrialWallMSIsTheFirstTrial(t *testing.T) {
-	started := time.Now()
-	report, _ := runSuiteForFingerprint(t, []byte(`
-version: 1
-suite: trials
-cases:
-  - id: billing-duplicate
-    category: reasoning
-    world: billing
-    scenario: duplicate-charge
-    assertions: assertions/duplicate-charge.yaml
-    dimensions: [task]
-    trials: 5
-`), Options{})
-	elapsed := time.Since(started)
-	result := report.Cases[0]
-	if result.Trials != 5 || result.Status != "passed" {
-		t.Fatalf("trials=%d status=%s", result.Trials, result.Status)
-	}
-	wall := time.Duration(result.WallMS) * time.Millisecond
-	if wall*2 >= elapsed {
-		t.Fatalf("WallMS=%v is at least half of the %v the five-trial run took; it looks summed over trials, want the first trial only", wall, elapsed)
-	}
-}
-
 func TestOptionsTrialsApplyUnlessTheCaseSetsItsOwn(t *testing.T) {
 	report, _ := runSuiteForFingerprint(t, []byte(`
 version: 1
@@ -248,8 +216,8 @@ cases:
     assertions: assertions/duplicate-charge.yaml
     dimensions: [task]
     trials: 2`+mode), root)
-			if err == nil || !strings.Contains(err.Error(), "trials") {
-				t.Fatalf("err=%v want a parse error naming trials", err)
+			if err == nil || !strings.Contains(err.Error(), `case "refused-case": trials requires mode local`) {
+				t.Fatalf("err=%v want %q", err, `case "refused-case": trials requires mode local`)
 			}
 		})
 	}
@@ -269,8 +237,8 @@ cases:
     dimensions: [task]
     trials: 0
 `), root)
-	if err == nil || !strings.Contains(err.Error(), "trials") {
-		t.Fatalf("err=%v want a parse error naming trials", err)
+	if err == nil || !strings.Contains(err.Error(), `case "refused-case": trials must be positive`) {
+		t.Fatalf("err=%v want %q", err, `case "refused-case": trials must be positive`)
 	}
 }
 
@@ -295,5 +263,111 @@ func TestSuccessfulViolationsAreRecordedForPromptInjection(t *testing.T) {
 		if c := got[id]; c.RunID == "" || len(c.Trajectory) == 0 {
 			t.Errorf("%s: want a fingerprint from the recovered run, got %+v", id, c.Trajectory)
 		}
+	}
+}
+
+func passedTrial() CaseResult {
+	return CaseResult{ID: "c", Status: "passed", Passed: true}
+}
+
+func failedTrial(checks ...string) CaseResult {
+	return CaseResult{ID: "c", Status: "failed", FailedChecks: checks}
+}
+
+func erroredTrial(message string) CaseResult {
+	return CaseResult{ID: "c", Status: "error", Error: message}
+}
+
+// TestFoldTrialsVerdictIsIndependentOfTrialOrder pins the precedence the
+// aggregate relies on. Aggregate drops errored cases from every rate, so an
+// order-dependent fold would score the same three trials differently depending
+// on which came first.
+func TestFoldTrialsVerdictIsIndependentOfTrialOrder(t *testing.T) {
+	tests := []struct {
+		name         string
+		trials       []CaseResult
+		status       string
+		passed       bool
+		passes       int
+		verdictTrial int
+		failedChecks []string
+		errText      string
+	}{
+		{"pass error fail", []CaseResult{passedTrial(), erroredTrial("boom"), failedTrial("refund_once")}, "failed", false, 1, 3, []string{"refund_once"}, ""},
+		{"pass fail error", []CaseResult{passedTrial(), failedTrial("refund_once"), erroredTrial("boom")}, "failed", false, 1, 2, []string{"refund_once"}, ""},
+		{"error pass fail", []CaseResult{erroredTrial("boom"), passedTrial(), failedTrial("refund_once")}, "failed", false, 1, 3, []string{"refund_once"}, ""},
+		{"all failed names the first", []CaseResult{passedTrial(), failedTrial("a"), failedTrial("b")}, "failed", false, 1, 2, []string{"a"}, ""},
+		{"all errored names the first", []CaseResult{erroredTrial("first"), erroredTrial("second")}, "error", false, 0, 1, nil, "first"},
+		{"pass then error is not a pass", []CaseResult{passedTrial(), erroredTrial("boom")}, "error", false, 1, 2, nil, "boom"},
+		{"error then pass is not a pass", []CaseResult{erroredTrial("boom"), passedTrial()}, "error", false, 1, 1, nil, "boom"},
+		{"all passed", []CaseResult{passedTrial(), passedTrial(), passedTrial()}, "passed", true, 3, 0, nil, ""},
+		{"one trial passed", []CaseResult{passedTrial()}, "passed", true, 1, 0, nil, ""},
+		{"one trial failed has no verdict trial", []CaseResult{failedTrial("a")}, "failed", false, 0, 0, []string{"a"}, ""},
+		{"one trial errored has no verdict trial", []CaseResult{erroredTrial("boom")}, "error", false, 0, 0, nil, "boom"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := foldTrials(tc.trials)
+			if got.Trials != len(tc.trials) || got.Passes != tc.passes {
+				t.Errorf("trials=%d passes=%d want %d/%d", got.Trials, got.Passes, len(tc.trials), tc.passes)
+			}
+			if got.Status != tc.status || got.Passed != tc.passed {
+				t.Errorf("status=%q passed=%v want %q/%v", got.Status, got.Passed, tc.status, tc.passed)
+			}
+			if got.VerdictTrial != tc.verdictTrial {
+				t.Errorf("verdict_trial=%d want %d", got.VerdictTrial, tc.verdictTrial)
+			}
+			if strings.Join(got.FailedChecks, ",") != strings.Join(tc.failedChecks, ",") {
+				t.Errorf("failed checks=%v want %v", got.FailedChecks, tc.failedChecks)
+			}
+			if got.Error != tc.errText {
+				t.Errorf("error=%q want %q", got.Error, tc.errText)
+			}
+		})
+	}
+}
+
+func TestFoldTrialsKeepsTheFirstTrialsFingerprintAndWallTime(t *testing.T) {
+	first := CaseResult{ID: "c", Status: "passed", Passed: true, RunID: "run-1", WallMS: 10, Mutations: 1, Trajectory: []Step{{Operation: "createRefund", Status: 201}}}
+	second := CaseResult{ID: "c", Status: "passed", Passed: true, RunID: "run-2", WallMS: 20, Mutations: 2, Trajectory: []Step{{Operation: "getCustomer", Status: 200}}}
+	third := CaseResult{ID: "c", Status: "passed", Passed: true, RunID: "run-3", WallMS: 30}
+	got := foldTrials([]CaseResult{first, second, third})
+	if got.WallMS != 10 || got.RunID != "run-1" || got.Mutations != 1 || len(got.Trajectory) != 1 || got.Trajectory[0].Operation != "createRefund" {
+		t.Fatalf("want the first trial's wall time and fingerprint, got wall=%d run=%s mutations=%d trajectory=%v", got.WallMS, got.RunID, got.Mutations, got.Trajectory)
+	}
+}
+
+// TestFoldTrialsDuplicateEffectsInputsCoverEveryTrial pins that a duplicate
+// write in any trial is visible. Aggregate scores the case from these three
+// fields, so reading only trial 1 would hide a retry that happened in trial 2.
+func TestFoldTrialsDuplicateEffectsInputsCoverEveryTrial(t *testing.T) {
+	clean := CaseResult{ID: "c", Status: "passed", Passed: true, AgentRefunds: 1, DuplicateRefunds: 1}
+	bad := CaseResult{ID: "c", Status: "passed", Passed: true, UnsafeRetry: true, AgentRefunds: 2, DuplicateRefunds: 3}
+	middle := CaseResult{ID: "c", Status: "passed", Passed: true, AgentRefunds: 1, DuplicateRefunds: 2}
+	for name, trials := range map[string][]CaseResult{
+		"bad last":   {clean, middle, bad},
+		"bad middle": {clean, bad, middle},
+		"bad first":  {bad, clean, middle},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := foldTrials(trials)
+			if !got.UnsafeRetry || got.AgentRefunds != 2 || got.DuplicateRefunds != 3 {
+				t.Fatalf("unsafe_retry=%v agent_refunds=%d duplicate_refunds=%d want true/2/3", got.UnsafeRetry, got.AgentRefunds, got.DuplicateRefunds)
+			}
+		})
+	}
+}
+
+func TestFormatTextShowsPassesOutOfTrialsForRepeatedCases(t *testing.T) {
+	report := Report{Suite: "s", Cases: []CaseResult{
+		{ID: "flaky-case", Status: "failed", Trials: 3, Passes: 2, VerdictTrial: 3},
+		{ID: "steady-case", Status: "passed", Passed: true, Trials: 1, Passes: 1},
+	}}
+	text := report.FormatText()
+	if !strings.Contains(text, "flaky-case") || !strings.Contains(text, "2/3") {
+		t.Fatalf("FormatText must show passes/trials for a repeated case, got:\n%s", text)
+	}
+	if strings.Contains(text, "steady-case") {
+		t.Fatalf("FormatText must not list single-trial cases, got:\n%s", text)
 	}
 }
