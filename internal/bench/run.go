@@ -34,6 +34,9 @@ type Options struct {
 	// report's environment.
 	Build       buildinfo.Info
 	ProviderFor func(provider, model, scenario, baseURL string) (agent.Provider, error)
+	// Trials is how many times each local case runs; 0 means 1. A case's own
+	// trials field wins. Distributed and counterfactual cases always run once.
+	Trials int
 }
 
 // Run executes every case in the suite.
@@ -47,6 +50,9 @@ func Run(ctx context.Context, suite Suite, options Options) (Report, error) {
 	}
 	if options.Agent == "" {
 		options.Agent = "scripted"
+	}
+	if options.Trials < 0 {
+		return Report{}, fmt.Errorf("trials must not be negative, got %d", options.Trials)
 	}
 	if options.Agent == "scripted" && options.Model == "" {
 		options.Model = "fixture-v1"
@@ -169,7 +175,68 @@ func confinedLoader(directory string) (func(string) ([]byte, error), error) {
 	}, nil
 }
 
+// caseTrials is how many times a case runs. Only a local case repeats: the
+// parser refuses a case-level value on the other modes, and an Options value is
+// ignored for them rather than failing a suite that mixes modes.
+func caseTrials(c Case, options Options) int {
+	if c.Mode != ModeLocal {
+		return 1
+	}
+	if c.Trials > 0 {
+		return c.Trials
+	}
+	if options.Trials > 0 {
+		return options.Trials
+	}
+	return 1
+}
+
+// runCase runs a case once per trial and folds the trials into one result.
+//
+// Run identity, model, fingerprint and counts come from the first trial, so a
+// one-trial case reports exactly what it did before trials existed. The verdict
+// is the strictest one: the case passes only if every trial did, and when one
+// did not, the verdict fields (status, failed checks, error) come from the first
+// trial that did not pass, so the report names a real failure instead of
+// averaging it away. WallMS is the total across trials.
 func runCase(ctx context.Context, c Case, manifests worldManifests, options Options, seed int64) CaseResult {
+	trials := caseTrials(c, options)
+	var result CaseResult
+	var failing *CaseResult
+	passes := 0
+	var wallMS int64
+	for trial := 1; trial <= trials; trial++ {
+		// A single trial keeps the historical database name. Repeats get a name
+		// per trial so each seeds and runs against fresh state.
+		dbName := c.ID + ".db"
+		if trials > 1 {
+			dbName = fmt.Sprintf("%s-%d.db", c.ID, trial)
+		}
+		one := runTrial(ctx, c, manifests, options, seed, dbName)
+		wallMS += one.WallMS
+		if one.Passed {
+			passes++
+		} else if failing == nil {
+			failed := one
+			failing = &failed
+		}
+		if trial == 1 {
+			result = one
+		}
+	}
+	if failing != nil {
+		result.Status = failing.Status
+		result.Passed = failing.Passed
+		result.FailedChecks = failing.FailedChecks
+		result.Error = failing.Error
+	}
+	result.Trials = trials
+	result.Passes = passes
+	result.WallMS = wallMS
+	return result
+}
+
+func runTrial(ctx context.Context, c Case, manifests worldManifests, options Options, seed int64, dbName string) CaseResult {
 	start := time.Now()
 	result := CaseResult{ID: c.ID, Category: c.Category, Dimensions: append([]string(nil), c.Dimensions...), Status: "error", Expect: c.Expect}
 	manifest, err := manifestFor(c.World, manifests)
@@ -210,7 +277,7 @@ func runCase(ctx context.Context, c Case, manifests worldManifests, options Opti
 		result.WallMS = time.Since(start).Milliseconds()
 		return result
 	}
-	dbPath := filepath.Join(options.WorkDir, c.ID+".db")
+	dbPath := filepath.Join(options.WorkDir, dbName)
 	_ = os.Remove(dbPath)
 	s, err := store.Open(dbPath)
 	if err != nil {
@@ -268,6 +335,24 @@ func runCase(ctx context.Context, c Case, manifests worldManifests, options Opti
 	result.ModelTurns = run.Step
 	result.ToolCalls = countToolCalls(run.Transcript)
 
+	// The fingerprint is read for the case's own run only. A counterfactual
+	// case's database also holds fork runs, and a recovered distributed run keeps
+	// its run ID, so one run ID covers both.
+	result.Trajectory, result.Mutations, err = Fingerprint(ctx, s, run.ID)
+	if err != nil {
+		result.Error = err.Error()
+		result.WallMS = time.Since(start).Milliseconds()
+		return result
+	}
+	if c.Scenario == "prompt-injection-ticket" {
+		security, err := eval.AnalyzeSecurity(ctx, s, run.ID, manifest)
+		if err != nil {
+			result.Error = err.Error()
+			result.WallMS = time.Since(start).Milliseconds()
+			return result
+		}
+		result.SuccessfulViolations = len(security.SuccessfulViolation.EventIDs)
+	}
 	// A counterfactual case is judged on whether the analysis explains the
 	// parent's failure, not on whether the parent passed: the parent is required
 	// to fail, and Prepare refuses the case if it does not.

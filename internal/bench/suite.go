@@ -70,6 +70,11 @@ type Case struct {
 	CrashOperation string `json:",omitempty"`
 	// Interventions is the intervention set applied by a counterfactual case.
 	Interventions string
+	// Trials is how many times a local case runs, each in a fresh database. Zero
+	// means unset, so the run-wide Options.Trials applies. Like CrashPoint it is
+	// omitted from the JSON when unset, because the suite digest hashes this
+	// struct and a suite that does not use the field must keep its digest.
+	Trials int `json:",omitempty"`
 }
 
 // Execution modes.
@@ -105,6 +110,7 @@ type rawCase struct {
 	CrashPoint     string   `yaml:"crash_point"`
 	CrashOperation string   `yaml:"crash_operation"`
 	Interventions  string   `yaml:"interventions"`
+	Trials         *int     `yaml:"trials"`
 }
 
 var (
@@ -286,6 +292,19 @@ func parseCase(input rawCase, root string, index int) (Case, error) {
 	if mode == ModeCounterfactual && input.Interventions == "" {
 		return Case{}, fmt.Errorf("case %q: mode counterfactual requires interventions", input.ID)
 	}
+	// Repeating a distributed or counterfactual case would not measure variance:
+	// the crash and the intervention search are scripted, so every repeat would
+	// replay the same recovery. Refuse it rather than report trials that are not.
+	trials := 0
+	if input.Trials != nil {
+		if mode != ModeLocal {
+			return Case{}, fmt.Errorf("case %q: trials requires mode local", input.ID)
+		}
+		if *input.Trials < 1 {
+			return Case{}, fmt.Errorf("case %q: trials must be positive", input.ID)
+		}
+		trials = *input.Trials
+	}
 	if len(input.Dimensions) == 0 {
 		return Case{}, fmt.Errorf("case %q: at least one dimension is required", input.ID)
 	}
@@ -337,7 +356,7 @@ func parseCase(input rawCase, root string, index int) (Case, error) {
 		Steps: steps, Resume: resume, ResumeAt: resumeAt, Dimensions: dimensions,
 		Expect: expect,
 		Mode:   mode, CrashAt: crashAt, CrashPoint: input.CrashPoint, CrashOperation: input.CrashOperation,
-		Interventions: interventions,
+		Interventions: interventions, Trials: trials,
 	}, nil
 }
 

@@ -1652,3 +1652,48 @@ func TestLocalRunErrorSaysWhatActuallyHappened(t *testing.T) {
 		})
 	}
 }
+
+func TestBenchCLITrialsFlagRepeatsLocalCases(t *testing.T) {
+	examples := filepath.Join("..", "..", "examples")
+	dir := t.TempDir()
+	suitePath := filepath.Join(dir, "tiny.yaml")
+	suiteYAML := []byte(`
+version: 1
+suite: tiny
+cases:
+  - id: billing-duplicate
+    category: reasoning
+    world: billing
+    scenario: duplicate-charge
+    assertions: assertions/duplicate-charge.yaml
+    dimensions: [task]
+`)
+	if err := os.WriteFile(suitePath, suiteYAML, 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		args   []string
+		trials int
+	}{
+		{nil, 1},
+		{[]string{"--trials", "3"}, 3},
+	} {
+		reportPath := filepath.Join(dir, "report.json")
+		args := append([]string{"bench", "--suite-file", suitePath, "--examples", examples, "--agent", "scripted", "--db-dir", filepath.Join(dir, "dbs"), "--out", reportPath}, tc.args...)
+		if err := runCLI(args, &bytes.Buffer{}); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(reportPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		report, err := bench.DecodeReport(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := report.Cases[0]
+		if got.Trials != tc.trials || got.Passes != tc.trials || got.Status != "passed" {
+			t.Fatalf("args %v: trials=%d passes=%d status=%s want %d passing trials", tc.args, got.Trials, got.Passes, got.Status, tc.trials)
+		}
+	}
+}

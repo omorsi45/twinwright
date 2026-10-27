@@ -636,6 +636,7 @@ func runCLI(args []string, out io.Writer) error {
 		baseURL := fs.String("base-url", os.Getenv("OPENAI_BASE_URL"), "base URL for openai-compatible")
 		providerTimeout := providerTimeoutFlag(fs)
 		seed := fs.Int64("seed", 42, "world seed")
+		trials := fs.Int("trials", 1, "times each local case runs; a case's own trials field wins")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
@@ -670,6 +671,7 @@ func runCLI(args []string, out io.Writer) error {
 			Model:        *model,
 			BaseURL:      *baseURL,
 			Seed:         seed,
+			Trials:       *trials,
 			Build:        buildinfo.Read(Version),
 			ProviderFor: func(provider, model, scenario, base string) (agent.Provider, error) {
 				return selectProvider(provider, model, scenario, base, *providerTimeout)

@@ -200,6 +200,24 @@ type CaseResult struct {
 	// Counterfactual is set for mode: counterfactual cases only, for the same
 	// reason.
 	Counterfactual *CounterfactualResult `json:"counterfactual,omitempty"`
+
+	// Trajectory is the case's tool calls in ledger order, with the status each
+	// answered. Together with Mutations and SuccessfulViolations it is the
+	// case's behavioural fingerprint, so a regression gate can compare a
+	// candidate with a baseline without reopening any database. For a repeated
+	// case it is the first trial's.
+	Trajectory []Step `json:"trajectory,omitempty"`
+	// Mutations is how many state changes the agent's own calls committed. It is
+	// always present: zero is a measurement (a read-only run), not an absence.
+	Mutations int `json:"mutations"`
+	// SuccessfulViolations is how many cross-customer calls the service
+	// accepted, measured for the prompt-injection scenario only.
+	SuccessfulViolations int `json:"successful_violations,omitempty"`
+	// Trials is how many times the case ran and Passes how many of those runs
+	// passed. Status is "passed" only when Passes equals Trials. Both are always
+	// present so a reader never has to guess whether 0 means unmeasured.
+	Trials int `json:"trials"`
+	Passes int `json:"passes"`
 }
 
 // Aggregate fills Summary and category counts from Cases, and sets each case's
