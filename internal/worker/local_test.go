@@ -110,18 +110,56 @@ func TestFleetCannotClaimARunExecutingLocally(t *testing.T) {
 	}
 }
 
-// TestExecuteLocalRenewsItsLease uses the real clock: the lease would lapse at
-// 2s, so a guard that still passes at 3s proves the renewal loop extended it.
+// TestExecuteLocalRenewsItsLease drives lease time by hand so the verdict does
+// not depend on how long the host stalls. A real-time version (2s TTL, 1s
+// renewals, a 3s sleep) had a 1s margin, and a stall longer than that let the
+// lease lapse; rejecting a lapsed renewal is correct, so the test failed for a
+// reason unrelated to renewal.
+//
+// Only the renewal cadence is real (10ms ticks). Each round advances the
+// manual clock by 1s, half the TTL, and waits until the stored expiry is more
+// than 1s past the clock. Without a renewal after the advance the expiry stays
+// at most 1s ahead, so seeing it move can only mean the loop renewed. Six
+// rounds cover 6s, three times the TTL, so the final guard passes only if
+// every round extended the lease.
 func TestExecuteLocalRenewsItsLease(t *testing.T) {
+	const (
+		rounds    = 6
+		step      = time.Second
+		pollEvery = 2 * time.Millisecond
+		deadline  = 10 * time.Second
+	)
 	ctx := context.Background()
 	manifest := billingManifest(t)
 	s := openStore(ctx, t)
 	run := seedRun(ctx, t, s, manifest, "")
 
-	cfg := Config{LeaseTTL: 2 * time.Second, RenewEvery: time.Second, Logger: quietLogger()}
+	clock := newClock()
+	cfg := Config{LeaseTTL: 2 * time.Second, RenewEvery: 10 * time.Millisecond, Clock: clock.Clock(), Logger: quietLogger()}
 	_, err := ExecuteLocal(ctx, s, run.ID, cfg, func(ctx context.Context, fence store.Fence) (store.Run, error) {
-		time.Sleep(3 * time.Second)
-		if err := s.GuardFence(ctx, fence, time.Now().UTC()); err != nil {
+		for round := 1; round <= rounds; round++ {
+			clock.Advance(step)
+			giveUp := time.Now().Add(deadline)
+			for {
+				lease, err := s.RunLease(ctx, run.ID)
+				if err != nil {
+					return store.Run{}, err
+				}
+				if lease.ExpiresAt.After(clock.Now().Add(step)) {
+					break
+				}
+				if time.Now().After(giveUp) {
+					return store.Run{}, fmt.Errorf("round %d: lease expiry %s was not extended past %s within %s of real time: the renewal loop did not renew",
+						round, lease.ExpiresAt, clock.Now().Add(step), deadline)
+				}
+				select {
+				case <-ctx.Done():
+					return store.Run{}, ctx.Err()
+				case <-time.After(pollEvery):
+				}
+			}
+		}
+		if err := s.GuardFence(ctx, fence, clock.Now()); err != nil {
 			return store.Run{}, err
 		}
 		return store.Run{}, nil
