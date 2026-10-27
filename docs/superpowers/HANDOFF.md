@@ -27,7 +27,7 @@ Updated 2026-10-27. This file and `docs/superpowers/progress/` hold everything n
 - `go build ./...` passes.
 - `go vet ./...` fails: `cmd/twinwright/main_test.go` calls `providerFlags`, which does not exist yet.
 - `internal/agent` and `internal/redact` tests pass.
-- Inspect with `git show --stat HEAD~1` or `git diff HEAD~2 HEAD~1`, then finish Task 5 from there.
+- Inspect it with `git show 591a177` (subject "Save interrupted provider-layer work so it can resume elsewhere") and finish Task 5 from there.
 
 Resolutions that already apply to Task 5:
 - Move `selectProvider` to `cmd/twinwright/providers.go` as `selectProvider(cfg providerConfig)`. Preserve the `fixture-regressed-v1` branch and the `agent.WithManifest` binding at every call site: run, resume, fork, counterfactual, bench, shadow, worker.
