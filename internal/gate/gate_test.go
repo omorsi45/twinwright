@@ -134,7 +134,7 @@ func TestGateDoesNotFlagACaseThatWasAlreadyFailing(t *testing.T) {
 func TestGateReportsAnImprovement(t *testing.T) {
 	base := report(2, failing("a", "x"), control("c"))
 	undetected := control("c")
-	undetected.AsExpected = false
+	undetected.Status, undetected.Passed, undetected.Passes, undetected.AsExpected = "passed", true, 1, false
 	base.Cases[1] = undetected
 	cand := report(2, passing("a"), control("c"))
 	result := mustCompare(t, base, cand, Options{})
@@ -164,7 +164,7 @@ func TestGateFlagsUndetectedControl(t *testing.T) {
 
 func TestGateIgnoresAControlThatWasAlreadyUndetected(t *testing.T) {
 	undetected := control("c")
-	undetected.AsExpected = false
+	undetected.Status, undetected.Passed, undetected.Passes, undetected.AsExpected = "passed", true, 1, false
 	r := report(2, undetected)
 	if result := mustCompare(t, r, r, Options{}); !result.Passed {
 		t.Fatalf("a control already undetected in the baseline is not new: %+v", result.Regressions)
@@ -459,5 +459,134 @@ func TestJUnitForACleanGateHasNoFailures(t *testing.T) {
 	}
 	if parsed.Suites[0].Failures != 0 || parsed.Suites[0].Tests != 1 {
 		t.Fatalf("unexpected suite: %+v", parsed.Suites[0])
+	}
+}
+
+func TestGateRefusesAnEmptyBaseline(t *testing.T) {
+	// An empty baseline compares nothing, so every candidate would pass. That
+	// must be an input error, not a green gate.
+	_, err := Compare(report(2), report(2, passing("a")), Options{})
+	if err == nil || !strings.Contains(err.Error(), "no cases") {
+		t.Fatalf("want an error saying the baseline has no cases, got %v", err)
+	}
+}
+
+func TestGateRefusesDuplicateCaseIDs(t *testing.T) {
+	// Which duplicate wins would decide the verdict, so neither is allowed to.
+	dup := report(2, passing("a"), passing("twice"), passing("twice"))
+	clean := report(2, passing("a"), passing("twice"))
+	for name, pair := range map[string][2]bench.Report{"baseline": {dup, clean}, "candidate": {clean, dup}} {
+		t.Run(name, func(t *testing.T) {
+			_, err := Compare(pair[0], pair[1], Options{})
+			if err == nil || !strings.Contains(err.Error(), `"twice"`) || !strings.Contains(err.Error(), name) {
+				t.Fatalf("want an error naming the %s and the duplicate ID, got %v", name, err)
+			}
+		})
+	}
+}
+
+// multiControl is a negative control run n times, passes of which went
+// undetected (the broken case passed).
+func multiControl(passes int) bench.CaseResult {
+	c := control("c")
+	c.Trials, c.Passes = 10, passes
+	if passes == 10 {
+		c.Status, c.Passed = "passed", true
+	}
+	return c
+}
+
+func TestGateGatesAMultiTrialControlByDetectionRate(t *testing.T) {
+	tests := []struct {
+		name       string
+		base, cand int
+		tolerance  float64
+		want       []string
+	}{
+		{"detection falls", 0, 3, 0, []string{"c:control_undetected"}},
+		{"detection rises", 2, 0, 0, nil},
+		{"tolerance allows the fall", 0, 3, 0.3, nil},
+		{"unchanged", 3, 3, 0, nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := mustCompare(t, report(2, multiControl(tc.base)), report(2, multiControl(tc.cand)), Options{Tolerance: tc.tolerance})
+			if got := kinds(result.Regressions); !equalStrings(got, tc.want) {
+				t.Fatalf("regressions = %v, want %v", got, tc.want)
+			}
+			for _, f := range append(result.Regressions, result.Improvements...) {
+				if f.Kind == "pass_rate_drop" || f.Kind == "pass_rate_improved" {
+					t.Fatalf("a control has no pass rate to report, got %+v", f)
+				}
+			}
+		})
+	}
+
+	t.Run("detail names both detection rates", func(t *testing.T) {
+		result := mustCompare(t, report(2, multiControl(0)), report(2, multiControl(3)), Options{})
+		if len(result.Regressions) != 1 {
+			t.Fatalf("regressions = %v", kinds(result.Regressions))
+		}
+		detail := result.Regressions[0].Detail
+		if !strings.Contains(detail, "10/10") || !strings.Contains(detail, "7/10") {
+			t.Fatalf("detail should name both rates: %s", detail)
+		}
+	})
+}
+
+func TestGateReportsNewUnsafeRetryAndRefundsOfAnErroredCandidate(t *testing.T) {
+	errored := func() bench.CaseResult {
+		c := passing("a")
+		c.Status, c.Passed, c.AsExpected, c.Passes, c.Error = "error", false, false, 0, "boom"
+		c.UnsafeRetry, c.AgentRefunds = true, 2
+		return c
+	}
+	tests := []struct {
+		name string
+		base bench.CaseResult
+		want []string
+	}{
+		{"failing baseline", failing("a", "x"), []string{"a:new_duplicate_refund", "a:new_unsafe_retry"}},
+		{"passing baseline", passing("a"), []string{"a:new_duplicate_refund", "a:new_unsafe_retry", "a:newly_failing"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := mustCompare(t, report(2, tc.base), report(2, errored()), Options{})
+			if got := kinds(result.Regressions); !equalStrings(got, tc.want) {
+				t.Fatalf("regressions = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestGateWarnsAndSkipsWhenTheBaselineCaseErrored(t *testing.T) {
+	base := passing("a")
+	base.Status, base.Passed, base.AsExpected, base.Passes, base.Error = "error", false, false, 0, "boom"
+	cand := passing("a")
+	cand.UnsafeRetry, cand.AgentRefunds, cand.Mutations = true, 2, 9
+	result := mustCompare(t, report(2, base), report(2, cand), Options{})
+	if !result.Passed {
+		t.Fatalf("an unmeasured baseline cannot be regressed against: %+v", result.Regressions)
+	}
+	if got := kinds(result.Warnings); !equalStrings(got, []string{"a:baseline_unmeasured"}) {
+		t.Fatalf("warnings = %v", got)
+	}
+}
+
+func TestGateDerivesAControlVerdictFromStatusWhenAsExpectedIsAbsent(t *testing.T) {
+	// A version 1 report may not carry as_expected, so it decodes as false for a
+	// control that was in fact caught. The verdict is derived the way bench
+	// derives it: a control is as expected when it failed.
+	caught := control("c")
+	caught.AsExpected = false
+	missed := control("c")
+	missed.Status, missed.Passed, missed.Passes, missed.AsExpected = "passed", true, 1, false
+
+	result := mustCompare(t, report(1, caught), report(2, missed), Options{})
+	if got := kinds(result.Regressions); !equalStrings(got, []string{"c:control_undetected"}) {
+		t.Fatalf("regressions = %v", got)
+	}
+	if result := mustCompare(t, report(1, caught), report(2, control("c")), Options{}); !result.Passed {
+		t.Fatalf("a caught control stays caught: %+v", result.Regressions)
 	}
 }

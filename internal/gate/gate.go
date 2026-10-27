@@ -36,6 +36,7 @@ const (
 	KindNewDuplicateRefund  = "new_duplicate_refund"
 	KindTrajectoryChanged   = "trajectory_changed"
 	KindCaseAdded           = "case_added"
+	KindBaselineUnmeasured  = "baseline_unmeasured"
 	KindSuiteChanged        = "suite_changed"
 	KindNewlyPassing        = "newly_passing"
 	KindControlDetected     = "control_detected"
@@ -93,7 +94,10 @@ func (o Options) validate() error {
 
 // Compare gates candidate against baseline. It returns an error, instead of a
 // verdict, when the two reports measured different suites (a comparison between
-// them would be meaningless) or when opts is out of range.
+// them would be meaningless), when opts is out of range, or when the inputs
+// could not support a verdict: a baseline with no cases gates nothing, and a
+// repeated case ID in either report would let the order of the file decide the
+// result.
 //
 // Fields that only a version 2 report carries (trials, mutations, violations,
 // trajectories) are compared only when both reports are version 2. Comparing a
@@ -105,6 +109,17 @@ func Compare(baseline, candidate bench.Report, opts Options) (Result, error) {
 	}
 	if baseline.Suite != candidate.Suite {
 		return Result{}, fmt.Errorf("suite mismatch: baseline is %q, candidate is %q", baseline.Suite, candidate.Suite)
+	}
+	if len(baseline.Cases) == 0 {
+		return Result{}, fmt.Errorf("the baseline has no cases, so there is nothing to gate against")
+	}
+	base, err := index("baseline", baseline.Cases)
+	if err != nil {
+		return Result{}, err
+	}
+	cand, err := index("candidate", candidate.Cases)
+	if err != nil {
+		return Result{}, err
 	}
 	if opts.Trajectory == "" {
 		opts.Trajectory = TrajectoryWarn
@@ -124,8 +139,6 @@ func Compare(baseline, candidate bench.Report, opts Options) (Result, error) {
 		})
 	}
 
-	base := index(baseline.Cases)
-	cand := index(candidate.Cases)
 	ids := map[string]bool{}
 	for id := range base {
 		ids[id] = true
@@ -159,16 +172,17 @@ func Compare(baseline, candidate bench.Report, opts Options) (Result, error) {
 	return result, nil
 }
 
-// index keys cases by ID. A repeated ID keeps its first occurrence, which is
-// the one a reader scanning the report meets first.
-func index(cases []bench.CaseResult) map[string]bench.CaseResult {
+// index keys cases by ID. A repeated ID is an error, not a tie to break: either
+// copy could be the one the author meant, and the verdict would depend on it.
+func index(side string, cases []bench.CaseResult) (map[string]bench.CaseResult, error) {
 	out := make(map[string]bench.CaseResult, len(cases))
 	for _, c := range cases {
-		if _, seen := out[c.ID]; !seen {
-			out[c.ID] = c
+		if _, seen := out[c.ID]; seen {
+			return nil, fmt.Errorf("the %s report repeats case ID %q", side, c.ID)
 		}
+		out[c.ID] = c
 	}
-	return out
+	return out, nil
 }
 
 func compareCase(r *Result, b, c bench.CaseResult, v2 bool, opts Options) {
@@ -182,24 +196,34 @@ func compareCase(r *Result, b, c bench.CaseResult, v2 bool, opts Options) {
 		r.Improvements = append(r.Improvements, Finding{Case: c.ID, Kind: kind, Detail: fmt.Sprintf(format, args...)})
 	}
 
-	// An errored case reached no verdict, so its counters describe wherever the
-	// harness stopped. Neither side's behavioural numbers are trusted then.
-	measured := b.Status != "error" && c.Status != "error"
+	// An errored baseline case reached no verdict, so there is nothing to hold
+	// the candidate to. Say so, because a silent skip looks like a pass.
+	if b.Status == "error" {
+		warn(KindBaselineUnmeasured, "the baseline errored on this case, so it cannot be gated: %s", outcome(b))
+		return
+	}
+	candErrored := c.Status == "error"
 	// A control is only a control when both reports declare it one. If the
 	// declaration changed, the suite changed, and the case is judged as a normal
 	// case rather than as an undetected control it never was.
 	isControl := b.Expect == bench.ExpectFail && c.Expect == bench.ExpectFail
-	rated := v2 && measured && (b.Trials > 1 || c.Trials > 1)
+	// A control's Passes counts the trials where the broken case went
+	// undetected, so its rate is judged in the opposite direction below.
+	controlRated := isControl && v2 && !candErrored && (b.Trials > 1 || c.Trials > 1)
+	rated := !isControl && v2 && !candErrored && (b.Trials > 1 || c.Trials > 1)
 
 	switch {
+	case controlRated:
+		compareDetection(b, c, opts, regress, improve)
 	case isControl:
+		bCaught, cCaught := asExpected(b), asExpected(c)
 		switch {
-		case b.AsExpected && !c.AsExpected:
+		case bCaught && !cCaught:
 			regress(KindControlUndetected, "the negative control was caught in the baseline and is no longer: %s", outcome(c))
-		case !b.AsExpected && c.AsExpected:
+		case !bCaught && cCaught:
 			improve(KindControlDetected, "the negative control is now caught")
 		}
-	case b.Status == "passed" && c.Status == "error":
+	case b.Status == "passed" && candErrored:
 		regress(KindNewlyFailing, "the baseline passed and the candidate errored: %s", outcome(c))
 	case b.Status == "passed" && c.Status == "failed" && !rated:
 		regress(KindNewlyFailing, "the baseline passed and the candidate failed: %s", outcome(c))
@@ -207,16 +231,18 @@ func compareCase(r *Result, b, c bench.CaseResult, v2 bool, opts Options) {
 		improve(KindNewlyPassing, "the baseline did not pass and the candidate does")
 	}
 
-	if !measured {
-		return
-	}
+	// These two are facts the harness records as it runs, so an erroring
+	// candidate that already reissued an unsafe write or refunded twice still
+	// did so. Only an errored baseline makes them untrustworthy, handled above.
 	if !b.UnsafeRetry && c.UnsafeRetry {
 		regress(KindNewUnsafeRetry, "the candidate reissued a write whose outcome was unknown")
 	}
 	if c.AgentRefunds > b.AgentRefunds {
 		regress(KindNewDuplicateRefund, "agent refunds rose from %d to %d", b.AgentRefunds, c.AgentRefunds)
 	}
-	if !v2 {
+	// The remaining counters describe wherever an errored run stopped, so they
+	// are not compared against a complete one.
+	if !v2 || candErrored {
 		return
 	}
 	if c.Mutations > b.Mutations {
@@ -237,6 +263,37 @@ func compareCase(r *Result, b, c bench.CaseResult, v2 bool, opts Options) {
 			}
 		}
 	}
+}
+
+// asExpected applies bench's own rule (Report.Aggregate) to a control instead of
+// trusting the stored as_expected, which a version 1 report may not carry and
+// which then decodes as false for a control that was in fact caught. Only the
+// control branch is needed: an errored case is never as expected, and a control
+// is as expected when it failed.
+func asExpected(c bench.CaseResult) bool {
+	if c.Status == "error" {
+		return false
+	}
+	return c.Status == "failed"
+}
+
+// compareDetection judges a repeated negative control by how often it was
+// caught, (Trials-Passes)/Trials. Regarding Passes as a pass rate would reward
+// a control for going undetected more often.
+func compareDetection(b, c bench.CaseResult, opts Options, regress, improve func(string, string, ...any)) {
+	bRate, cRate := detectionRate(b), detectionRate(c)
+	switch {
+	case cRate < bRate-opts.Tolerance-rateEpsilon:
+		regress(KindControlUndetected, "detection rate fell from %d/%d to %d/%d (tolerance %g)",
+			trials(b)-b.Passes, trials(b), trials(c)-c.Passes, trials(c), opts.Tolerance)
+	case cRate > bRate+rateEpsilon:
+		improve(KindControlDetected, "detection rate rose from %d/%d to %d/%d",
+			trials(b)-b.Passes, trials(b), trials(c)-c.Passes, trials(c))
+	}
+}
+
+func detectionRate(c bench.CaseResult) float64 {
+	return float64(trials(c)-c.Passes) / float64(trials(c))
 }
 
 // compareRate judges a repeated case by its pass rate, so a flaky agent is

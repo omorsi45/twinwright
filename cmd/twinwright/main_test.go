@@ -1744,12 +1744,17 @@ func TestGateExitCodes(t *testing.T) {
 	if err := os.WriteFile(notReport, []byte(`{"hello":1}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	empty := filepath.Join(dir, "empty.json")
+	if err := os.WriteFile(empty, []byte(`{"suite":"standard","schema_version":2,"cases":[]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	tests := []struct {
 		name string
 		args []string
 		want int
 	}{
 		{"identical reports", []string{"--baseline", good, "--candidate", good}, 0},
+		{"empty baseline", []string{"--baseline", empty, "--candidate", good}, 2},
 		{"regression", []string{"--baseline", good, "--candidate", bad}, 1},
 		{"missing candidate file", []string{"--baseline", good, "--candidate", filepath.Join(dir, "absent.json")}, 2},
 		{"missing baseline file", []string{"--baseline", filepath.Join(dir, "absent.json"), "--candidate", good}, 2},
