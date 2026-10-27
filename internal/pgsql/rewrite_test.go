@@ -24,6 +24,16 @@ func TestRewritePositionalPlaceholders(t *testing.T) {
 		{"nested block comment", "SELECT /* a /* ? */ ? */ 1 WHERE a=?", "SELECT /* a /* ? */ ? */ 1 WHERE a=$1"},
 		{"dollar quoted body", "SELECT $$ ? $$ , ?", "SELECT $$ ? $$ , $1"},
 		{"tagged dollar quoted body", "SELECT $tag$ ? $tag$ , ?", "SELECT $tag$ ? $tag$ , $1"},
+		// SQLite numbered placeholders: ?NNN keeps its number, and a bare ?
+		// takes one more than the largest number assigned so far.
+		{"repeated numbered placeholder", "world_id=?1 AND x=?1", "world_id=$1 AND x=$1"},
+		{"numbered out of order", "a=?2 AND b=?1", "a=$2 AND b=$1"},
+		{"bare placeholders stay sequential", "a=? AND b=?", "a=$1 AND b=$2"},
+		{"bare after numbered", "a=?1 AND b=?", "a=$1 AND b=$2"},
+		{"bare after higher numbered", "a=?3 AND b=?", "a=$3 AND b=$4"},
+		{"bare after out of order numbered", "a=?2 AND b=?1 AND c=?", "a=$2 AND b=$1 AND c=$3"},
+		{"numbered placeholder inside a string literal", "SELECT '?1' , x=?1", "SELECT '?1' , x=$1"},
+		{"multi digit placeholder at end of statement", "x=?12", "x=$12"},
 		{
 			"multiline statement",
 			"UPDATE runs SET status=?\nWHERE id=? AND owner_fence <= ?",
