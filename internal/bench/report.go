@@ -6,15 +6,44 @@ import (
 	"math"
 	"sort"
 	"strings"
+
+	"twinwright/internal/buildinfo"
 )
+
+// ReportSchemaVersion is the report layout this build writes. Version 2 added
+// SchemaVersion, ContentDigest and Environment so that a later comparison can
+// tell whether two reports measured the same suite on comparable builds.
+// Version 1 reports carry none of them.
+const ReportSchemaVersion = 2
+
+// Environment records what produced a report. A pointer on Report so a version
+// 1 report decodes with it nil instead of with a zero value that reads as a
+// real measurement.
+type Environment struct {
+	buildinfo.Info
+	GOOS      string `json:"goos"`
+	GOARCH    string `json:"goarch"`
+	NumCPU    int    `json:"num_cpu"`
+	Seed      int64  `json:"seed"`
+	StartedAt string `json:"started_at"` // RFC 3339, UTC
+}
 
 // Report is the machine-readable bench output.
 type Report struct {
-	Suite     string `json:"suite"`
-	Digest    string `json:"digest"`
-	Agent     string `json:"agent"`
-	Model     string `json:"model"`
-	Scenarios int    `json:"scenarios"`
+	// Suite stays the first field on purpose: the demo locates the JSON report
+	// inside the CLI output by its `{"suite"` prefix.
+	Suite string `json:"suite"`
+	// SchemaVersion is 1 when decoding a report written before the field existed.
+	SchemaVersion int    `json:"schema_version"`
+	Digest        string `json:"digest"`
+	// ContentDigest extends Digest over the bytes of the fixture files the
+	// suite references. Digest hashes only the case list, so an edited
+	// assertion file leaves it unchanged while changing what the suite measures.
+	ContentDigest string       `json:"content_digest"`
+	Environment   *Environment `json:"environment,omitempty"`
+	Agent         string       `json:"agent"`
+	Model         string       `json:"model"`
+	Scenarios     int          `json:"scenarios"`
 	// Scored is how many cases the compliance rates were computed over: cases
 	// that ran to a verdict and were expected to pass. Below Scenarios means
 	// negative controls, errored cases, or both were excluded.
@@ -401,6 +430,9 @@ func DecodeReport(data []byte) (Report, error) {
 	}
 	if report.Suite == "" || report.Cases == nil {
 		return Report{}, fmt.Errorf("not a bench report")
+	}
+	if report.SchemaVersion == 0 {
+		report.SchemaVersion = 1
 	}
 	return report, nil
 }

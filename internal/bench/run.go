@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"twinwright/internal/assertion"
 	"twinwright/internal/authz"
 	"twinwright/internal/behavior"
+	"twinwright/internal/buildinfo"
 	"twinwright/internal/chaos"
 	"twinwright/internal/compiler"
 	"twinwright/internal/dispatch"
@@ -28,11 +30,15 @@ type Options struct {
 	Model        string
 	BaseURL      string
 	Seed         *int64
-	ProviderFor  func(provider, model, scenario, baseURL string) (agent.Provider, error)
+	// Build describes the binary running the suite and is recorded in the
+	// report's environment.
+	Build       buildinfo.Info
+	ProviderFor func(provider, model, scenario, baseURL string) (agent.Provider, error)
 }
 
 // Run executes every case in the suite.
 func Run(ctx context.Context, suite Suite, options Options) (Report, error) {
+	startedAt := time.Now().UTC()
 	if options.ProviderFor == nil {
 		return Report{}, fmt.Errorf("ProviderFor is required")
 	}
@@ -56,12 +62,28 @@ func Run(ctx context.Context, suite Suite, options Options) (Report, error) {
 	if err != nil {
 		return Report{}, err
 	}
+	// A suite whose fixtures cannot be read cannot run either, so this fails
+	// the run instead of recording a digest that covers less than it claims.
+	contentDigest, err := suite.ContentDigest(options.ExamplesRoot)
+	if err != nil {
+		return Report{}, err
+	}
 	report := Report{
-		Suite:  suite.Name,
-		Digest: suite.Digest(),
-		Agent:  options.Agent,
-		Model:  options.Model,
-		Cases:  make([]CaseResult, 0, len(suite.Cases)),
+		SchemaVersion: ReportSchemaVersion,
+		Suite:         suite.Name,
+		Digest:        suite.Digest(),
+		ContentDigest: contentDigest,
+		Environment: &Environment{
+			Info:      options.Build,
+			GOOS:      runtime.GOOS,
+			GOARCH:    runtime.GOARCH,
+			NumCPU:    runtime.NumCPU(),
+			Seed:      seed,
+			StartedAt: startedAt.Format(time.RFC3339),
+		},
+		Agent: options.Agent,
+		Model: options.Model,
+		Cases: make([]CaseResult, 0, len(suite.Cases)),
 	}
 	models := map[string]bool{}
 	for _, c := range suite.Cases {

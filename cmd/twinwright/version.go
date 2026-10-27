@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"io"
 	"runtime"
-	"runtime/debug"
 
+	"twinwright/internal/buildinfo"
 	"twinwright/internal/store"
 )
 
@@ -18,23 +18,25 @@ import (
 var Version = ""
 
 func version() string {
-	if Version != "" {
-		return Version
-	}
-	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
-		return info.Main.Version
-	}
-	return "dev"
+	return buildinfo.Read(Version).Version
 }
 
 func versionCommand(out io.Writer) error {
-	return writeJSON(out, map[string]any{
-		"version":        version(),
+	info := buildinfo.Read(Version)
+	fields := map[string]any{
+		"version":        info.Version,
 		"go":             runtime.Version(),
 		"platform":       runtime.GOOS + "/" + runtime.GOARCH,
 		"schema_version": store.CurrentSchemaVersion,
 		"delivery":       "at_least_once",
-	})
+		"git_modified":   info.Modified,
+	}
+	// Omitted rather than empty when the build recorded no VCS settings, so a
+	// reader never mistakes a missing revision for a real one.
+	if info.Revision != "" {
+		fields["git_revision"] = info.Revision
+	}
+	return writeJSON(out, fields)
 }
 
 // doctorCommand reports whether the environment can run what the user is about

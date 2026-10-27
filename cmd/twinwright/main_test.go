@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"twinwright/internal/behavior"
+	"twinwright/internal/bench"
 	"twinwright/internal/compiler"
 	"twinwright/internal/store"
 	"twinwright/internal/worker"
@@ -1377,6 +1378,73 @@ cases:
 	}
 	if !strings.Contains(out.String(), `"kind":"bench_report_compare"`) {
 		t.Fatalf("compare=%s", out.String())
+	}
+}
+
+func TestVersionCommandReportsBuildProvenance(t *testing.T) {
+	var out bytes.Buffer
+	if err := runCLI([]string{"version"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("version output is not JSON: %v: %s", err, out.String())
+	}
+	// Existing fields stay; the new ones are additive.
+	for _, key := range []string{"version", "go", "platform", "schema_version", "delivery", "git_modified"} {
+		if _, ok := got[key]; !ok {
+			t.Fatalf("version output lost %q: %s", key, out.String())
+		}
+	}
+	if _, ok := got["git_modified"].(bool); !ok {
+		t.Fatalf("git_modified = %v, want a boolean", got["git_modified"])
+	}
+	if revision, present := got["git_revision"]; present {
+		if text, _ := revision.(string); text == "" {
+			t.Fatal("git_revision must be omitted rather than empty")
+		}
+	}
+}
+
+func TestBenchCLIReportIsSchemaVersionTwo(t *testing.T) {
+	examples := filepath.Join("..", "..", "examples")
+	dir := t.TempDir()
+	suitePath := filepath.Join(dir, "tiny.yaml")
+	suiteYAML := []byte(`
+version: 1
+suite: tiny
+cases:
+  - id: billing-duplicate
+    category: reasoning
+    world: billing
+    scenario: duplicate-charge
+    assertions: assertions/duplicate-charge.yaml
+    dimensions: [task]
+`)
+	if err := os.WriteFile(suitePath, suiteYAML, 0644); err != nil {
+		t.Fatal(err)
+	}
+	reportPath := filepath.Join(dir, "report.json")
+	err := runCLI([]string{"bench", "--suite-file", suitePath, "--examples", examples, "--agent", "scripted", "--seed", "11", "--db-dir", filepath.Join(dir, "dbs"), "--out", reportPath}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(reportPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := bench.DecodeReport(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.SchemaVersion != 2 || report.ContentDigest == "" || report.Environment == nil {
+		t.Fatalf("report is not self-describing: %s", data)
+	}
+	if report.Environment.Seed != 11 {
+		t.Fatalf("Seed = %d, want the --seed value", report.Environment.Seed)
+	}
+	if report.Environment.Version == "" || report.Environment.GoVersion == "" {
+		t.Fatalf("build metadata missing: %+v", report.Environment)
 	}
 }
 

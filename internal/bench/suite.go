@@ -389,3 +389,48 @@ func (s Suite) Digest() string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
 }
+
+// referencedFiles lists the fixture paths the cases name, sorted and without
+// duplicates so the content hash does not depend on case order or on how many
+// cases share a file.
+func (s Suite) referencedFiles() []string {
+	seen := map[string]bool{}
+	var files []string
+	for _, c := range s.Cases {
+		for _, rel := range []string{c.Chaos, c.Auth, c.Assertions, c.Interventions} {
+			if rel != "" && !seen[rel] {
+				seen[rel] = true
+				files = append(files, rel)
+			}
+		}
+	}
+	sort.Strings(files)
+	return files
+}
+
+// ContentDigest is Digest extended over the bytes of every fixture file the
+// cases reference (chaos, auth, assertions, interventions). Digest hashes only
+// the case list, so an edit to a referenced file leaves it unchanged although
+// the suite then measures something different. Each file contributes its
+// suite-relative path, a NUL, then its bytes, in sorted path order.
+//
+// It returns an error when a referenced file cannot be read: a hash over fewer
+// files than the suite names would claim an identity it does not have.
+func (s Suite) ContentDigest(examplesRoot string) (string, error) {
+	hash := sha256.New()
+	hash.Write([]byte(s.Digest()))
+	for _, rel := range s.referencedFiles() {
+		path, err := Resolve(examplesRoot, rel)
+		if err != nil {
+			return "", err
+		}
+		data, err := os.ReadFile(filepath.Join(examplesRoot, filepath.FromSlash(path)))
+		if err != nil {
+			return "", fmt.Errorf("read suite fixture %s: %w", rel, err)
+		}
+		hash.Write([]byte(path))
+		hash.Write([]byte{0})
+		hash.Write(data)
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}

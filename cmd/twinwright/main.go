@@ -17,6 +17,7 @@ import (
 	"twinwright/internal/authz"
 	"twinwright/internal/behavior"
 	"twinwright/internal/bench"
+	"twinwright/internal/buildinfo"
 	"twinwright/internal/chaos"
 	"twinwright/internal/checkpoint"
 	"twinwright/internal/compiler"
@@ -669,6 +670,7 @@ func runCLI(args []string, out io.Writer) error {
 			Model:        *model,
 			BaseURL:      *baseURL,
 			Seed:         seed,
+			Build:        buildinfo.Read(Version),
 			ProviderFor: func(provider, model, scenario, base string) (agent.Provider, error) {
 				return selectProvider(provider, model, scenario, base, *providerTimeout)
 			},
