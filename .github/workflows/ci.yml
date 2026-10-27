@@ -153,9 +153,11 @@ jobs:
           code=0
           ./twinwright gate \
             --baseline examples/bench/baselines/standard-scripted.json \
-            --candidate regressed.json > /dev/null || code=$?
+            --candidate regressed.json > gate-regressed.json || code=$?
           if [ "$code" -ne 1 ]; then
             echo "expected the gate to exit 1 on the regressed fixture, got $code"
+            echo "gate output:"
+            cat gate-regressed.json
             exit 1
           fi
 

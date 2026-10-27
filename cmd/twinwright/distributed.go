@@ -198,6 +198,7 @@ func workerCommand(ctx context.Context, args []string, out io.Writer) error {
 		if err != nil {
 			return store.Run{}, err
 		}
+		provider = agent.WithManifest(provider, manifest)
 		fence := lease.Fence()
 		runner := agent.Runner{
 			Store:    s,

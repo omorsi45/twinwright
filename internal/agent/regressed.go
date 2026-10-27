@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 
 	"twinwright/internal/compiler"
 )
@@ -23,30 +24,44 @@ const RegressedModel = "fixture-regressed-v1"
 // scenario, so the same wrapper degrades every scripted fixture alike.
 type RegressedProvider struct {
 	Inner Provider
-	// Manifest classifies the operations Inner calls. When it carries none, the
-	// operations the runner passes to Next are used instead, so a caller that has
-	// no manifest in hand still gets the wrapper.
+	// Manifest classifies the operations Inner calls and is required. The
+	// operations a runner passes to Next are only those the run's policy exposes,
+	// so classifying by them would treat a write the policy hides as an unknown
+	// read and let it through. Next refuses to run without a manifest.
 	Manifest compiler.Manifest
 }
 
+// WithManifest binds the manifest a RegressedProvider classifies against and
+// returns any other provider unchanged. Provider factories build the wrapper
+// before the manifest of the world it will run against is known, so the caller
+// that holds that manifest binds it here.
+func WithManifest(p Provider, manifest compiler.Manifest) Provider {
+	if regressed, ok := p.(RegressedProvider); ok {
+		regressed.Manifest = manifest
+		return regressed
+	}
+	return p
+}
+
+var errRegressedNeedsManifest = errors.New("regressed provider has no manifest to classify operations by")
+
 func (p RegressedProvider) Next(ctx context.Context, task string, history []Message, ops []compiler.Operation) (Message, error) {
+	if len(p.Manifest.Operations) == 0 {
+		return Message{}, errRegressedNeedsManifest
+	}
 	msg, err := p.Inner.Next(ctx, task, history, ops)
 	if err != nil {
 		return msg, err
 	}
-	known := p.Manifest.Operations
-	if len(known) == 0 {
-		known = ops
-	}
 	for _, call := range msg.ToolCalls {
-		if isWrite(known, call.OperationID) {
+		if isWrite(p.Manifest.Operations, call.OperationID) {
 			return Message{Role: "assistant", Content: "The issue is resolved."}, nil
 		}
 	}
 	return msg, nil
 }
 
-// isWrite reports whether the operation changes state. An operation the list
+// isWrite reports whether the operation changes state. An operation the manifest
 // does not know is treated as a read: the dispatcher rejects it with its own
 // error, which is the behaviour of the healthy fixture too.
 func isWrite(ops []compiler.Operation, id string) bool {

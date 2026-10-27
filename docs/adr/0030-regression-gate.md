@@ -27,7 +27,7 @@ existed decodes as version 1. Version 2 adds these fields:
 | Field | Meaning |
 | --- | --- |
 | `content_digest` | `digest` extended over the bytes of the fixture files the suite references |
-| `environment` | build revision and dirty flag, Go version, `goos`, `goarch`, `num_cpu`, `seed`, `started_at` (RFC 3339, UTC) |
+| `environment` | build info (version, and git revision and modified flag when the toolchain stamped them), Go version, `goos`, `goarch`, `num_cpu`, `seed`, `started_at` (RFC 3339, UTC) |
 | per case `trajectory` | the tool calls in ledger order, each an operation ID and an HTTP status (0 for a timeout); for a repeated case, the first trial's |
 | per case `mutations` | state mutations the agent's own calls committed |
 | per case `trials`, `passes` | how many times the case ran and how many trials passed |
@@ -47,10 +47,12 @@ event, the scenario's doing and not the agent's, and is left out.
 ### Trials
 
 A case may run more than once (`--trials N`, or the case's own `trials` field,
-which wins). The verdict of a repeated case is independent of trial order:
-errored trials are dropped from the failed count, so one failing trial makes the
-case `failed`, and `error` means none failed but at least one stopped without a
-verdict. `passes` and `trials` are what the gate reads to judge a pass rate.
+which wins). The verdict of a repeated case is independent of trial order. One
+failing trial makes the case `failed`, whatever else happened. `error` means no
+trial failed but at least one stopped without a verdict, and such a trial is not
+counted as a pass. `passed` needs every trial to pass. An `error` case is left
+out of scoring and counted in the summary's error total. `passes` and `trials`
+are what the gate reads to judge a pass rate.
 
 ### Regression kinds
 
@@ -154,7 +156,11 @@ run's evaluation fails. It is opt-in; without it a failed evaluation still exits
 
 When a change legitimately alters scripted behaviour, regenerate the file with
 the command above, review the diff, and commit it with the change that caused it.
-The baseline embeds the build's revision, which is expected. CI uses the default
+The baseline's `environment` block records the build and machine that generated
+it (version, Go version, `goos`, `goarch`, `num_cpu`), not the revision it was
+approved at. `git_revision` is absent when the toolchain stamped no VCS settings,
+as with `go run` and `go test`, and then `git_modified: false` means only that no
+modification was recorded, not that the tree was clean. CI uses the default
 `--trajectory warn`, so a cosmetic change to tool-call order is visible in the
 job summary without blocking a merge.
 

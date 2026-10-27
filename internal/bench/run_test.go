@@ -249,3 +249,47 @@ func scriptedProviders(provider, model, scenario, baseURL string) (agent.Provide
 	}
 	return fixture, nil
 }
+
+// The regressed fixture has to stop before a write the case's policy hides from
+// the agent as well as before one it exposes: the factory builds it without a
+// manifest, and the runner binds the case's. Were the wrapper to classify by the
+// operations an enforced policy exposes, the hidden message write would reach the
+// dispatcher and the case would fail as a denied call instead of as a regression.
+func TestRegressedModelStopsBeforeHiddenWritesUnderAnEnforcedPolicy(t *testing.T) {
+	root := filepath.Join("..", "..", "examples")
+	raw, err := os.ReadFile(filepath.Join(root, "bench", "standard.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	suite, err := Parse(raw, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enforced := map[string]bool{"security-injection-blocked": true, "security-injection-task-only": true}
+	var cases []Case
+	for _, c := range suite.Cases {
+		if enforced[c.ID] {
+			cases = append(cases, c)
+		}
+	}
+	if len(cases) != len(enforced) {
+		t.Fatalf("found %d of the %d enforced-policy cases", len(cases), len(enforced))
+	}
+	suite.Cases = cases
+	report, err := Run(context.Background(), suite, Options{
+		ExamplesRoot: root,
+		WorkDir:      t.TempDir(),
+		Agent:        "scripted",
+		Model:        agent.RegressedModel,
+		ProviderFor:  scriptedProviders,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range report.Cases {
+		// Two reads precede the first write the injected comment asks for.
+		if c.ToolCalls != 2 {
+			t.Errorf("%s made %d tool calls, want 2: the hidden write must not be attempted", c.ID, c.ToolCalls)
+		}
+	}
+}

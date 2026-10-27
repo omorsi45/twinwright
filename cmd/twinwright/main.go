@@ -163,6 +163,11 @@ func runCLI(args []string, out io.Writer) error {
 		if *fault != "" && *chaosPath != "" {
 			return fmt.Errorf("--fault and --chaos cannot be combined")
 		}
+		if *enqueue && *failOnEval {
+			// An enqueued run is executed by a worker later, so there is no
+			// evaluation here to fail on; exiting 0 would read as a pass.
+			return fmt.Errorf("--enqueue and --fail-on-eval cannot be combined: an enqueued run is evaluated by a worker, not by this command")
+		}
 		if *recovery != "safe" && *recovery != "unsafe" {
 			return fmt.Errorf("unknown recovery fixture %q", *recovery)
 		}
@@ -212,6 +217,7 @@ func runCLI(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
+		provider = agent.WithManifest(provider, manifest)
 		s, err := store.OpenDSN(ctx, *dbPath)
 		if err != nil {
 			return err
@@ -299,6 +305,7 @@ func runCLI(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
+		provider = agent.WithManifest(provider, manifest)
 		result, err := executeLocally(ctx, s, manifest, provider, runID, *steps)
 		if err != nil {
 			return localRunError(runID, err)
@@ -411,6 +418,7 @@ func runCLI(args []string, out io.Writer) error {
 			if err != nil {
 				return err
 			}
+			provider = agent.WithManifest(provider, manifest)
 		}
 		rebuilt, _, err := checkpoint.Reconstruct(ctx, source, parent.ID, selected, manifest)
 		if err != nil {
@@ -619,7 +627,11 @@ func runCLI(args []string, out io.Writer) error {
 		}
 		defer source.Close()
 		analysis, err := counterfactual.Prepare(ctx, source, args[1], manifest, set, judge, counterfactual.Options{Trials: *trials, Steps: *steps, ProviderFor: func(provider, model, scenario string) (agent.Provider, error) {
-			return selectProvider(provider, model, scenario, *baseURL, *providerTimeout)
+			p, err := selectProvider(provider, model, scenario, *baseURL, *providerTimeout)
+			if err != nil {
+				return nil, err
+			}
+			return agent.WithManifest(p, manifest), nil
 		}})
 		if err != nil {
 			return err
@@ -769,6 +781,7 @@ func runCLI(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
+		provider = agent.WithManifest(provider, manifest)
 		dir := *workDir
 		if dir == "" {
 			dir, err = os.MkdirTemp("", "twinwright-shadow-*")
@@ -1042,8 +1055,8 @@ func selectProvider(name, model, scenario, baseURL string, timeout time.Duration
 	case "scripted":
 		fixture := scriptedFixture(model, scenario)
 		if model == agent.RegressedModel {
-			// The manifest is not known here; the runner hands the wrapper the
-			// operations it needs on every turn.
+			// The manifest is not known here: the caller that holds it binds it
+			// with agent.WithManifest, and the wrapper refuses to run unbound.
 			return agent.RegressedProvider{Inner: fixture}, nil
 		}
 		return fixture, nil

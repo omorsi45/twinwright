@@ -173,7 +173,11 @@ func runCounterfactual(ctx context.Context, s *store.Store, c Case, manifest com
 		Trials: 1,
 		Steps:  c.Steps,
 		ProviderFor: func(provider, model, scenario string) (agent.Provider, error) {
-			return options.ProviderFor(provider, model, scenario, options.BaseURL)
+			p, err := options.ProviderFor(provider, model, scenario, options.BaseURL)
+			if err != nil {
+				return nil, err
+			}
+			return agent.WithManifest(p, manifest), nil
 		},
 	})
 	if err != nil {

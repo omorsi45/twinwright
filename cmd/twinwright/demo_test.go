@@ -3,7 +3,10 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -72,6 +75,26 @@ func TestDemo(t *testing.T) {
 		}
 		if !strings.Contains(text, "=== 12/12 ") {
 			t.Fatalf("demo never printed its last step\n%s", text)
+		}
+	})
+
+	// The documents that state the count are read here, not trusted: a step added
+	// or dropped must fail until README.md and AGENTS.md say the new number.
+	t.Run("README and AGENTS.md state the step count", func(t *testing.T) {
+		n := len(demoSteps())
+		for _, doc := range []string{"../../README.md", "AGENTS.md"} {
+			raw, err := os.ReadFile(doc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !statesStepCount(string(raw), n) {
+				t.Errorf("%s does not state a demo of %d steps (%q or %d)", doc, n, stepWords[n], n)
+			}
+			for _, stale := range []int{n - 1, n + 1} {
+				if statesStepCount(string(raw), stale) {
+					t.Errorf("%s still states a demo of %d steps", doc, stale)
+				}
+			}
 		}
 	})
 
@@ -218,3 +241,17 @@ func TestCounterfactualSummaryRejectsAnInterleavedBoundary(t *testing.T) {
 // The demo writes its world, database and artefacts into the directory it is
 // given, and that claim is checked as a subtest of TestDemo above, sharing the
 // single expensive run rather than performing a third one.
+
+var stepWords = map[int]string{
+	9: "nine", 10: "ten", 11: "eleven", 12: "twelve", 13: "thirteen", 14: "fourteen",
+}
+
+// statesStepCount reports whether text says "<n> steps" or "<n>-step", with n
+// spelled in words or digits, case-insensitively.
+func statesStepCount(text string, n int) bool {
+	alternatives := fmt.Sprint(n)
+	if word, ok := stepWords[n]; ok {
+		alternatives = word + "|" + alternatives
+	}
+	return regexp.MustCompile(`(?i)\b(` + alternatives + `)[ -]steps?\b`).MatchString(text)
+}

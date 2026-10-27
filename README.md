@@ -136,7 +136,7 @@ go test ./...
 go run ./cmd/twinwright demo --dir ./demo-out
 ```
 
-Eleven steps over one incident: compile the four-service world, run it under injected faults, inspect, trace, evaluate, replay, fork and compare, crash a worker and let another take over, then fail the same incident on purpose and explain the failure. Everything is scripted, so it needs no API key, no network and no container runtime.
+Twelve steps over one incident: compile the four-service world, run it under injected faults, inspect, trace, evaluate, replay, fork and compare, crash a worker and let another take over, fail the same incident on purpose and explain the failure, block a prompt injection and an over-privileged request, then block a regressed agent at the CI gate. Everything is scripted, so it needs no API key, no network and no container runtime.
 
 Every step reads its evidence back out of what it just ran, and the first step that cannot produce its evidence stops the walkthrough with a non-zero exit.
 

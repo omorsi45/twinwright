@@ -300,6 +300,7 @@ func runTrial(ctx context.Context, c Case, manifests worldManifests, options Opt
 		result.WallMS = time.Since(start).Milliseconds()
 		return result
 	}
+	provider = agent.WithManifest(provider, manifest)
 	runOpts, err := runOptions(c, manifest, options.ExamplesRoot)
 	if err != nil {
 		result.Error = err.Error()
