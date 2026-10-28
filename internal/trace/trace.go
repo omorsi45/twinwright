@@ -153,7 +153,16 @@ func Build(ctx context.Context, s *store.Store, runID string, secrets ...string)
 	b.summary.WallClockMS = b.root.DurationMS
 	b.summary.ModelMS = roundMS(b.summary.ModelMS)
 	b.summary.ToolMS = roundMS(b.summary.ToolMS)
-	return Trace{TraceID: hashID("twinwright-trace:"+run.ID, 32), Summary: b.summary, Root: b.root}, nil
+	return Trace{TraceID: TraceIDFor(run.ID), Summary: b.summary, Root: b.root}, nil
+}
+
+// TraceIDFor is the trace ID of a run's trace. Build uses it, and so does
+// anything that needs to name a run's trace without building the trace (a
+// worker's log line, for one), so the two cannot disagree. The ID is derived
+// from the run ID alone, which is why a rebuilt trace and a re-export land in
+// the same collector trace.
+func TraceIDFor(runID string) string {
+	return hashID("twinwright-trace:"+runID, 32)
 }
 
 func roundMS(value float64) float64 {
@@ -245,13 +254,14 @@ func (b *builder) add(event store.Event) error {
 	case "provider.interrupted":
 		// The attempt belongs to the model call that is open, so the note lands on
 		// that span rather than at the root: a reader looking at a slow turn sees
-		// why it was slow.
+		// why it was slow. status and retry_after_ms are in the payload only for a
+		// rate limit or a server error, and pick leaves out what is not there.
 		span := b.current
 		if span == nil || span.Name != "model.invocation" {
 			return fmt.Errorf("provider interruption without a model request")
 		}
 		b.summary.Interruptions++
-		b.note(span, event, "provider.interrupted", pick(payload, "kind", "attempt", "reason", "deadline_ms"))
+		b.note(span, event, "provider.interrupted", pick(payload, "kind", "attempt", "reason", "deadline_ms", "status", "retry_after_ms"))
 	case "tool.request":
 		span := b.span("tool.call", event)
 		span.Attributes["call_id"], span.Attributes["operation"] = payload["call_id"], payload["operation_id"]

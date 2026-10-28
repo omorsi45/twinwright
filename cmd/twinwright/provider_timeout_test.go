@@ -18,21 +18,21 @@ func TestSelectProviderCarriesThePerAttemptDeadline(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "test-key")
 	deadline := 7 * time.Second
 
-	openai, err := selectProvider("openai", "gpt-test", "duplicate-charge", "", deadline)
+	openai, err := selectProvider(providerConfig{Name: "openai", Model: "gpt-test", Scenario: "duplicate-charge", Timeout: deadline})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if p, ok := openai.(agent.OpenAIProvider); !ok || p.Timeout != deadline {
 		t.Fatalf("openai=%+v", openai)
 	}
-	anthropic, err := selectProvider("anthropic", "claude-test", "duplicate-charge", "", deadline)
+	anthropic, err := selectProvider(providerConfig{Name: "anthropic", Model: "claude-test", Scenario: "duplicate-charge", Timeout: deadline})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if p, ok := anthropic.(agent.AnthropicProvider); !ok || p.Timeout != deadline {
 		t.Fatalf("anthropic=%+v", anthropic)
 	}
-	compatible, err := selectProvider("openai-compatible", "local", "duplicate-charge", "http://127.0.0.1:1/v1", deadline)
+	compatible, err := selectProvider(providerConfig{Name: "openai-compatible", Model: "local", Scenario: "duplicate-charge", BaseURL: "http://127.0.0.1:1/v1", Timeout: deadline})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +44,7 @@ func TestSelectProviderCarriesThePerAttemptDeadline(t *testing.T) {
 // A deadline of zero would be an uncancellable call again, so it is refused
 // rather than treated as "no limit".
 func TestProviderTimeoutMustBePositive(t *testing.T) {
-	if _, err := selectProvider("scripted", "", "duplicate-charge", "", 0); err == nil {
+	if _, err := selectProvider(providerConfig{Name: "scripted", Scenario: "duplicate-charge"}); err == nil {
 		t.Fatal("a non-positive provider timeout was accepted")
 	}
 	dir := t.TempDir()

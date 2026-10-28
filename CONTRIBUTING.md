@@ -13,14 +13,20 @@ go test ./...        # hermetic: no network, no API key, no container runtime
 ./scripts/e2e.sh     # walks the whole documented pipeline with scripted fixtures
 ```
 
-Nothing beyond a Go toolchain is required. PostgreSQL and an OpenTelemetry
-collector are optional:
+Nothing beyond a Go toolchain is required. The Compose stack is optional.
+`docker compose up -d` (or `make up`) starts PostgreSQL, an OpenTelemetry
+collector, Jaeger and Prometheus, all published on loopback with no TLS or
+authentication. Name `postgres` to start only the database:
 
 ```bash
-docker compose up -d
+docker compose up -d postgres
 make test-postgres
 make e2e-postgres
 ```
+
+`make down` runs `docker compose down -v`, which deletes the Compose volumes,
+including the `twinwright` database in that container. Anything you kept there is
+gone.
 
 `make help` lists the rest.
 
@@ -45,6 +51,11 @@ deliberately and say why in the commit message.
 daemon was available" is a useful sentence. Claiming a test passed when it was
 skipped is the one unrecoverable mistake in a repository about trustworthy
 execution.
+
+**A documented claim names its proof.** `docs/claims.md` has one row per claim the
+README makes, with the test or CI job that holds it, or the words `not verified`.
+Add a row when you add a claim. `TestClaimsTableReferencesExist` fails when a row
+cites a test or a workflow job that no longer exists.
 
 ## Guarantees you must not regress
 

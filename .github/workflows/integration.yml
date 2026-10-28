@@ -4,8 +4,18 @@ name: Integration
 # separate from CI so an infrastructure hiccup here cannot block a merge on
 # work it has nothing to do with, and so the fast lane stays fast.
 #
-# Nothing in this workflow calls a model provider. Live-provider tests are
-# opt-in and only run where credentials exist, which is not here.
+# Only the real-model job calls a model, and it calls one served from a local
+# Ollama container: no hosted provider is called, and no key is configured in
+# this workflow. The hosted-provider live tests (TestLiveOpenAIToolCall and
+# TestLiveAnthropicToolCall) are opt-in and run nowhere in CI.
+#
+# Jobs: postgres (storage and the distributed runtime on two PostgreSQL majors),
+# docker (the container executor against a real daemon), observability (spans
+# read back from Jaeger and a worker's metrics scraped by Prometheus),
+# real-model (a small model, recorded and replayed), perf (the platform
+# benchmarks on PostgreSQL 17, run only from a manual dispatch) and demo-stack
+# (the one-command demo: two workers, a takeover, the collector, Jaeger and
+# Prometheus, all checked by queries).
 
 on:
   push:
@@ -100,9 +110,16 @@ jobs:
         run: |
           docker pull hashicorp/http-echo:1.0
           docker pull busybox:1.36
+          docker pull python:3.12-alpine
 
       - name: container integration tests
         run: go test -count=1 -v -run 'Docker' ./internal/container/
+
+      - name: the exec agent runs in a hardened container
+        # The reference agent completes the billing run behind the hardened
+        # docker run, and an agent in --network none cannot open a connection.
+        # Without this step the argv is only asserted, never accepted by a daemon.
+        run: go test -count=1 -v -run 'TestPythonAgentInHardenedContainer' ./internal/agent/
 
       - name: the shipped example config starts and stops through the CLI
         run: |
@@ -110,3 +127,323 @@ jobs:
           ./twinwright container start --config examples/container/http-echo.yaml
           ./twinwright container status --config examples/container/http-echo.yaml
           ./twinwright container stop --config examples/container/http-echo.yaml
+
+  observability:
+    name: spans queryable in Jaeger, metrics scraped by Prometheus
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # The unit tests answer the OTLP exporter and the metrics endpoint from
+    # in-process servers, which shows the bytes are sent and are in the documented
+    # format and nothing about what a collector or a scraper does with them. This
+    # job starts the Compose collector, Jaeger and Prometheus and has two opt-in
+    # tests (TWINWRIGHT_TEST_OTEL=1) check the two claims against them: that the
+    # spans of a scripted run, exported through the collector, can be read back
+    # from Jaeger by trace ID, and that Prometheus scrapes a worker's metrics
+    # endpoint and answers a query for them. It calls no model.
+    #
+    # The images are the pinned tags in docker-compose.yml. Ports are published on
+    # the runner's loopback only, except that the test serves metrics on 0.0.0.0:9095
+    # because the Prometheus container reaches the host through the bridge gateway.
+    # Nothing on the stack has TLS or authentication, and the runner is discarded
+    # with the job.
+    env:
+      TWINWRIGHT_TEST_OTEL: "1"
+      OPENAI_API_KEY: ""
+      ANTHROPIC_API_KEY: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: start the collector, Jaeger and Prometheus
+        run: docker compose up -d otel-collector jaeger prometheus
+
+      - name: wait for the collector and Jaeger
+        # Waiting on the health endpoint and the UI port, rather than sleeping, is
+        # what keeps this job from being the flaky one.
+        run: |
+          for _ in $(seq 1 60); do
+            if curl -fsS --max-time 2 http://127.0.0.1:13133/ > /dev/null &&
+              curl -fsS --max-time 2 http://127.0.0.1:16686/ > /dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose ps
+          echo "the collector (13133) or Jaeger (16686) did not answer" >&2
+          exit 1
+
+      - name: export a run and query it back, scrape a worker and query it back
+        run: go test -count=1 -v -run 'TestSpansAreQueryableInJaeger|TestPrometheusScrapesAWorker' ./internal/trace/ ./internal/metrics/
+
+      - name: stack logs
+        if: failure()
+        run: docker compose logs
+
+      - name: stop the stack
+        if: always()
+        run: docker compose down -v
+
+  real-model:
+    name: a real small model on a local Ollama server, recorded and replayed
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # Every other test answers the provider adapters from a script or a recording.
+    # This job is the one place a model nobody wrote for the test makes the
+    # decisions, and it proves two things about it: that a run against a real
+    # server can be recorded, and that the recording reconstructs the run with the
+    # server stopped. It does not gate on the model getting the scenario right: the
+    # evaluation verdict is reported, because a small model failing a scenario is a
+    # result and not a broken build. It does fail when the run cannot be recorded,
+    # does not complete, or does not replay.
+    #
+    # The model runs on CPU, so the first call includes loading it and the script
+    # gives each provider attempt 300 seconds instead of the CLI's 90.
+    env:
+      OPENAI_API_KEY: ""
+      ANTHROPIC_API_KEY: ""
+      TW_LIVE_MODEL: qwen2.5:1.5b
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: choose where the run's files go
+        # The runner context is not available in a job-level env, so the
+        # directory is exported from a step. It is outside the checkout, so
+        # nothing the script writes can be committed from here.
+        run: echo "TW_LIVE_OUT=$RUNNER_TEMP/live" >> "$GITHUB_ENV"
+
+      - name: start ollama
+        # A pinned tag, not latest: the server version is part of what the report
+        # describes. The port is published on loopback only, so the runner does
+        # not expose an unauthenticated model server on its external interface.
+        run: docker run -d --name ollama -p 127.0.0.1:11434:11434 ollama/ollama:0.40.11
+
+      - name: wait for the server
+        run: |
+          for _ in $(seq 1 60); do
+            if curl -fsS --max-time 5 http://127.0.0.1:11434/api/tags > /dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs ollama
+          echo "ollama did not answer on 127.0.0.1:11434" >&2
+          exit 1
+
+      - name: pull the model
+        # Pulling up front keeps the download out of the first call's deadline. A
+        # failed pull is tried again twice before the job fails.
+        run: |
+          for attempt in 1 2 3; do
+            if docker exec ollama ollama pull "$TW_LIVE_MODEL"; then
+              exit 0
+            fi
+            echo "pull attempt $attempt failed" >&2
+            sleep 10
+          done
+          exit 1
+
+      - name: record a run with the model and replay it from the ledger and the cassette
+        run: ./scripts/live-model.sh
+
+      - name: stop the server and replay from the cassette alone
+        # The script already replayed from the cassette while the server was up.
+        # This replay runs after the container is stopped and the port is shown to
+        # be closed, so a verdict here cannot have come from the server.
+        run: |
+          set -euo pipefail
+          docker stop ollama
+          if curl -fsS --max-time 5 http://127.0.0.1:11434/api/tags > /dev/null 2>&1; then
+            echo "the server still answers after docker stop" >&2
+            exit 1
+          fi
+          run_id="$(jq -r .run_id "$TW_LIVE_OUT/live-model-report.json")"
+          env -u OPENAI_API_KEY -u OPENAI_BASE_URL "$TW_LIVE_OUT/twinwright" replay "$run_id" \
+            --manifest "$TW_LIVE_OUT/billing.manifest.json" --db "$TW_LIVE_OUT/live.db" \
+            --cassette "$TW_LIVE_OUT/live.cassette.jsonl" | tee "$TW_LIVE_OUT/replay-server-stopped.json"
+          jq -e '.verified == true' "$TW_LIVE_OUT/replay-server-stopped.json"
+          # The digest is what ties the report to specific weights, so a report
+          # without one is not a report this job accepts.
+          jq -e '.model_digest | length > 0' "$TW_LIVE_OUT/live-model-report.json"
+
+      - name: show the report
+        if: always()
+        run: |
+          if [ -f "$TW_LIVE_OUT/live-model-report.json" ]; then
+            jq . "$TW_LIVE_OUT/live-model-report.json"
+          else
+            echo "the script wrote no report" >&2
+          fi
+
+      - name: server log
+        if: failure()
+        run: docker logs --tail 100 ollama
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: live-model-run
+          path: |
+            ${{ runner.temp }}/live/live-model-report.json
+            ${{ runner.temp }}/live/live.cassette.jsonl
+          if-no-files-found: warn
+          retention-days: 30
+
+  perf:
+    name: platform benchmarks on PostgreSQL 17 (on demand)
+    # Published PostgreSQL figures have to come from a labelled shared runner,
+    # one whose operating system, CPU count and memory are recorded next to the
+    # numbers, and not from a machine the reader cannot name. This job runs
+    # `twinwright perf` against a PostgreSQL 17 service and uploads the JSON
+    # report with that record, so the documentation quotes a committed copy of
+    # the report and not a number typed from memory.
+    #
+    # It is dispatch-only because it takes minutes and the figures mean something
+    # only when someone intends to record them. A run on every push or pull
+    # request would spend runner time on numbers nobody reads and would invite
+    # comparing two runs from different shared machines. The job also fails when
+    # perf exits non-zero, which it does on a duplicated mutation or a
+    # crash-matrix violation.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: twinwright
+          POSTGRES_PASSWORD: twinwright
+          POSTGRES_DB: twinwright
+        ports:
+          - 5432:5432
+        # Waiting on pg_isready rather than sleeping is what keeps this job
+        # from being the flaky one.
+        options: >-
+          --health-cmd "pg_isready -U twinwright"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DSN: postgres://twinwright:twinwright@127.0.0.1:5432/twinwright?sslmode=disable
+      OPENAI_API_KEY: ""
+      ANTHROPIC_API_KEY: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: build twinwright
+        run: go build -o twinwright ./cmd/twinwright
+
+      - name: record the runner
+        # What the figures were measured on, written next to the report. The
+        # server version is read with psql when the runner image has it; the
+        # service container is not reachable with docker exec by name, so when
+        # psql is absent the line says the version was not recorded instead of
+        # leaving it out. The DSN is never printed.
+        run: |
+          set -euo pipefail
+          cpu="$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//')"
+          mem="$(grep -m1 '^MemTotal:' /proc/meminfo | sed 's/  */ /g')"
+          pg="not recorded (psql is not on this runner)"
+          if command -v psql > /dev/null; then
+            pg="$(psql "$DSN" -Atc 'show server_version' 2> /dev/null || true)"
+            if [ -z "$pg" ]; then
+              pg="not recorded (psql could not read it)"
+            fi
+          fi
+          {
+            echo "uname: $(uname -a)"
+            echo "nproc: $(nproc)"
+            echo "cpu: $cpu"
+            echo "memory: $mem"
+            echo "go: $(go version)"
+            echo "postgres server: $pg"
+            echo "commit: $GITHUB_SHA"
+          } | tee runner.txt
+
+      - name: measure throughput, recovery, replay and the crash matrix
+        # Three trials, so the report carries a spread and not one sample. The
+        # text summary goes to the log; the full report is perf.json.
+        run: ./twinwright perf --db "$DSN" --trials 3 --out perf.json
+
+      - name: show the report
+        if: always()
+        run: |
+          if [ -f perf.json ]; then
+            jq . perf.json
+          else
+            echo "perf wrote no report" >&2
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: perf-postgres17
+          path: |
+            perf.json
+            runner.txt
+          if-no-files-found: warn
+
+  demo-stack:
+    name: one-command demo stack (PostgreSQL, two workers, collector, Jaeger, Prometheus)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # The other jobs each prove one claim against one service. This one runs the
+    # whole platform the way a person runs it, `make demo-stack`, and fails when any
+    # of its six checks is missing: eight runs completed on a Compose PostgreSQL
+    # server by three workers started on the host, a worker killed with SIGKILL
+    # while it holds a run and the run taken over by another worker, the takeover
+    # counted by Prometheus, both workers scraped by Prometheus, every run's trace
+    # read back from Jaeger by trace ID, and the benchmark gate passing against the
+    # approved baseline. It calls no model.
+    #
+    # The script holds the killed worker's run in place with a PostgreSQL lock, so
+    # the kill lands while the lease is held instead of racing a run that takes
+    # milliseconds. Its two metrics endpoints listen on all interfaces, because the
+    # Prometheus container reaches the host through the bridge gateway, and have no
+    # authentication; the runner is discarded with the job.
+    env:
+      OPENAI_API_KEY: ""
+      ANTHROPIC_API_KEY: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: choose where the failure logs go
+        # The runner context is not available in a job-level env, so the
+        # directory is exported from a step. The script copies its worker logs
+        # here on exit, with any DSN password masked.
+        run: echo "TW_DEMO_LOGS=$RUNNER_TEMP/demo-logs" >> "$GITHUB_ENV"
+
+      - name: make demo-stack
+        run: make demo-stack
+
+      - name: stack logs and worker logs
+        if: failure()
+        run: |
+          docker compose ps
+          docker compose logs
+          for f in "$TW_DEMO_LOGS"/worker-*.log "$TW_DEMO_LOGS"/lock-session.log; do
+            if [ -f "$f" ]; then
+              echo "::group::$(basename "$f")"
+              cat "$f"
+              echo "::endgroup::"
+            fi
+          done
+
+      - name: stop the stack
+        if: always()
+        run: docker compose down -v
+

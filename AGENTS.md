@@ -23,7 +23,7 @@ for checking current code and tests.
 
 ## Working rules
 
-- Use the Go version specified in `go.mod` (currently 1.27.2). Run
+- Use the Go version specified in `go.mod` (currently 1.27.3). Run
   commands from the repository root.
 - Make the smallest change that solves the task. Follow existing Go patterns,
   run `gofmt`, and add a regression test for behavior changes. For a bug,

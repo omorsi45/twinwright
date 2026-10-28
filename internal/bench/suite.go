@@ -14,6 +14,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"twinwright/internal/crashpoint"
 )
 
 // Suite is a versioned list of benchmark cases.
@@ -50,11 +52,29 @@ type Case struct {
 	// distributed runs it through the worker runtime with an injected crash, and
 	// counterfactual runs it locally and then explains its failure.
 	Mode string
-	// CrashAt is the model turn at which the first worker dies. Distributed mode
-	// only.
+	// CrashAt is which crossing of the crash point kills the first worker. With
+	// no CrashPoint the point is after-model-request, so CrashAt is the model
+	// turn, which is the meaning it had before named points existed. Distributed
+	// mode only.
 	CrashAt int
+	// CrashPoint names the durable boundary the first worker dies at, one of the
+	// crashpoint names. Empty means after-model-request. Distributed mode only.
+	// Like CrashOperation it is omitted from the JSON when empty, because the
+	// suite digest hashes this struct and a suite that does not use the field
+	// must keep the digest it had before the field existed.
+	CrashPoint string `json:",omitempty"`
+	// CrashOperation narrows CrashPoint to sites for one tool operation, so a
+	// case can target "the first createRefund commit". Only before-tool-commit
+	// and after-tool-commit carry an operation id, so any other CrashPoint would
+	// never match. Distributed mode only.
+	CrashOperation string `json:",omitempty"`
 	// Interventions is the intervention set applied by a counterfactual case.
 	Interventions string
+	// Trials is how many times a local case runs, each in a fresh database. Zero
+	// means unset, so the run-wide Options.Trials applies. Like CrashPoint it is
+	// omitted from the JSON when unset, because the suite digest hashes this
+	// struct and a suite that does not use the field must keep its digest.
+	Trials int `json:",omitempty"`
 }
 
 // Execution modes.
@@ -71,23 +91,26 @@ type rawSuite struct {
 }
 
 type rawCase struct {
-	ID            string   `yaml:"id"`
-	Category      string   `yaml:"category"`
-	World         string   `yaml:"world"`
-	Scenario      string   `yaml:"scenario"`
-	Chaos         string   `yaml:"chaos"`
-	Auth          string   `yaml:"auth"`
-	Assertions    string   `yaml:"assertions"`
-	Recovery      string   `yaml:"recovery"`
-	Fault         string   `yaml:"fault"`
-	Steps         *int     `yaml:"steps"`
-	Resume        *bool    `yaml:"resume"`
-	ResumeAt      *int     `yaml:"resume_at"`
-	Dimensions    []string `yaml:"dimensions"`
-	Expect        string   `yaml:"expect"`
-	Mode          string   `yaml:"mode"`
-	CrashAt       *int     `yaml:"crash_at"`
-	Interventions string   `yaml:"interventions"`
+	ID             string   `yaml:"id"`
+	Category       string   `yaml:"category"`
+	World          string   `yaml:"world"`
+	Scenario       string   `yaml:"scenario"`
+	Chaos          string   `yaml:"chaos"`
+	Auth           string   `yaml:"auth"`
+	Assertions     string   `yaml:"assertions"`
+	Recovery       string   `yaml:"recovery"`
+	Fault          string   `yaml:"fault"`
+	Steps          *int     `yaml:"steps"`
+	Resume         *bool    `yaml:"resume"`
+	ResumeAt       *int     `yaml:"resume_at"`
+	Dimensions     []string `yaml:"dimensions"`
+	Expect         string   `yaml:"expect"`
+	Mode           string   `yaml:"mode"`
+	CrashAt        *int     `yaml:"crash_at"`
+	CrashPoint     string   `yaml:"crash_point"`
+	CrashOperation string   `yaml:"crash_operation"`
+	Interventions  string   `yaml:"interventions"`
+	Trials         *int     `yaml:"trials"`
 }
 
 var (
@@ -235,6 +258,28 @@ func parseCase(input rawCase, root string, index int) (Case, error) {
 		}
 		crashAt = *input.CrashAt
 	}
+	if input.CrashPoint != "" {
+		if mode != ModeDistributed {
+			return Case{}, fmt.Errorf("case %q: crash_point requires mode distributed", input.ID)
+		}
+		if _, err := crashpoint.ParsePoint(input.CrashPoint); err != nil {
+			return Case{}, fmt.Errorf("case %q: crash_point: %w", input.ID, err)
+		}
+	}
+	if input.CrashOperation != "" {
+		if mode != ModeDistributed {
+			return Case{}, fmt.Errorf("case %q: crash_operation requires mode distributed", input.ID)
+		}
+		if input.CrashPoint != string(crashpoint.BeforeToolCommit) && input.CrashPoint != string(crashpoint.AfterToolCommit) {
+			return Case{}, fmt.Errorf("case %q: crash_operation requires crash_point %s or %s, because no other point carries an operation, got %q",
+				input.ID, crashpoint.BeforeToolCommit, crashpoint.AfterToolCommit, input.CrashPoint)
+		}
+	}
+	// after-completion is crossed once per run, so a later occurrence would never
+	// be reached.
+	if input.CrashPoint == string(crashpoint.AfterCompletion) && crashAt > 1 {
+		return Case{}, fmt.Errorf("case %q: crash_at must be 1 with crash_point %s, which is reached once per run", input.ID, crashpoint.AfterCompletion)
+	}
 	if mode == ModeDistributed && crashAt == 0 {
 		return Case{}, fmt.Errorf("case %q: mode distributed requires crash_at", input.ID)
 	}
@@ -246,6 +291,19 @@ func parseCase(input rawCase, root string, index int) (Case, error) {
 	}
 	if mode == ModeCounterfactual && input.Interventions == "" {
 		return Case{}, fmt.Errorf("case %q: mode counterfactual requires interventions", input.ID)
+	}
+	// Repeating a distributed or counterfactual case would not measure variance:
+	// the crash and the intervention search are scripted, so every repeat would
+	// replay the same recovery. Refuse it rather than report trials that are not.
+	trials := 0
+	if input.Trials != nil {
+		if mode != ModeLocal {
+			return Case{}, fmt.Errorf("case %q: trials requires mode local", input.ID)
+		}
+		if *input.Trials < 1 {
+			return Case{}, fmt.Errorf("case %q: trials must be positive", input.ID)
+		}
+		trials = *input.Trials
 	}
 	if len(input.Dimensions) == 0 {
 		return Case{}, fmt.Errorf("case %q: at least one dimension is required", input.ID)
@@ -297,7 +355,8 @@ func parseCase(input rawCase, root string, index int) (Case, error) {
 		Chaos: chaos, Auth: auth, Assertions: assertions, Recovery: recovery, Fault: input.Fault,
 		Steps: steps, Resume: resume, ResumeAt: resumeAt, Dimensions: dimensions,
 		Expect: expect,
-		Mode:   mode, CrashAt: crashAt, Interventions: interventions,
+		Mode:   mode, CrashAt: crashAt, CrashPoint: input.CrashPoint, CrashOperation: input.CrashOperation,
+		Interventions: interventions, Trials: trials,
 	}, nil
 }
 
@@ -348,4 +407,49 @@ func (s Suite) Digest() string {
 	}
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
+}
+
+// referencedFiles lists the fixture paths the cases name, sorted and without
+// duplicates so the content hash does not depend on case order or on how many
+// cases share a file.
+func (s Suite) referencedFiles() []string {
+	seen := map[string]bool{}
+	var files []string
+	for _, c := range s.Cases {
+		for _, rel := range []string{c.Chaos, c.Auth, c.Assertions, c.Interventions} {
+			if rel != "" && !seen[rel] {
+				seen[rel] = true
+				files = append(files, rel)
+			}
+		}
+	}
+	sort.Strings(files)
+	return files
+}
+
+// ContentDigest is Digest extended over the bytes of every fixture file the
+// cases reference (chaos, auth, assertions, interventions). Digest hashes only
+// the case list, so an edit to a referenced file leaves it unchanged although
+// the suite then measures something different. Each file contributes its
+// suite-relative path, a NUL, then its bytes, in sorted path order.
+//
+// It returns an error when a referenced file cannot be read: a hash over fewer
+// files than the suite names would claim an identity it does not have.
+func (s Suite) ContentDigest(examplesRoot string) (string, error) {
+	hash := sha256.New()
+	hash.Write([]byte(s.Digest()))
+	for _, rel := range s.referencedFiles() {
+		path, err := Resolve(examplesRoot, rel)
+		if err != nil {
+			return "", err
+		}
+		data, err := os.ReadFile(filepath.Join(examplesRoot, filepath.FromSlash(path)))
+		if err != nil {
+			return "", fmt.Errorf("read suite fixture %s: %w", rel, err)
+		}
+		hash.Write([]byte(path))
+		hash.Write([]byte{0})
+		hash.Write(data)
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
 }

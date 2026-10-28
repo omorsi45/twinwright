@@ -1,9 +1,20 @@
-# Minimal OpenTelemetry collector for local development.
+# OpenTelemetry collector for local development and for the observability CI job.
 #
-# It accepts OTLP/HTTP on 4318 and prints what it receives, which is enough to
-# confirm that `twinwright trace --format otlp --otlp-endpoint …` really
-# delivered spans rather than merely formatting them. Point the exporters at
-# your own backend to keep them.
+# It accepts OTLP/HTTP on 4318, forwards the spans to Jaeger over OTLP/gRPC on
+# the Compose network, and also prints what it receives, which is enough to
+# confirm that `twinwright trace --format otlp --otlp-endpoint ...` or a worker
+# started with `--otlp-endpoint` really delivered spans rather than merely
+# formatting them. Jaeger's query API then returns a trace by its ID.
+#
+# There is no TLS and no authentication anywhere on this path. The Compose file
+# publishes the receiver on loopback only. Point the exporters at your own
+# backend to keep the spans.
+
+extensions:
+  # Answers GET / with 200 once the collector is running, which is what the CI
+  # job waits on before it exports anything.
+  health_check:
+    endpoint: 0.0.0.0:13133
 
 receivers:
   otlp:
@@ -18,13 +29,18 @@ processors:
 exporters:
   debug:
     verbosity: detailed
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
 
 service:
+  extensions: [health_check]
   pipelines:
     traces:
       receivers: [otlp]
       processors: [batch]
-      exporters: [debug]
+      exporters: [debug, otlp/jaeger]
   telemetry:
     logs:
       level: info

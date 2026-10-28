@@ -1,5 +1,7 @@
 # ADR 0020: Multi-worker runtime, leases in the world store, and fencing
 
+Amended by ADR 0029: crash coverage, delivery bound, idempotency scope.
+
 Status: accepted, 2026-09-26; supersedes ADR 0018, completes ADR 0017
 
 ADR 0017 refused to call lease primitives a distributed runtime and listed what

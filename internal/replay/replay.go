@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"time"
 
 	"twinwright/internal/agent"
 	"twinwright/internal/authz"
@@ -40,6 +41,24 @@ func (p *recordedProvider) Next(_ context.Context, _ string, _ []agent.Message, 
 }
 
 func Verify(ctx context.Context, source *store.Store, runID string, manifest compiler.Manifest) (Report, error) {
+	return VerifyWith(ctx, source, runID, manifest, nil)
+}
+
+// VerifyWith is Verify with the model turns supplied by provider instead of read
+// back from the ledger. A nil provider is the ledger's own recorded responses,
+// which is exactly what Verify does.
+//
+// The point of a real provider is the adapter itself: built around a cassette
+// transport, it re-parses the recorded wire bytes, so replay covers the parsing,
+// the metadata and the interruption classification as well as the run around
+// them. The run is re-executed in a fresh in-memory world and compared with the
+// recorded one either way.
+//
+// Retry waits are skipped. A recorded 429 or 5xx is replayed from the cassette
+// as it was, with its Retry-After, and waiting it out again would only make a
+// replay as slow as the incident it reproduces. The recorded wait is already in
+// the ledger event the replay is compared against.
+func VerifyWith(ctx context.Context, source *store.Store, runID string, manifest compiler.Manifest, provider agent.Provider) (Report, error) {
 	report := Report{RunID: runID}
 	if err := compiler.ValidateManifest(manifest); err != nil {
 		return report, fmt.Errorf("manifest: %w", err)
@@ -138,10 +157,15 @@ func Verify(ctx context.Context, source *store.Store, runID string, manifest com
 		return report, err
 	}
 	defer target.Close()
-	provider := &recordedProvider{messages: messages}
+	var recorded *recordedProvider
+	if provider == nil {
+		recorded = &recordedProvider{messages: messages}
+		provider = recorded
+	}
 	runner := agent.Runner{
 		Store: target, Dispatch: &dispatch.Dispatcher{Store: target, Manifest: manifest},
 		Manifest: manifest, Provider: provider,
+		Sleep: func(ctx context.Context, _ time.Duration) error { return ctx.Err() },
 	}
 	replayed, err := runner.Execute(ctx, runID, len(messages)+1)
 	if ctx.Err() != nil {
@@ -150,8 +174,14 @@ func Verify(ctx context.Context, source *store.Store, runID string, manifest com
 	if err != nil {
 		return diverged(report, fmt.Sprintf("replayed execution: %v", err)), nil
 	}
-	if replayed.Status != "completed" || provider.next != len(messages) {
-		return diverged(report, fmt.Sprintf("replayed run ended %s after %d of %d model turns", replayed.Status, provider.next, len(messages))), nil
+	// A real provider may be called more than once for one turn, so the turns it
+	// completed are counted from the run, not from its calls.
+	turns := replayed.Step
+	if recorded != nil {
+		turns = recorded.next
+	}
+	if replayed.Status != "completed" || turns != len(messages) {
+		return diverged(report, fmt.Sprintf("replayed run ended %s after %d of %d model turns", replayed.Status, turns, len(messages))), nil
 	}
 	targetEvents, err := target.Events(ctx, runID)
 	if err != nil {

@@ -7,6 +7,14 @@
 // pgx and translates the statement text on its way to the server. The
 // translation is purely lexical and happens once per prepare/exec/query.
 //
+// Two SQLite placeholder forms are translated, numbered the way SQLite
+// numbers them: `?NNN` (a `?` followed by digits) becomes `$NNN` with the same
+// number, so a placeholder reused in one statement binds one argument, and a
+// bare `?` becomes `$K` where K is one more than the largest number assigned so
+// far in the statement. Statements that use only bare `?` therefore get $1, $2,
+// $3 in order. SQLite's named forms (`:name`, `@name`, `$name`) are not
+// translated.
+//
 // Scope and limitation: every `?` outside a string literal, a quoted
 // identifier, a dollar-quoted body or a comment is treated as a bind
 // placeholder. Twinwright never uses PostgreSQL's jsonb `?` existence
@@ -17,7 +25,7 @@ package pgsql
 
 import "strings"
 
-// Rewrite converts `?` bind placeholders into PostgreSQL's $N form.
+// Rewrite converts `?` and `?NNN` bind placeholders into PostgreSQL's $N form.
 //
 // Statements that contain no translatable placeholder are returned unchanged,
 // so native PostgreSQL SQL can be mixed freely with translated SQL.
@@ -27,7 +35,7 @@ func Rewrite(query string) string {
 	}
 	var out strings.Builder
 	out.Grow(len(query) + 8)
-	next := 1
+	largest := 0
 	for i := 0; i < len(query); {
 		switch c := query[i]; c {
 		case '\'', '"':
@@ -63,9 +71,26 @@ func Rewrite(query string) string {
 			i++
 		case '?':
 			out.WriteByte('$')
-			out.WriteString(itoa(next))
-			next++
-			i++
+			end := i + 1
+			for end < len(query) && query[end] >= '0' && query[end] <= '9' {
+				end++
+			}
+			if end == i+1 {
+				// Bare `?`: SQLite numbers it one past the largest
+				// number assigned so far.
+				largest++
+				out.WriteString(itoa(largest))
+				i++
+				continue
+			}
+			// `?NNN` keeps its number so a placeholder reused in one
+			// statement maps to one argument.
+			digits := query[i+1 : end]
+			out.WriteString(digits)
+			if n, ok := parseIndex(digits); ok && n > largest {
+				largest = n
+			}
+			i = end
 		default:
 			out.WriteByte(c)
 			i++
@@ -147,6 +172,19 @@ func scanDollarQuoted(query string, open int, tag string) int {
 		return body + idx + len(tag)
 	}
 	return len(query)
+}
+
+// parseIndex parses a run of ASCII digits. It reports false for runs too long
+// to be a real parameter number, which the server rejects on its own.
+func parseIndex(digits string) (int, bool) {
+	if len(digits) > 9 {
+		return 0, false
+	}
+	n := 0
+	for i := 0; i < len(digits); i++ {
+		n = n*10 + int(digits[i]-'0')
+	}
+	return n, true
 }
 
 // itoa avoids pulling strconv into the hot rewrite path for small integers.

@@ -17,6 +17,7 @@ import (
 	"twinwright/internal/authz"
 	"twinwright/internal/behavior"
 	"twinwright/internal/bench"
+	"twinwright/internal/buildinfo"
 	"twinwright/internal/chaos"
 	"twinwright/internal/checkpoint"
 	"twinwright/internal/compiler"
@@ -34,13 +35,13 @@ import (
 func main() {
 	if err := runCLI(os.Args[1:], os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, "twinwright:", err)
-		os.Exit(1)
+		os.Exit(exitCode(err))
 	}
 }
 
 func runCLI(args []string, out io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: twinwright version|doctor|build|build-world|run|resume|worker|enqueue|queue|inspect|trace|replay|checkpoints|fork|compare|evaluate|counterfactual|bench|shadow|container|demo ...")
+		return fmt.Errorf("usage: twinwright version|doctor|build|build-world|run|resume|worker|enqueue|queue|inspect|trace|replay|checkpoints|fork|compare|evaluate|counterfactual|bench|gate|perf|shadow|container|demo ...")
 	}
 	ctx := context.Background()
 	switch args[0] {
@@ -48,6 +49,10 @@ func runCLI(args []string, out io.Writer) error {
 		return versionCommand(out)
 	case "demo":
 		return cmdDemo(args[1:], out)
+	case "gate":
+		return gateCommand(args[1:], out)
+	case "perf":
+		return perfCommand(ctx, args[1:], out)
 	case "doctor":
 		return doctorCommand(ctx, args, out)
 	case "worker":
@@ -132,10 +137,10 @@ func runCLI(args []string, out io.Writer) error {
 		fs.SetOutput(io.Discard)
 		manifestPath := fs.String("manifest", "twinwright.manifest.json", "compiled manifest")
 		dbPath := fs.String("db", "twinwright.db", "SQLite path or postgres:// DSN")
-		providerName := fs.String("agent", "openai", "scripted, openai, openai-compatible, or anthropic")
+		providerName := fs.String("agent", "openai", "scripted, openai, openai-compatible, anthropic, or exec (your own agent process; needs --model and --agent-command)")
 		model := fs.String("model", "", "provider model; defaults depend on the agent")
-		baseURL := fs.String("base-url", os.Getenv("OPENAI_BASE_URL"), "base URL for openai-compatible")
-		providerTimeout := providerTimeoutFlag(fs)
+		providerCfg := providerFlags(fs)
+		recordCassetteFlag(fs, providerCfg)
 		seed := fs.Int64("seed", 42, "world seed")
 		fault := fs.String("fault", "", "operation ID that returns HTTP 503 once")
 		chaosPath := fs.String("chaos", "", "deterministic chaos policy YAML")
@@ -143,6 +148,7 @@ func runCLI(args []string, out io.Writer) error {
 		recovery := fs.String("recovery", "safe", "scripted ambiguous-commit recovery: safe or unsafe")
 		steps := fs.Int("steps", 20, "maximum model turns in this invocation")
 		enqueue := fs.Bool("enqueue", false, "create the run and queue it for a worker instead of executing it here")
+		failOnEval := fs.Bool("fail-on-eval", false, "exit non-zero when the run's evaluation fails, after printing the result")
 		if err := fs.Parse(args[2:]); err != nil {
 			return err
 		}
@@ -159,8 +165,18 @@ func runCLI(args []string, out io.Writer) error {
 		if *fault != "" && *chaosPath != "" {
 			return fmt.Errorf("--fault and --chaos cannot be combined")
 		}
+		if *enqueue && *failOnEval {
+			// An enqueued run is executed by a worker later, so there is no
+			// evaluation here to fail on; exiting 0 would read as a pass.
+			return fmt.Errorf("--enqueue and --fail-on-eval cannot be combined: an enqueued run is evaluated by a worker, not by this command")
+		}
 		if *recovery != "safe" && *recovery != "unsafe" {
 			return fmt.Errorf("unknown recovery fixture %q", *recovery)
+		}
+		if *enqueue && providerCfg.RecordCassette != "" {
+			// A worker executes an enqueued run, and a worker does not record, so
+			// the file would be created and left holding only its header.
+			return fmt.Errorf("--enqueue and --record-cassette cannot be combined: an enqueued run is executed by a worker, which does not record")
 		}
 		if *recovery != "safe" && (scenario != "ambiguous-commit" || *providerName != "scripted") {
 			return fmt.Errorf("--recovery requires scripted ambiguous-commit")
@@ -204,10 +220,14 @@ func runCLI(args []string, out io.Writer) error {
 		if scenario == "ambiguous-commit" && *providerName == "scripted" {
 			*model = "fixture-" + *recovery + "-v1"
 		}
-		provider, err := selectProvider(*providerName, *model, scenario, *baseURL, *providerTimeout)
+		provider, recording, err := openProvider(providerCfg.with(*providerName, *model, scenario))
 		if err != nil {
 			return err
 		}
+		// Closed however the command ends. Each exchange was written when it
+		// happened, so a close that fails has nothing left to lose.
+		defer recording.Close()
+		provider = agent.WithManifest(provider, manifest)
 		s, err := store.OpenDSN(ctx, *dbPath)
 		if err != nil {
 			return err
@@ -236,12 +256,18 @@ func runCLI(args []string, out io.Writer) error {
 				"backend":  string(s.Dialect),
 			})
 		}
-		runner := agent.Runner{Store: s, Dispatch: &dispatch.Dispatcher{Store: s, Manifest: manifest}, Manifest: manifest, Provider: provider}
-		result, err := runner.Execute(ctx, run.ID, *steps)
+		result, err := executeLocally(ctx, s, manifest, provider, run.ID, *steps)
 		if err != nil {
-			return fmt.Errorf("run %s failed: %w", run.ID, err)
+			return localRunError(run.ID, err)
 		}
-		return emitResult(ctx, out, s, result, manifest)
+		passed, err := emitResult(ctx, out, s, result, manifest)
+		if err != nil {
+			return err
+		}
+		if *failOnEval && !passed {
+			return fmt.Errorf("evaluation failed for run %s", result.ID)
+		}
+		return nil
 	case "resume":
 		if len(args) < 2 {
 			return fmt.Errorf("usage: twinwright resume <run-id> [options]")
@@ -253,8 +279,7 @@ func runCLI(args []string, out io.Writer) error {
 		dbPath := fs.String("db", "twinwright.db", "SQLite path or postgres:// DSN")
 		providerName := fs.String("agent", "", "run's provider")
 		model := fs.String("model", "", "use the model saved with the run")
-		baseURL := fs.String("base-url", os.Getenv("OPENAI_BASE_URL"), "base URL for openai-compatible")
-		providerTimeout := providerTimeoutFlag(fs)
+		providerCfg := providerFlags(fs)
 		steps := fs.Int("steps", 20, "maximum model turns in this invocation")
 		if err := fs.Parse(args[2:]); err != nil {
 			return err
@@ -285,16 +310,17 @@ func runCLI(args []string, out io.Writer) error {
 		if *model != "" && *model != run.Model {
 			return fmt.Errorf("model mismatch: run uses %s", run.Model)
 		}
-		provider, err := selectProvider(run.Provider, run.Model, run.Scenario, *baseURL, *providerTimeout)
+		provider, err := selectProvider(providerCfg.with(run.Provider, run.Model, run.Scenario))
 		if err != nil {
 			return err
 		}
-		runner := agent.Runner{Store: s, Dispatch: &dispatch.Dispatcher{Store: s, Manifest: manifest}, Manifest: manifest, Provider: provider}
-		result, err := runner.Execute(ctx, runID, *steps)
+		provider = agent.WithManifest(provider, manifest)
+		result, err := executeLocally(ctx, s, manifest, provider, runID, *steps)
 		if err != nil {
-			return fmt.Errorf("run %s failed: %w", runID, err)
+			return localRunError(runID, err)
 		}
-		return emitResult(ctx, out, s, result, manifest)
+		_, err = emitResult(ctx, out, s, result, manifest)
+		return err
 	case "checkpoints":
 		if len(args) < 2 {
 			return fmt.Errorf("usage: twinwright checkpoints <run-id> [--manifest path] [--db path]")
@@ -334,8 +360,7 @@ func runCLI(args []string, out io.Writer) error {
 		fault := fs.String("fault", "", "new one-time fault operation")
 		chaosPath := fs.String("chaos", "", "replacement chaos policy YAML for child")
 		authPath := fs.String("auth", "", "replacement authorization policy YAML for child")
-		baseURL := fs.String("base-url", os.Getenv("OPENAI_BASE_URL"), "base URL for openai-compatible")
-		providerTimeout := providerTimeoutFlag(fs)
+		providerCfg := providerFlags(fs)
 		steps := fs.Int("steps", 0, "model turns to run after fork; zero leaves the child paused")
 		if err := fs.Parse(args[2:]); err != nil {
 			return err
@@ -397,10 +422,11 @@ func runCLI(args []string, out io.Writer) error {
 			if options.Model != "" {
 				modelForRun = options.Model
 			}
-			provider, err = selectProvider(providerNameForRun, modelForRun, parent.Scenario, *baseURL, *providerTimeout)
+			provider, err = selectProvider(providerCfg.with(providerNameForRun, modelForRun, parent.Scenario))
 			if err != nil {
 				return err
 			}
+			provider = agent.WithManifest(provider, manifest)
 		}
 		rebuilt, _, err := checkpoint.Reconstruct(ctx, source, parent.ID, selected, manifest)
 		if err != nil {
@@ -476,12 +502,13 @@ func runCLI(args []string, out io.Writer) error {
 		return emit(out, report)
 	case "replay":
 		if len(args) < 2 {
-			return fmt.Errorf("usage: twinwright replay <run-id> [--manifest path] [--db path]")
+			return fmt.Errorf("usage: twinwright replay <run-id> [--manifest path] [--db path] [--cassette path]")
 		}
 		fs := flag.NewFlagSet("replay", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
 		manifestPath := fs.String("manifest", "twinwright.manifest.json", "compiled manifest")
 		dbPath := fs.String("db", "twinwright.db", "SQLite path or postgres:// DSN")
+		cassettePath := fs.String("cassette", "", "re-execute through the run's own provider adapter, answered by this file from run --record-cassette instead of the ledger's recorded turns")
 		if err := fs.Parse(args[2:]); err != nil {
 			return err
 		}
@@ -494,7 +521,24 @@ func runCLI(args []string, out io.Writer) error {
 			return err
 		}
 		defer s.Close()
-		report, err := replay.Verify(ctx, s, args[1], manifest)
+		// A nil provider replays the ledger's own recorded turns.
+		var provider agent.Provider
+		if *cassettePath != "" {
+			run, err := s.Run(ctx, args[1])
+			if err != nil {
+				return err
+			}
+			var recording io.Closer
+			provider, recording, err = openProvider(providerConfig{
+				Name: run.Provider, Model: run.Model, Scenario: run.Scenario,
+				Timeout: agent.DefaultCallTimeout, Cassette: *cassettePath,
+			})
+			if err != nil {
+				return err
+			}
+			defer recording.Close()
+		}
+		report, err := replay.VerifyWith(ctx, s, args[1], manifest, provider)
 		if err != nil {
 			return err
 		}
@@ -571,8 +615,7 @@ func runCLI(args []string, out io.Writer) error {
 		assertionsPath := fs.String("assertions", "", "assertion YAML file defining success; defaults to the scenario evaluation")
 		trials := fs.Int("trials", 1, "forks per candidate and intervention")
 		steps := fs.Int("steps", 20, "maximum model turns per fork")
-		baseURL := fs.String("base-url", os.Getenv("OPENAI_BASE_URL"), "base URL for openai-compatible")
-		providerTimeout := providerTimeoutFlag(fs)
+		providerCfg := providerFlags(fs)
 		if err := fs.Parse(args[2:]); err != nil {
 			return err
 		}
@@ -609,7 +652,11 @@ func runCLI(args []string, out io.Writer) error {
 		}
 		defer source.Close()
 		analysis, err := counterfactual.Prepare(ctx, source, args[1], manifest, set, judge, counterfactual.Options{Trials: *trials, Steps: *steps, ProviderFor: func(provider, model, scenario string) (agent.Provider, error) {
-			return selectProvider(provider, model, scenario, *baseURL, *providerTimeout)
+			p, err := selectProvider(providerCfg.with(provider, model, scenario))
+			if err != nil {
+				return nil, err
+			}
+			return agent.WithManifest(p, manifest), nil
 		}})
 		if err != nil {
 			return err
@@ -632,13 +679,16 @@ func runCLI(args []string, out io.Writer) error {
 		examplesRoot := fs.String("examples", "examples", "examples directory")
 		dbDir := fs.String("db-dir", "", "directory for per-case databases; defaults to a temp dir")
 		outPath := fs.String("out", "", "write the JSON report to this path")
-		providerName := fs.String("agent", "scripted", "scripted, openai, openai-compatible, or anthropic")
+		providerName := fs.String("agent", "scripted", "scripted, openai, openai-compatible, anthropic, or exec (your own agent process; needs --model and --agent-command)")
 		model := fs.String("model", "", "provider model")
-		baseURL := fs.String("base-url", os.Getenv("OPENAI_BASE_URL"), "base URL for openai-compatible")
-		providerTimeout := providerTimeoutFlag(fs)
+		providerCfg := providerFlags(fs)
 		seed := fs.Int64("seed", 42, "world seed")
+		trials := fs.Int("trials", 1, "times each local case runs; a case's own trials field wins")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
+		}
+		if *trials < 1 {
+			return fmt.Errorf("--trials must be positive, got %d", *trials)
 		}
 		if *model == "" {
 			*model = defaultModel(*providerName)
@@ -669,10 +719,14 @@ func runCLI(args []string, out io.Writer) error {
 			WorkDir:      workDir,
 			Agent:        *providerName,
 			Model:        *model,
-			BaseURL:      *baseURL,
+			BaseURL:      providerCfg.BaseURL,
 			Seed:         seed,
+			Trials:       *trials,
+			Build:        buildinfo.Read(Version),
 			ProviderFor: func(provider, model, scenario, base string) (agent.Provider, error) {
-				return selectProvider(provider, model, scenario, base, *providerTimeout)
+				cfg := providerCfg.with(provider, model, scenario)
+				cfg.BaseURL = base
+				return selectProvider(cfg)
 			},
 		})
 		if err != nil {
@@ -696,10 +750,9 @@ func runCLI(args []string, out io.Writer) error {
 		examplesRoot := fs.String("examples", "examples", "examples directory")
 		manifestPath := fs.String("manifest", "twinwright.manifest.json", "compiled manifest")
 		scenario := fs.String("scenario", "duplicate-charge", "local scenario to simulate")
-		providerName := fs.String("agent", "scripted", "scripted, openai, openai-compatible, or anthropic")
+		providerName := fs.String("agent", "scripted", "scripted, openai, openai-compatible, anthropic, or exec (your own agent process; needs --model and --agent-command)")
 		model := fs.String("model", "", "provider model")
-		baseURL := fs.String("base-url", os.Getenv("OPENAI_BASE_URL"), "base URL for openai-compatible")
-		providerTimeout := providerTimeoutFlag(fs)
+		providerCfg := providerFlags(fs)
 		steps := fs.Int("steps", 20, "maximum model turns for the local simulation")
 		workDir := fs.String("work-dir", "", "local DB directory; defaults to a temp dir")
 		authPath := fs.String("policy", "", "principal policy YAML; proposed actions are screened against it")
@@ -749,10 +802,11 @@ func runCLI(args []string, out io.Writer) error {
 			}
 			screenPolicy = &policy
 		}
-		provider, err := selectProvider(*providerName, *model, *scenario, *baseURL, *providerTimeout)
+		provider, err := selectProvider(providerCfg.with(*providerName, *model, *scenario))
 		if err != nil {
 			return err
 		}
+		provider = agent.WithManifest(provider, manifest)
 		dir := *workDir
 		if dir == "" {
 			dir, err = os.MkdirTemp("", "twinwright-shadow-*")
@@ -871,15 +925,11 @@ func runCLI(args []string, out io.Writer) error {
 			if *otlpEndpoint != "" {
 				// Delivering the spans, not just formatting them: the
 				// collector's status code is what makes the export verifiable.
-				exporter := trace.Exporter{Endpoint: *otlpEndpoint}
-				if *otlpHeader != "" {
-					name, value, found := strings.Cut(*otlpHeader, ":")
-					if !found {
-						return fmt.Errorf("--otlp-header must be \"Name: value\"")
-					}
-					exporter.Headers = map[string]string{strings.TrimSpace(name): strings.TrimSpace(value)}
+				headers, err := parseOTLPHeader(*otlpHeader)
+				if err != nil {
+					return err
 				}
-				delivery, err := exporter.Export(ctx, built)
+				delivery, err := trace.Exporter{Endpoint: *otlpEndpoint, Headers: headers}.Export(ctx, built)
 				if err != nil {
 					return err
 				}
@@ -994,74 +1044,36 @@ func resolveRunModel(agentName, model string) string {
 	}
 }
 
-// providerTimeoutFlag registers the per-attempt provider deadline.
-//
-// One helper rather than seven copies of the same flag, so every command that can
-// reach a provider has the same name, the same default and the same refusal. The
-// deadline cannot be switched off: an uncancellable call is the failure this
-// replaced, and a run that hangs forever reports nothing at all.
-func providerTimeoutFlag(fs *flag.FlagSet) *time.Duration {
-	return fs.Duration("provider-timeout", agent.DefaultCallTimeout, "per-attempt provider call deadline")
+// scriptedFixture is the healthy scripted provider for a scenario.
+func scriptedFixture(model, scenario string) agent.Provider {
+	if scenario == "ambiguous-commit" {
+		return agent.AmbiguousScriptedProvider{Unsafe: model == "fixture-unsafe-v1"}
+	}
+	if scenario == securityScenario {
+		return agent.SecurityScriptedProvider{}
+	}
+	if scenario != "duplicate-charge" {
+		return agent.CompanyScriptedProvider{Scenario: scenario, Unsafe: model == "fixture-unsafe-v1"}
+	}
+	return agent.ScriptedProvider{}
 }
 
-func selectProvider(name, model, scenario, baseURL string, timeout time.Duration) (agent.Provider, error) {
-	if timeout <= 0 {
-		return nil, fmt.Errorf("provider timeout must be positive")
-	}
-	switch name {
-	case "scripted":
-		if scenario == "ambiguous-commit" {
-			return agent.AmbiguousScriptedProvider{Unsafe: model == "fixture-unsafe-v1"}, nil
-		}
-		if scenario == securityScenario {
-			return agent.SecurityScriptedProvider{}, nil
-		}
-		if scenario != "duplicate-charge" {
-			return agent.CompanyScriptedProvider{Scenario: scenario, Unsafe: model == "fixture-unsafe-v1"}, nil
-		}
-		return agent.ScriptedProvider{}, nil
-	case "openai":
-		if os.Getenv("OPENAI_API_KEY") == "" {
-			return nil, fmt.Errorf("OPENAI_API_KEY is required for openai")
-		}
-		if model == "" {
-			return nil, fmt.Errorf("model is required for openai")
-		}
-		return agent.OpenAIProvider{APIKey: os.Getenv("OPENAI_API_KEY"), Model: model, Timeout: timeout}, nil
-	case "openai-compatible":
-		if baseURL == "" {
-			return nil, fmt.Errorf("openai-compatible requires --base-url or OPENAI_BASE_URL")
-		}
-		if model == "" {
-			return nil, fmt.Errorf("model is required for openai-compatible")
-		}
-		return agent.ChatCompletionsProvider{APIKey: os.Getenv("OPENAI_API_KEY"), Model: model, BaseURL: baseURL, Timeout: timeout}, nil
-	case "anthropic":
-		if os.Getenv("ANTHROPIC_API_KEY") == "" {
-			return nil, fmt.Errorf("ANTHROPIC_API_KEY is required for anthropic")
-		}
-		if model == "" {
-			return nil, fmt.Errorf("model is required for anthropic")
-		}
-		return agent.AnthropicProvider{APIKey: os.Getenv("ANTHROPIC_API_KEY"), Model: model, Timeout: timeout}, nil
-	default:
-		return nil, fmt.Errorf("unknown agent %q", name)
-	}
-}
-func emitResult(ctx context.Context, out io.Writer, s *store.Store, run store.Run, manifest compiler.Manifest) error {
+// emitResult prints a run's evaluation and analysis and returns whether the
+// evaluation passed, so a caller can turn a failed evaluation into an exit code.
+func emitResult(ctx context.Context, out io.Writer, s *store.Store, run store.Run, manifest compiler.Manifest) (bool, error) {
 	report, err := eval.Evaluate(ctx, s, run.WorldID, run.Scenario)
 	if err != nil {
-		return err
+		return false, err
 	}
 	analysis, err := eval.AnalyzeRun(ctx, s, run.ID)
 	if err != nil {
-		return err
+		return false, err
 	}
 	result := map[string]any{"run": run, "evaluation": report, "analysis": analysis}
 	if err := addSecurity(ctx, result, s, run, manifest); err != nil {
-		return err
+		return false, err
 	}
-	return emit(out, result)
+	return report.Passed, emit(out, result)
 }
 
 const securityScenario = "prompt-injection-ticket"
@@ -1097,6 +1109,20 @@ func configuredSecrets() []string {
 		secrets = append(secrets, key)
 	}
 	return secrets
+}
+
+// parseOTLPHeader parses the value of --otlp-header, one "Name: value" pair,
+// into the header map trace.Exporter sends. An empty value means no header.
+// The trace and worker commands share it so the flag means the same on both.
+func parseOTLPHeader(raw string) (map[string]string, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	name, value, found := strings.Cut(raw, ":")
+	if !found {
+		return nil, fmt.Errorf("--otlp-header must be \"Name: value\"")
+	}
+	return map[string]string{strings.TrimSpace(name): strings.TrimSpace(value)}, nil
 }
 
 // inspection keeps summary first. A map would sort keys and bury it under the raw ledger.

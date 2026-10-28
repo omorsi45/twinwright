@@ -7,6 +7,15 @@ bin/
 # CI and the contributor workflow build the CLI at the repository root.
 /twinwright
 /twinwright.exe
+# What scripts/live-model.sh writes when TW_LIVE_OUT points into the checkout. A
+# live-model report and a cassette hold a real model's prompts and answers, and
+# the figures worth keeping are quoted in docs/live-model-run.md instead.
+live-model-report.json
+*.cassette.jsonl
+# What `make perf` and `twinwright perf` write by default. A report is one
+# machine's measurement; the figures worth keeping are quoted in
+# docs/performance.md with the environment block that came with them.
+perf.json
 # The private design workspace: briefs, working specs, implementation plans and a
 # progress snapshot. Its own README always said it was ignored while every file in
 # it was tracked. Public architectural decisions live in docs/adr/ instead.

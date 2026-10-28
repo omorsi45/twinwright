@@ -18,6 +18,14 @@ help: ## show this help
 build: ## build the CLI into ./twinwright
 	go build -o twinwright ./cmd/twinwright
 
+.PHONY: demo
+demo: build ## run the 12-step scripted demo in a temporary directory (no network, no keys)
+	./twinwright demo --dir "$$(mktemp -d)/demo"
+
+.PHONY: demo-stack
+demo-stack: ## start the Compose stack and run the fleet, takeover and observability demo against it
+	./scripts/demo-stack.sh
+
 .PHONY: fmt
 fmt: ## format all Go source
 	gofmt -w .
@@ -61,8 +69,21 @@ bench-postgres: ## measure runtime primitives on SQLite and PostgreSQL
 bench-smoke: ## run every benchmark once, to prove they still compile and pass
 	go test -run '^$$' -bench . -benchtime=1x -timeout 900s ./internal/store ./internal/worker ./internal/replay
 
+.PHONY: perf
+perf: ## measure the platform workloads on SQLite into perf.json (results are documented in docs/performance.md)
+	go run ./cmd/twinwright perf --out perf.json
+
+.PHONY: gate
+gate: build ## bench the scripted suite and gate it against the approved baseline
+	./twinwright bench --suite standard --agent scripted --examples examples --out bench-candidate.json > /dev/null
+	./twinwright gate --baseline examples/bench/baselines/standard-scripted.json --candidate bench-candidate.json
+
+.PHONY: live-model
+live-model: ## run a local Ollama model on the billing world and replay it (needs TW_LIVE_MODEL; LIVE_BASE_URL optional)
+	./scripts/live-model.sh "$(LIVE_BASE_URL)" "$(TW_LIVE_MODEL)"
+
 .PHONY: up
-up: ## start PostgreSQL and an OpenTelemetry collector
+up: ## start PostgreSQL, the OpenTelemetry collector, Jaeger and Prometheus
 	docker compose up -d
 	@echo "waiting for postgres to accept connections"
 	@until docker compose exec -T postgres pg_isready -U twinwright >/dev/null 2>&1; do sleep 1; done
@@ -82,4 +103,4 @@ verify-full: check test-race test-postgres e2e e2e-postgres ## everything, inclu
 clean: ## remove build output and local databases
 	rm -f twinwright twinwright.exe
 	rm -f twinwright*.db twinwright*.db-wal twinwright*.db-shm
-	rm -f twinwright.manifest.json *.world.manifest.json bench-report.json
+	rm -f twinwright.manifest.json *.world.manifest.json bench-report.json bench-candidate.json perf.json

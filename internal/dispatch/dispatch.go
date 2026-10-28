@@ -13,6 +13,7 @@ import (
 	"twinwright/internal/behavior"
 	"twinwright/internal/chaos"
 	"twinwright/internal/compiler"
+	"twinwright/internal/crashpoint"
 	"twinwright/internal/store"
 )
 
@@ -30,6 +31,11 @@ type Dispatcher struct {
 	// local path. Clock is for deterministic lease-expiry tests.
 	Fence *store.Fence
 	Clock store.Clock
+	// Crash, when set, is offered the sites just before and just after the
+	// tool transaction commits so a harness can simulate process death at
+	// either boundary. It is never consulted on an idempotency-cache hit,
+	// because that path commits nothing.
+	Crash crashpoint.Hook
 }
 
 func (d *Dispatcher) Invoke(ctx context.Context, runID, callID, operationID string, args map[string]any) (Result, error) {
@@ -261,7 +267,22 @@ func (d *Dispatcher) Invoke(ctx context.Context, runID, callID, operationID stri
 	if _, err = tx.ExecContext(ctx, "UPDATE runs SET transcript=? WHERE id=?", string(next), runID); err != nil {
 		return Result{}, err
 	}
+	site := crashpoint.Site{RunID: runID, CallID: callID, OperationID: operationID}
+	// A crash before the commit returns with the deferred rollback still
+	// pending, so the effect and its ledger events vanish together.
+	site.Point = crashpoint.BeforeToolCommit
+	if err = crashpoint.Fire(ctx, d.Crash, site); err != nil {
+		return Result{}, err
+	}
 	if err = tx.Commit(); err != nil {
+		return Result{}, err
+	}
+	// The effect is durable from here, and so is the transcript entry, which
+	// commits in the same transaction. A crash now is recovered because the
+	// runner's pending() skips a call that already has a tool message, so the
+	// call is not dispatched again.
+	site.Point = crashpoint.AfterToolCommit
+	if err = crashpoint.Fire(ctx, d.Crash, site); err != nil {
 		return Result{}, err
 	}
 	return result, nil

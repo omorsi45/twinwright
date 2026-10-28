@@ -87,6 +87,7 @@ func (e Exporter) Export(ctx context.Context, trace Trace) (Delivery, error) {
 	}
 	delivery := Delivery{
 		Endpoint: url,
+		TraceID:  trace.TraceID,
 		Status:   response.StatusCode,
 		Bytes:    len(document),
 		Spans:    countSpans(trace),
@@ -100,9 +101,12 @@ func (e Exporter) Export(ctx context.Context, trace Trace) (Delivery, error) {
 }
 
 // Delivery is the outcome of one export, reported so a caller can prove the
-// spans actually left the process rather than only being formatted.
+// spans actually left the process rather than only being formatted. TraceID
+// names the trace the collector now holds (or refused), so a delivery can be
+// matched to a worker's log line and to a search in the collector.
 type Delivery struct {
 	Endpoint  string `json:"endpoint"`
+	TraceID   string `json:"trace_id"`
 	Delivered bool   `json:"delivered"`
 	Status    int    `json:"status"`
 	Spans     int    `json:"spans"`

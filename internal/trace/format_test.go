@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -50,6 +51,112 @@ func TestOTLPEncodesLedgerSpans(t *testing.T) {
 	}
 	if valueType(failed, "http.status") != "intValue" || valueType(spansFor(spans, "evaluation"), "passed") != "boolValue" {
 		t.Fatalf("attribute types status=%s passed=%s", valueType(failed, "http.status"), valueType(spansFor(spans, "evaluation"), "passed"))
+	}
+}
+
+// TestOTLPSpansCarryLedgerSequence ties every exported span back to the event
+// ledger: a reader of the collector can name the first and last ledger event a
+// span covers and the run it came from, without the Twinwright database.
+func TestOTLPSpansCarryLedgerSequence(t *testing.T) {
+	s := newStore(t)
+	run := execute(t, s, billingManifest(t), "duplicate-charge", "fixture-v1", store.RunOptions{FaultOperation: "listCharges"}, agent.ScriptedProvider{})
+	built := build(t, s, run.ID)
+	encoded, err := OTLP(built)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc otlpDocument
+	if err = json.Unmarshal(encoded, &doc); err != nil {
+		t.Fatal(err)
+	}
+	spans := doc.ResourceSpans[0].ScopeSpans[0].Spans
+
+	// The built tree is the source of truth for the sequence numbers.
+	want := map[string]*Span{}
+	var walk func(*Span)
+	walk = func(span *Span) {
+		want[span.SpanID] = span
+		for _, child := range span.Children {
+			walk(child)
+		}
+	}
+	walk(built.Root)
+	if len(spans) != len(want) {
+		t.Fatalf("exported %d spans, tree has %d", len(spans), len(want))
+	}
+
+	for i := range spans {
+		span := &spans[i]
+		source, ok := want[span.SpanID]
+		if !ok {
+			t.Fatalf("span %s (%s) is not in the built tree", span.SpanID, span.Name)
+		}
+		for key, wantValue := range map[string]string{
+			"twinwright.event.start_seq": strconv.Itoa(source.StartSeq),
+			"twinwright.event.end_seq":   strconv.Itoa(source.EndSeq),
+		} {
+			if got := valueType(span, key); got != "intValue" {
+				t.Fatalf("span %s: %s has type %q, want intValue", span.Name, key, got)
+			}
+			if got := attr(span, key); got != wantValue {
+				t.Fatalf("span %s: %s=%q want %q", span.Name, key, got, wantValue)
+			}
+		}
+		if got := valueType(span, "twinwright.run_id"); got != "stringValue" {
+			t.Fatalf("span %s: twinwright.run_id has type %q, want stringValue", span.Name, got)
+		}
+		if got := attr(span, "twinwright.run_id"); got != run.ID {
+			t.Fatalf("span %s: twinwright.run_id=%q want %q", span.Name, got, run.ID)
+		}
+	}
+
+	root := spansFor(spans, "run")
+	if got := attr(root, "twinwright.event.start_seq"); got != "1" {
+		t.Fatalf("root span starts at ledger seq %q, want 1", got)
+	}
+	if got := attr(root, "run.id"); got != run.ID {
+		t.Fatalf("existing attributes were dropped: run.id=%q", got)
+	}
+
+	// The correlation attributes belong to the OTLP projection only. The built
+	// trace, and so the `trace` JSON output, keeps its existing attribute set.
+	for _, span := range want {
+		for key := range span.Attributes {
+			if strings.HasPrefix(key, "twinwright.") {
+				t.Fatalf("span %s: OTLP-only attribute %q leaked into the built trace", span.Name, key)
+			}
+		}
+	}
+}
+
+// TestTraceIDForIsTheIDBuildUses keeps the exported derivation and the trace
+// that Build returns from ever disagreeing, since a worker logs the first and a
+// collector indexes the second.
+func TestTraceIDForIsTheIDBuildUses(t *testing.T) {
+	s := newStore(t)
+	run := execute(t, s, billingManifest(t), "duplicate-charge", "fixture-v1", store.RunOptions{}, agent.ScriptedProvider{})
+	built := build(t, s, run.ID)
+	if got := TraceIDFor(run.ID); got != built.TraceID {
+		t.Fatalf("TraceIDFor=%q Build=%q", got, built.TraceID)
+	}
+	if len(built.TraceID) != 32 {
+		t.Fatalf("trace id %q is not 32 hex characters", built.TraceID)
+	}
+	if TraceIDFor(run.ID) == TraceIDFor(run.ID+"-other") {
+		t.Fatal("different runs share a trace id")
+	}
+	encoded, err := OTLP(built)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc otlpDocument
+	if err = json.Unmarshal(encoded, &doc); err != nil {
+		t.Fatal(err)
+	}
+	for _, span := range doc.ResourceSpans[0].ScopeSpans[0].Spans {
+		if span.TraceID != TraceIDFor(run.ID) {
+			t.Fatalf("span %s carries trace id %q, want %q", span.Name, span.TraceID, TraceIDFor(run.ID))
+		}
 	}
 }
 

@@ -2,6 +2,7 @@ package bench
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -180,11 +181,54 @@ cases:
 	if result.Status != "error" || result.Passed {
 		t.Fatalf("status=%s passed=%v; a case with no injected crash must not pass", result.Status, result.Passed)
 	}
-	if !strings.Contains(result.Error, "completed before model turn 99") {
+	if !strings.Contains(result.Error, "before after-model-request #99") {
 		t.Fatalf("error=%q does not say the crash never happened", result.Error)
+	}
+	if !strings.Contains(result.Error, `status "completed"`) {
+		t.Fatalf("error=%q does not report the run's actual status", result.Error)
 	}
 	if result.Distributed != nil && result.Distributed.WorkerCrashed {
 		t.Error("a crash was reported when none was injected")
+	}
+}
+
+// A run that stops at its step budget did not complete, and the error has to say
+// what actually happened rather than assume the run finished.
+func TestDistributedCaseReportsThePausedStatusWhenNoCrashHappened(t *testing.T) {
+	root := filepath.Join("..", "..", "examples")
+	raw := []byte(`
+version: 1
+suite: distributed-paused
+cases:
+  - id: distributed-paused-before-crash
+    category: distributed
+    world: billing
+    scenario: duplicate-charge
+    mode: distributed
+    steps: 2
+    crash_at: 99
+    assertions: assertions/duplicate-charge.yaml
+    dimensions: [task, recovery]
+`)
+	suite, err := Parse(raw, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := Run(context.Background(), suite, Options{
+		ExamplesRoot: root,
+		WorkDir:      t.TempDir(),
+		Agent:        "scripted",
+		ProviderFor:  scriptedProviders,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := report.Cases[0]
+	if result.Status != "error" {
+		t.Fatalf("status=%s; a case with no injected crash must not pass", result.Status)
+	}
+	if !strings.Contains(result.Error, `status "paused"`) || strings.Contains(result.Error, "completed") {
+		t.Fatalf("error=%q; want the paused status, not a claim the run completed", result.Error)
 	}
 }
 
@@ -230,5 +274,46 @@ cases:
 				t.Fatalf("err=%q want it to mention %q", err, spec.wantErr)
 			}
 		})
+	}
+}
+
+// The flagship suite crashes the four-service incident at three turns. Each case
+// now runs through the crash matrix's verifier, so "recovered" means every
+// recovery invariant held rather than that the run happened to finish.
+func TestFlagshipSuiteRecoversEveryCrashCase(t *testing.T) {
+	root := filepath.Join("..", "..", "examples")
+	raw, err := os.ReadFile(filepath.Join(root, "bench", "flagship.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	suite, err := Parse(raw, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := Run(context.Background(), suite, Options{
+		ExamplesRoot: root,
+		WorkDir:      t.TempDir(),
+		Agent:        "scripted",
+		ProviderFor:  scriptedProviders,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Cases) == 0 {
+		t.Fatal("flagship suite has no cases")
+	}
+	for _, c := range report.Cases {
+		if !c.AsExpected {
+			t.Errorf("%s: status=%s as_expected=false err=%s failed=%v", c.ID, c.Status, c.Error, c.FailedChecks)
+		}
+		if c.Category != "distributed" {
+			continue
+		}
+		if c.Distributed == nil || !c.Distributed.ReplayVerified {
+			t.Errorf("%s: recovered run does not verify under replay", c.ID)
+		}
+		if c.Distributed != nil && len(c.Distributed.Violations) != 0 {
+			t.Errorf("%s: violations %v", c.ID, c.Distributed.Violations)
+		}
 	}
 }

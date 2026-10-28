@@ -3,7 +3,10 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -52,6 +55,7 @@ func TestDemo(t *testing.T) {
 			"fail the same incident on purpose",
 			"explain the failure with a counterfactual",
 			"block a prompt injection and an over-privileged request",
+			"block a regressed agent at the CI gate",
 		}
 		at := 0
 		for _, step := range want {
@@ -60,6 +64,37 @@ func TestDemo(t *testing.T) {
 				t.Fatalf("demo never reached %q (or reached it out of order)\nfull output:\n%s", step, text)
 			}
 			at += idx + len(step)
+		}
+	})
+
+	// The count is part of the claim the README and AGENTS.md make, so a step
+	// added or dropped without updating them fails here.
+	t.Run("has twelve steps", func(t *testing.T) {
+		if got := len(demoSteps()); got != 12 {
+			t.Fatalf("demo has %d steps, want 12", got)
+		}
+		if !strings.Contains(text, "=== 12/12 ") {
+			t.Fatalf("demo never printed its last step\n%s", text)
+		}
+	})
+
+	// The documents that state the count are read here, not trusted: a step added
+	// or dropped must fail until README.md and AGENTS.md say the new number.
+	t.Run("README and AGENTS.md state the step count", func(t *testing.T) {
+		n := len(demoSteps())
+		for _, doc := range []string{"../../README.md", "AGENTS.md"} {
+			raw, err := os.ReadFile(doc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !statesStepCount(string(raw), n) {
+				t.Errorf("%s does not state a demo of %d steps (%q or %d)", doc, n, stepWords[n], n)
+			}
+			for _, stale := range []int{n - 1, n + 1} {
+				if statesStepCount(string(raw), stale) {
+					t.Errorf("%s still states a demo of %d steps", doc, stale)
+				}
+			}
 		}
 	})
 
@@ -77,6 +112,7 @@ func TestDemo(t *testing.T) {
 			"stale commit refused",
 			"resourceSpans",  // the trace is real OTLP, not a prose summary
 			"counterfactual", // the failure is explained, not just reported
+			"regressed case", // the gate named the case the regression broke
 		} {
 			if !strings.Contains(text, evidence) {
 				t.Fatalf("demo output is missing the evidence %q\nfull output:\n%s", evidence, text)
@@ -205,3 +241,17 @@ func TestCounterfactualSummaryRejectsAnInterleavedBoundary(t *testing.T) {
 // The demo writes its world, database and artefacts into the directory it is
 // given, and that claim is checked as a subtest of TestDemo above, sharing the
 // single expensive run rather than performing a third one.
+
+var stepWords = map[int]string{
+	9: "nine", 10: "ten", 11: "eleven", 12: "twelve", 13: "thirteen", 14: "fourteen",
+}
+
+// statesStepCount reports whether text says "<n> steps" or "<n>-step", with n
+// spelled in words or digits, case-insensitively.
+func statesStepCount(text string, n int) bool {
+	alternatives := fmt.Sprint(n)
+	if word, ok := stepWords[n]; ok {
+		alternatives = word + "|" + alternatives
+	}
+	return regexp.MustCompile(`(?i)\b(` + alternatives + `)[ -]steps?\b`).MatchString(text)
+}

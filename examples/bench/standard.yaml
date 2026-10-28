@@ -138,10 +138,18 @@ cases:
     dimensions: [task, recovery]
 
   # Distributed cases run through the worker runtime and kill the first worker
-  # at a named model turn. Three crash points rather than one, because the
-  # boundaries differ: turn 2 dies before any tool call commits, turn 3 dies
-  # after a read, and turn 4 dies with the refund already committed, which is
-  # the delivery that must not produce a second refund.
+  # at a named crash point. Four cases rather than one, because the boundaries
+  # differ. With crash_at alone the point is after-model-request and crash_at is
+  # the model turn. The scripted agent reads before it writes, and the runner
+  # commits each requested call before the next model request, so what has
+  # committed when the worker dies is, by observation of this fixture:
+  #   turn 2: one read (getCustomer), no mutation
+  #   turn 3: two reads (getCustomer, listInvoices), no mutation
+  #   turn 4: three reads (adding listCharges), still no mutation
+  # The refund commits only before model turn 5, so none of these turn crashes
+  # follows it. The last case does, with crash_point after-tool-commit on the
+  # first createRefund: four tool calls and one mutation have committed, which
+  # is the delivery that must not produce a second refund.
   - id: distributed-crash-before-effects
     category: distributed
     world: billing
@@ -166,6 +174,18 @@ cases:
     scenario: duplicate-charge
     mode: distributed
     crash_at: 4
+    assertions: assertions/duplicate-charge.yaml
+    dimensions: [task, recovery, duplicate_effects]
+
+  - id: distributed-crash-after-refund-commit
+    category: distributed
+    world: billing
+    scenario: duplicate-charge
+    mode: distributed
+    crash_point: after-tool-commit
+    crash_operation: createRefund
+    crash_at: 1
+    expect: pass
     assertions: assertions/duplicate-charge.yaml
     dimensions: [task, recovery, duplicate_effects]
 

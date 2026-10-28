@@ -2,19 +2,37 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"log/slog"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	"twinwright/internal/agent"
 	"twinwright/internal/behavior"
+	"twinwright/internal/bench"
 	"twinwright/internal/compiler"
+	"twinwright/internal/metrics"
 	"twinwright/internal/store"
+	"twinwright/internal/trace"
+	"twinwright/internal/worker"
 )
 
 func TestBuildRunResumeInspect(t *testing.T) {
@@ -1375,6 +1393,73 @@ cases:
 	}
 }
 
+func TestVersionCommandReportsBuildProvenance(t *testing.T) {
+	var out bytes.Buffer
+	if err := runCLI([]string{"version"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("version output is not JSON: %v: %s", err, out.String())
+	}
+	// Existing fields stay; the new ones are additive.
+	for _, key := range []string{"version", "go", "platform", "schema_version", "delivery", "git_modified"} {
+		if _, ok := got[key]; !ok {
+			t.Fatalf("version output lost %q: %s", key, out.String())
+		}
+	}
+	if _, ok := got["git_modified"].(bool); !ok {
+		t.Fatalf("git_modified = %v, want a boolean", got["git_modified"])
+	}
+	if revision, present := got["git_revision"]; present {
+		if text, _ := revision.(string); text == "" {
+			t.Fatal("git_revision must be omitted rather than empty")
+		}
+	}
+}
+
+func TestBenchCLIReportIsSchemaVersionTwo(t *testing.T) {
+	examples := filepath.Join("..", "..", "examples")
+	dir := t.TempDir()
+	suitePath := filepath.Join(dir, "tiny.yaml")
+	suiteYAML := []byte(`
+version: 1
+suite: tiny
+cases:
+  - id: billing-duplicate
+    category: reasoning
+    world: billing
+    scenario: duplicate-charge
+    assertions: assertions/duplicate-charge.yaml
+    dimensions: [task]
+`)
+	if err := os.WriteFile(suitePath, suiteYAML, 0644); err != nil {
+		t.Fatal(err)
+	}
+	reportPath := filepath.Join(dir, "report.json")
+	err := runCLI([]string{"bench", "--suite-file", suitePath, "--examples", examples, "--agent", "scripted", "--seed", "11", "--db-dir", filepath.Join(dir, "dbs"), "--out", reportPath}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(reportPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := bench.DecodeReport(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.SchemaVersion != 2 || report.ContentDigest == "" || report.Environment == nil {
+		t.Fatalf("report is not self-describing: %s", data)
+	}
+	if report.Environment.Seed != 11 {
+		t.Fatalf("Seed = %d, want the --seed value", report.Environment.Seed)
+	}
+	if report.Environment.Version == "" || report.Environment.GoVersion == "" {
+		t.Fatalf("build metadata missing: %+v", report.Environment)
+	}
+}
+
 func TestShadowCLIObserveOnly(t *testing.T) {
 	examples := filepath.Join("..", "..", "examples")
 	dir := t.TempDir()
@@ -1459,5 +1544,1167 @@ func TestContainerCLILocal(t *testing.T) {
 	out.Reset()
 	if err := runCLI([]string{"container", "stop", "--config", cfgPath}, &out); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestResumeRefusesARunLeasedByAWorker proves the local path takes the same
+// fence as the fleet: a worker holding a live lease keeps the run, and resume
+// refuses instead of executing alongside it.
+func TestResumeRefusesARunLeasedByAWorker(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join("..", "..", "examples", "billing")
+	manifest := filepath.Join(dir, "manifest.json")
+	db := filepath.Join(dir, "world.db")
+	if err := runCLI([]string{"build", filepath.Join(root, "openapi.yaml"), "--out", manifest}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := runCLI([]string{"run", "duplicate-charge", "--agent", "scripted", "--manifest", manifest, "--db", db, "--enqueue"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var queued struct {
+		RunID string `json:"run_id"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &queued); err != nil || queued.RunID == "" {
+		t.Fatalf("enqueue output: %v %s", err, out.String())
+	}
+
+	ctx := context.Background()
+	s, err := store.OpenDSN(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = s.ClaimRun(ctx, "worker-a", time.Minute, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	err = runCLI([]string{"resume", queued.RunID, "--agent", "scripted", "--manifest", manifest, "--db", db}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "leased by") || !strings.Contains(err.Error(), "worker-a") {
+		t.Fatalf("resume error=%v want a refusal naming worker-a", err)
+	}
+}
+
+// TestLocalRunErrorDoesNotCallACompletedRunFailed pins the wording when the run
+// finished but its lease could not be released: the work is durable, so the
+// message must not say the run failed.
+func TestLocalRunErrorDoesNotCallACompletedRunFailed(t *testing.T) {
+	cause := errors.New("connection reset")
+	left := localRunError("R-1", errors.New("boom"))
+	if !strings.Contains(left.Error(), "run R-1 failed: ") {
+		t.Fatalf("a failed run should read as failed: %v", left)
+	}
+	done := localRunError("R-1", errors.Join(worker.ErrLeaseNotReleased, cause))
+	if strings.Contains(done.Error(), "failed") || !errors.Is(done, worker.ErrLeaseNotReleased) || !errors.Is(done, cause) {
+		t.Fatalf("completed run must not read as failed and must keep its cause: %v", done)
+	}
+}
+
+// TestLocalRunErrorSaysWhatActuallyHappened covers the two outcomes that are
+// not failures. Ctrl-C leaves a resumable run, and a refusal because another
+// owner holds the lease never started the run, so "failed" is wrong for both.
+// A lost lease also wraps context.Canceled, because losing it cancels the run's
+// context, and that one is a failure, so it must keep the failed wording.
+func TestLocalRunErrorSaysWhatActuallyHappened(t *testing.T) {
+	held := fmt.Errorf("%w: run R-1 is leased by %q until %s", store.ErrLeaseHeld, "worker-a", "2026-01-01T00:00:00Z")
+	lost := fmt.Errorf("%w: lease on run R-1 was lost during local execution: %w", store.ErrFenced, context.Canceled)
+	for _, tc := range []struct {
+		name     string
+		err      error
+		contains []string
+		excludes []string
+		is       []error
+	}{
+		{
+			name:     "interrupted",
+			err:      context.Canceled,
+			contains: []string{"run R-1 interrupted; resume it with `twinwright resume R-1`"},
+			excludes: []string{"failed"},
+			is:       []error{context.Canceled},
+		},
+		{
+			name:     "interrupted with a release that also failed",
+			err:      errors.Join(context.Canceled, errors.New("release lease on run R-1: connection reset")),
+			contains: []string{"run R-1 interrupted; resume it with `twinwright resume R-1`", "connection reset"},
+			excludes: []string{"failed"},
+			is:       []error{context.Canceled},
+		},
+		{
+			name:     "lease held by another owner",
+			err:      held,
+			contains: []string{"run R-1 not started: ", "leased by", "worker-a"},
+			excludes: []string{"failed"},
+			is:       []error{store.ErrLeaseHeld},
+		},
+		{
+			name:     "lease lost during execution",
+			err:      lost,
+			contains: []string{"run R-1 failed: "},
+			excludes: []string{"interrupted"},
+			is:       []error{store.ErrFenced, context.Canceled},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := localRunError("R-1", tc.err)
+			for _, want := range tc.contains {
+				if !strings.Contains(got.Error(), want) {
+					t.Errorf("error %q does not contain %q", got, want)
+				}
+			}
+			for _, banned := range tc.excludes {
+				if strings.Contains(got.Error(), banned) {
+					t.Errorf("error %q contains %q", got, banned)
+				}
+			}
+			for _, target := range tc.is {
+				if !errors.Is(got, target) {
+					t.Errorf("error %q no longer wraps %v", got, target)
+				}
+			}
+		})
+	}
+}
+
+func TestBenchCLITrialsFlagRepeatsLocalCases(t *testing.T) {
+	examples := filepath.Join("..", "..", "examples")
+	dir := t.TempDir()
+	suitePath := filepath.Join(dir, "tiny.yaml")
+	suiteYAML := []byte(`
+version: 1
+suite: tiny
+cases:
+  - id: billing-duplicate
+    category: reasoning
+    world: billing
+    scenario: duplicate-charge
+    assertions: assertions/duplicate-charge.yaml
+    dimensions: [task]
+`)
+	if err := os.WriteFile(suitePath, suiteYAML, 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		args   []string
+		trials int
+	}{
+		{nil, 1},
+		{[]string{"--trials", "3"}, 3},
+	} {
+		reportPath := filepath.Join(dir, "report.json")
+		args := append([]string{"bench", "--suite-file", suitePath, "--examples", examples, "--agent", "scripted", "--db-dir", filepath.Join(dir, "dbs"), "--out", reportPath}, tc.args...)
+		if err := runCLI(args, &bytes.Buffer{}); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(reportPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		report, err := bench.DecodeReport(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := report.Cases[0]
+		if got.Trials != tc.trials || got.Passes != tc.trials || got.Status != "passed" {
+			t.Fatalf("args %v: trials=%d passes=%d status=%s want %d passing trials", tc.args, got.Trials, got.Passes, got.Status, tc.trials)
+		}
+	}
+}
+
+func TestBenchCLIRefusesNonPositiveTrials(t *testing.T) {
+	examples := filepath.Join("..", "..", "examples")
+	for _, value := range []string{"0", "-1"} {
+		err := runCLI([]string{"bench", "--examples", examples, "--agent", "scripted", "--db-dir", t.TempDir(), "--trials", value}, &bytes.Buffer{})
+		if err == nil || !strings.Contains(err.Error(), "--trials must be positive") {
+			t.Errorf("--trials %s: err=%v want an error naming --trials", value, err)
+		}
+	}
+}
+
+// writeGateReport saves a minimal v2 bench report whose only case has the given
+// status, so the gate's exit codes can be driven without running a suite.
+func writeGateReport(t *testing.T, dir, name, suite, status string) string {
+	t.Helper()
+	passed := status == "passed"
+	report := bench.Report{
+		Suite: suite, SchemaVersion: 2, ContentDigest: "content-1",
+		Cases: []bench.CaseResult{{
+			ID: "refund", Status: status, Passed: passed, AsExpected: passed,
+			Trials: 1, Mutations: 1, FailedChecks: []string{"refund_once"},
+		}},
+	}
+	if passed {
+		report.Cases[0].Passes = 1
+		report.Cases[0].FailedChecks = nil
+	}
+	data, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestGateExitCodes(t *testing.T) {
+	dir := t.TempDir()
+	good := writeGateReport(t, dir, "good.json", "standard", "passed")
+	bad := writeGateReport(t, dir, "bad.json", "standard", "failed")
+	other := writeGateReport(t, dir, "other.json", "other", "passed")
+	notReport := filepath.Join(dir, "not-a-report.json")
+	if err := os.WriteFile(notReport, []byte(`{"hello":1}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	empty := filepath.Join(dir, "empty.json")
+	if err := os.WriteFile(empty, []byte(`{"suite":"standard","schema_version":2,"cases":[]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name string
+		args []string
+		want int
+	}{
+		{"identical reports", []string{"--baseline", good, "--candidate", good}, 0},
+		{"empty baseline", []string{"--baseline", empty, "--candidate", good}, 2},
+		{"regression", []string{"--baseline", good, "--candidate", bad}, 1},
+		{"missing candidate file", []string{"--baseline", good, "--candidate", filepath.Join(dir, "absent.json")}, 2},
+		{"missing baseline file", []string{"--baseline", filepath.Join(dir, "absent.json"), "--candidate", good}, 2},
+		{"not a bench report", []string{"--baseline", notReport, "--candidate", good}, 2},
+		{"suite name mismatch", []string{"--baseline", good, "--candidate", other}, 2},
+		{"baseline flag omitted", []string{"--candidate", good}, 2},
+		{"unknown flag", []string{"--baseline", good, "--candidate", good, "--bogus"}, 2},
+		{"invalid trajectory mode", []string{"--baseline", good, "--candidate", good, "--trajectory", "loud"}, 2},
+		{"tolerance out of range", []string{"--baseline", good, "--candidate", good, "--tolerance", "2"}, 2},
+		{"stray positional argument", []string{"--baseline", good, "--candidate", good, "extra"}, 2},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			err := runCLI(append([]string{"gate"}, tc.args...), &out)
+			if got := exitCode(err); got != tc.want {
+				t.Fatalf("exit code = %d (err %v), want %d", got, err, tc.want)
+			}
+			if tc.want == 0 && err != nil {
+				t.Fatalf("exit 0 must carry no error, got %v", err)
+			}
+			if tc.want == 1 {
+				var result struct {
+					Passed      bool `json:"passed"`
+					Regressions []struct {
+						Kind string `json:"kind"`
+					} `json:"regressions"`
+				}
+				if jsonErr := json.Unmarshal(out.Bytes(), &result); jsonErr != nil {
+					t.Fatalf("stdout must be the Result JSON even on a regression: %v\n%s", jsonErr, out.String())
+				}
+				if result.Passed || len(result.Regressions) != 1 || result.Regressions[0].Kind != "newly_failing" {
+					t.Fatalf("unexpected result: %+v", result)
+				}
+			}
+		})
+	}
+}
+
+func TestGateWritesMarkdownAndJUnit(t *testing.T) {
+	dir := t.TempDir()
+	good := writeGateReport(t, dir, "good.json", "standard", "passed")
+	bad := writeGateReport(t, dir, "bad.json", "standard", "failed")
+	markdown := filepath.Join(dir, "gate.md")
+	junit := filepath.Join(dir, "gate.xml")
+	var out bytes.Buffer
+	err := runCLI([]string{"gate", "--baseline", good, "--candidate", bad, "--markdown", markdown, "--junit", junit}, &out)
+	if exitCode(err) != 1 {
+		t.Fatalf("want exit 1, got %d (%v)", exitCode(err), err)
+	}
+	if data, readErr := os.ReadFile(markdown); readErr != nil || !strings.Contains(string(data), "newly_failing") {
+		t.Fatalf("markdown file: %v\n%s", readErr, data)
+	}
+	if data, readErr := os.ReadFile(junit); readErr != nil || !strings.Contains(string(data), "<testsuites") {
+		t.Fatalf("junit file: %v\n%s", readErr, data)
+	}
+
+	// PATH "-" writes to the command's output after the Result JSON.
+	out.Reset()
+	err = runCLI([]string{"gate", "--baseline", good, "--candidate", bad, "--markdown", "-", "--junit", "-"}, &out)
+	if exitCode(err) != 1 {
+		t.Fatalf("want exit 1, got %d (%v)", exitCode(err), err)
+	}
+	for _, want := range []string{`"passed": false`, "FAILED", "<testsuites"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
+func TestExitCodeDefaultsToOne(t *testing.T) {
+	if got := exitCode(errors.New("plain failure")); got != 1 {
+		t.Fatalf("an ordinary error must keep exit code 1, got %d", got)
+	}
+	if got := exitCode(nil); got != 0 {
+		t.Fatalf("no error is exit code 0, got %d", got)
+	}
+}
+
+// Every command that can reach a provider registers its flags through
+// providerFlags, so a rename or a changed default here would silently break
+// scripts that already pass --base-url or --provider-timeout.
+func TestProviderFlagsKeepTheirNamesAndDefaults(t *testing.T) {
+	t.Setenv("OPENAI_BASE_URL", "http://env.example/v1")
+	fs := flag.NewFlagSet("t", flag.ContinueOnError)
+	cfg := providerFlags(fs)
+	if err := fs.Parse(nil); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Timeout != 90*time.Second {
+		t.Fatalf("--provider-timeout defaults to %v, want 90s", cfg.Timeout)
+	}
+	if cfg.Timeout != agent.DefaultCallTimeout {
+		t.Fatalf("--provider-timeout defaults to %v, want agent.DefaultCallTimeout", cfg.Timeout)
+	}
+	if cfg.BaseURL != "http://env.example/v1" {
+		t.Fatalf("--base-url defaults to %q, want $OPENAI_BASE_URL", cfg.BaseURL)
+	}
+	if cfg.MaxOutputTokens != 0 {
+		t.Fatalf("--max-output-tokens defaults to %d, want 0 (the adapter default)", cfg.MaxOutputTokens)
+	}
+
+	fs = flag.NewFlagSet("t", flag.ContinueOnError)
+	cfg = providerFlags(fs)
+	if err := fs.Parse([]string{"--base-url", "http://flag.example/v1", "--provider-timeout", "5s", "--max-output-tokens", "321"}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.BaseURL != "http://flag.example/v1" || cfg.Timeout != 5*time.Second || cfg.MaxOutputTokens != 321 {
+		t.Fatalf("parsed config = %+v", *cfg)
+	}
+}
+
+func TestSelectProviderCarriesTheOutputCeiling(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("ANTHROPIC_API_KEY", "test-key")
+	base := providerConfig{Scenario: "duplicate-charge", Timeout: time.Second, MaxOutputTokens: 321}
+
+	cfg := base
+	cfg.Name, cfg.Model = "openai", "gpt-test"
+	if p, err := selectProvider(cfg); err != nil {
+		t.Fatal(err)
+	} else if got, ok := p.(agent.OpenAIProvider); !ok || got.MaxOutputTokens != 321 {
+		t.Fatalf("openai = %+v", p)
+	}
+	cfg = base
+	cfg.Name, cfg.Model, cfg.BaseURL = "openai-compatible", "local", "http://127.0.0.1:1/v1"
+	if p, err := selectProvider(cfg); err != nil {
+		t.Fatal(err)
+	} else if got, ok := p.(agent.ChatCompletionsProvider); !ok || got.MaxOutputTokens != 321 {
+		t.Fatalf("openai-compatible = %+v", p)
+	}
+	cfg = base
+	cfg.Name, cfg.Model = "anthropic", "claude-test"
+	if p, err := selectProvider(cfg); err != nil {
+		t.Fatal(err)
+	} else if got, ok := p.(agent.AnthropicProvider); !ok || got.MaxOutputTokens != 321 {
+		t.Fatalf("anthropic = %+v", p)
+	}
+	cfg.MaxOutputTokens = -1
+	if _, err := selectProvider(cfg); err == nil {
+		t.Fatal("a negative --max-output-tokens was accepted")
+	}
+}
+
+// cliCassetteKey is long enough to be masked. Recording needs it; replay must not.
+const cliCassetteKey = "cli-cassette-key-not-a-secret"
+
+// cassetteRun is a duplicate-charge run recorded through the CLI against a
+// scripted OpenAI-compatible server that is closed before the helper returns.
+type cassetteRun struct {
+	dir, manifest, db, cassette, runID string
+}
+
+// recordCLIRun runs `twinwright run --record-cassette` against a server that
+// answers a tool call and then a final answer, and holds the real key in the
+// environment while it does.
+func recordCLIRun(t *testing.T) cassetteRun {
+	t.Helper()
+	t.Setenv("OPENAI_API_KEY", cliCassetteKey)
+	t.Setenv("OPENAI_BASE_URL", "")
+	dir := t.TempDir()
+	r := cassetteRun{dir: dir, manifest: buildBillingManifest(t, dir), db: filepath.Join(dir, "world.db"), cassette: filepath.Join(dir, "run.cassette")}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		body, _ := io.ReadAll(req.Body)
+		if req.URL.Path != "/v1/chat/completions" || req.Header.Get("Authorization") != "Bearer "+cliCassetteKey || !strings.Contains(string(body), `"max_tokens":77`) {
+			t.Errorf("recording changed the request: path %s auth %q body %s", req.URL.Path, req.Header.Get("Authorization"), body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if !strings.Contains(string(body), `"role":"tool"`) {
+			w.Write([]byte(`{"id":"chatcmpl-1","model":"local-server-1","choices":[{"message":{"content":null,"tool_calls":[{"id":"call-1","type":"function","function":{"name":"getCharge","arguments":"{\"id\":\"CH-1002\"}"}}]},"finish_reason":"tool_calls"}]}`))
+			return
+		}
+		w.Write([]byte(`{"id":"chatcmpl-2","model":"local-server-1","choices":[{"message":{"content":"Done"},"finish_reason":"stop"}]}`))
+	}))
+	defer server.Close()
+	var out bytes.Buffer
+	err := runCLI([]string{
+		"run", "duplicate-charge", "--agent", "openai-compatible", "--model", "local", "--base-url", server.URL + "/v1",
+		"--max-output-tokens", "77", "--record-cassette", r.cassette, "--manifest", r.manifest, "--db", r.db,
+	}, &out)
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, out.String())
+	}
+	var result struct {
+		Run struct {
+			ID     string `json:"id"`
+			Status string `json:"status"`
+		} `json:"run"`
+	}
+	if err = json.Unmarshal(out.Bytes(), &result); err != nil || result.Run.Status != "completed" {
+		t.Fatalf("run output: %v\n%s", err, out.String())
+	}
+	r.runID = result.Run.ID
+	return r
+}
+
+// The server is gone and the key is not in the environment, so the verified
+// report can only have come from the cassette. The ceiling is not repeated on the
+// replay command line either: the cassette header carries it, because the
+// request bodies only hash the same if the adapter is rebuilt with it.
+func TestReplayCassetteFromCLI(t *testing.T) {
+	r := recordCLIRun(t)
+	t.Setenv("OPENAI_API_KEY", "")
+
+	var out bytes.Buffer
+	if err := runCLI([]string{"replay", r.runID, "--cassette", r.cassette, "--manifest", r.manifest, "--db", r.db}, &out); err != nil {
+		t.Fatalf("replay: %v\n%s", err, out.String())
+	}
+	var report struct {
+		Verified   bool   `json:"verified"`
+		ModelTurns int    `json:"model_turns"`
+		ToolCalls  int    `json:"tool_calls"`
+		Divergence string `json:"divergence"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &report); err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	if !report.Verified || report.ModelTurns != 2 || report.ToolCalls != 1 {
+		t.Fatalf("report = %+v", report)
+	}
+
+	data, err := os.ReadFile(r.cassette)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(string(data), "\n")
+	if want := `{"twinwright_cassette":1,"provider":"openai-compatible","model":"local","max_output_tokens":77}`; lines[0] != want {
+		t.Fatalf("header = %s, want %s", lines[0], want)
+	}
+	if strings.Contains(string(data), cliCassetteKey) || strings.Contains(string(data), "Authorization") {
+		t.Fatalf("the cassette holds a credential:\n%s", data)
+	}
+
+	// The same run still verifies without a cassette, from its own ledger.
+	out.Reset()
+	if err := runCLI([]string{"replay", r.runID, "--manifest", r.manifest, "--db", r.db}, &out); err != nil {
+		t.Fatalf("replay without a cassette: %v", err)
+	}
+}
+
+// A cassette answers one provider and model. The refusal names both sides, and
+// an unreadable or empty cassette is refused before any replay starts.
+func TestReplayCassetteRefusesWhatDoesNotMatchTheRun(t *testing.T) {
+	r := recordCLIRun(t)
+	t.Setenv("OPENAI_API_KEY", "")
+	data, err := os.ReadFile(r.cassette)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	header := lines[0]
+	cases := []struct{ name, content, want string }{
+		{"another model", strings.Replace(header, `"model":"local"`, `"model":"other"`, 1) + "\n" + strings.Join(lines[1:], "\n") + "\n", "openai-compatible/other"},
+		{"another provider", strings.Replace(header, `"openai-compatible"`, `"anthropic"`, 1) + "\n" + strings.Join(lines[1:], "\n") + "\n", "anthropic/local"},
+		{"another version", strings.Replace(header, `"twinwright_cassette":1`, `"twinwright_cassette":2`, 1) + "\n", "version 2"},
+		{"no exchanges", header + "\n", "no exchanges"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "edited.cassette")
+			if err := os.WriteFile(path, []byte(tc.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			err := runCLI([]string{"replay", r.runID, "--cassette", path, "--manifest", r.manifest, "--db", r.db}, &bytes.Buffer{})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want one that says %q", err, tc.want)
+			}
+			if tc.name == "another model" && !strings.Contains(err.Error(), "openai-compatible/local") {
+				t.Fatalf("the refusal does not name the run's own provider and model: %v", err)
+			}
+		})
+	}
+	missing := filepath.Join(t.TempDir(), "absent.cassette")
+	if err := runCLI([]string{"replay", r.runID, "--cassette", missing, "--manifest", r.manifest, "--db", r.db}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "absent.cassette") {
+		t.Fatalf("a missing cassette: %v", err)
+	}
+}
+
+// Both flags are for a provider that makes HTTP calls, and each is on exactly one
+// command: a cassette holds one run's exchanges, and bench, worker, fork and
+// resume run many runs or continue one.
+func TestCassetteFlagsAreRefusedWhereTheyMeanNothing(t *testing.T) {
+	dir := t.TempDir()
+	manifest := buildBillingManifest(t, dir)
+	db := filepath.Join(dir, "world.db")
+	cassette := filepath.Join(dir, "x.cassette")
+
+	err := runCLI([]string{"run", "duplicate-charge", "--agent", "scripted", "--record-cassette", cassette, "--manifest", manifest, "--db", db}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "--record-cassette") {
+		t.Fatalf("a scripted run was allowed to record a cassette: %v", err)
+	}
+	if _, statErr := os.Stat(cassette); statErr == nil {
+		t.Fatal("a refused --record-cassette still created the file")
+	}
+
+	err = runCLI([]string{"run", "duplicate-charge", "--agent", "openai-compatible", "--model", "local", "--base-url", "http://127.0.0.1:1/v1", "--enqueue", "--record-cassette", cassette, "--manifest", manifest, "--db", db}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "--enqueue") || !strings.Contains(err.Error(), "--record-cassette") {
+		t.Fatalf("an enqueued run was allowed to record a cassette: %v", err)
+	}
+	if _, statErr := os.Stat(cassette); statErr == nil {
+		t.Fatal("a refused --record-cassette still created the file")
+	}
+
+	var out bytes.Buffer
+	if err = runCLI([]string{"run", "duplicate-charge", "--agent", "scripted", "--manifest", manifest, "--db", db}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var started struct {
+		Run struct {
+			ID string `json:"id"`
+		} `json:"run"`
+	}
+	if err = json.Unmarshal(out.Bytes(), &started); err != nil {
+		t.Fatal(err)
+	}
+	id := started.Run.ID
+	if err = runCLI([]string{"replay", id, "--cassette", cassette, "--manifest", manifest, "--db", db}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "--cassette") {
+		t.Fatalf("a scripted run was replayed from a cassette: %v", err)
+	}
+
+	for _, args := range [][]string{
+		{"resume", id, "--record-cassette", cassette},
+		{"replay", id, "--record-cassette", cassette},
+		{"run", "duplicate-charge", "--cassette", cassette},
+		{"fork", id, "--at-event", "1", "--record-cassette", cassette},
+		{"worker", "--record-cassette", cassette},
+	} {
+		err := runCLI(append(args, "--manifest", manifest, "--db", db), &bytes.Buffer{})
+		if err == nil || !strings.Contains(err.Error(), "not defined") {
+			t.Errorf("%v: err = %v, want the flag to be unknown to that command", args[:2], err)
+		}
+	}
+}
+
+// A recording owns a file, so selectProvider, which has nowhere to hand it back,
+// refuses to open one rather than leak it.
+func TestSelectProviderDoesNotOpenARecording(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "x.cassette")
+	_, err := selectProvider(providerConfig{Name: "openai-compatible", Model: "local", BaseURL: "http://127.0.0.1:1/v1", Timeout: time.Second, RecordCassette: path})
+	if err == nil {
+		t.Fatal("selectProvider accepted a recording it cannot close")
+	}
+	if _, statErr := os.Stat(path); statErr == nil {
+		t.Fatal("the refused recording still created its file")
+	}
+}
+
+// collectedPost is one request a test collector received.
+type collectedPost struct {
+	Path   string
+	Header http.Header
+	Body   []byte
+}
+
+// testCollector is an OTLP/HTTP collector that records what it is sent and
+// answers every request with status.
+type testCollector struct {
+	*httptest.Server
+	mu    sync.Mutex
+	posts []collectedPost
+}
+
+func newTestCollector(t *testing.T, status int) *testCollector {
+	t.Helper()
+	c := &testCollector{}
+	c.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		c.mu.Lock()
+		c.posts = append(c.posts, collectedPost{Path: r.URL.Path, Header: r.Header.Clone(), Body: body})
+		c.mu.Unlock()
+		w.WriteHeader(status)
+	}))
+	t.Cleanup(c.Close)
+	return c
+}
+
+func (c *testCollector) received() []collectedPost {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]collectedPost(nil), c.posts...)
+}
+
+// traceIDs returns the distinct trace IDs across every span in a posted OTLP
+// document.
+func traceIDs(t *testing.T, post collectedPost) []string {
+	t.Helper()
+	var doc struct {
+		ResourceSpans []struct {
+			ScopeSpans []struct {
+				Spans []struct {
+					TraceID string `json:"traceId"`
+				} `json:"spans"`
+			} `json:"scopeSpans"`
+		} `json:"resourceSpans"`
+	}
+	if err := json.Unmarshal(post.Body, &doc); err != nil {
+		t.Fatalf("collector received invalid OTLP JSON: %v\n%s", err, post.Body)
+	}
+	seen := map[string]bool{}
+	var ids []string
+	for _, resource := range doc.ResourceSpans {
+		for _, scope := range resource.ScopeSpans {
+			for _, span := range scope.Spans {
+				if !seen[span.TraceID] {
+					seen[span.TraceID] = true
+					ids = append(ids, span.TraceID)
+				}
+			}
+		}
+	}
+	return ids
+}
+
+// workerOutcome mirrors the fields of worker.Outcome these tests read, so the
+// test decodes the JSON the operator sees rather than the Go struct.
+type workerOutcome struct {
+	WorkerID      string `json:"worker_id"`
+	RunID         string `json:"run_id"`
+	Disposition   string `json:"disposition"`
+	RunStatus     string `json:"run_status"`
+	TraceID       string `json:"trace_id"`
+	TraceExported bool   `json:"trace_exported"`
+}
+
+// enqueueBillingRun creates a duplicate-charge run on the queue without
+// executing it and returns its ID.
+func enqueueBillingRun(t *testing.T, manifestPath, db string) string {
+	t.Helper()
+	var out bytes.Buffer
+	if err := runCLI([]string{
+		"run", "duplicate-charge", "--manifest", manifestPath, "--db", db,
+		"--agent", "scripted", "--enqueue", "--steps", "10",
+	}, &out); err != nil {
+		t.Fatalf("run --enqueue: %v\n%s", err, out.String())
+	}
+	var created struct {
+		RunID string `json:"run_id"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &created); err != nil || created.RunID == "" {
+		t.Fatalf("enqueue output: %v\n%s", err, out.String())
+	}
+	return created.RunID
+}
+
+// drainWorker runs one worker to completion over the queue and returns its
+// outcomes.
+func drainWorker(t *testing.T, manifestPath, db string, extra ...string) []workerOutcome {
+	t.Helper()
+	args := append([]string{"worker", "--manifest", manifestPath, "--db", db, "--id", "export-worker", "--drain", "--lease-ttl", "60s"}, extra...)
+	var out bytes.Buffer
+	if err := runCLI(args, &out); err != nil {
+		t.Fatalf("worker: %v\n%s", err, out.String())
+	}
+	var result struct {
+		Outcomes []workerOutcome `json:"outcomes"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+		t.Fatalf("decode worker output: %v\n%s", err, out.String())
+	}
+	return result.Outcomes
+}
+
+func TestWorkerExportsACompletedRunsTrace(t *testing.T) {
+	dir := t.TempDir()
+	manifestPath := buildBillingManifest(t, dir)
+	db := filepath.Join(dir, "world.db")
+	collector := newTestCollector(t, http.StatusOK)
+	runID := enqueueBillingRun(t, manifestPath, db)
+
+	outcomes := drainWorker(t, manifestPath, db, "--otlp-endpoint", collector.URL, "--otlp-header", "X-Tenant: acme")
+	if len(outcomes) != 1 {
+		t.Fatalf("outcomes=%+v", outcomes)
+	}
+	outcome := outcomes[0]
+	if outcome.RunID != runID || outcome.Disposition != "finished" || outcome.RunStatus != "completed" {
+		t.Fatalf("outcome=%+v", outcome)
+	}
+	wantTraceID := trace.TraceIDFor(runID)
+	if outcome.TraceID != wantTraceID {
+		t.Fatalf("outcome trace id=%q want %q", outcome.TraceID, wantTraceID)
+	}
+	if !outcome.TraceExported {
+		t.Fatalf("outcome does not report the export: %+v", outcome)
+	}
+
+	posts := collector.received()
+	if len(posts) != 1 {
+		t.Fatalf("collector received %d posts, want 1", len(posts))
+	}
+	if posts[0].Path != "/v1/traces" || posts[0].Header.Get("X-Tenant") != "acme" {
+		t.Fatalf("post path=%q header X-Tenant=%q", posts[0].Path, posts[0].Header.Get("X-Tenant"))
+	}
+	if ids := traceIDs(t, posts[0]); len(ids) != 1 || ids[0] != wantTraceID {
+		t.Fatalf("posted trace ids=%v want [%s]", ids, wantTraceID)
+	}
+
+	// Export reads the run. Nothing about the worker or the export may reach
+	// the event ledger.
+	s, err := store.OpenDSN(context.Background(), db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	events, err := s.Events(context.Background(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		for _, banned := range []string{"export-worker", wantTraceID, "otlp", "trace_exported"} {
+			if strings.Contains(string(event.Payload), banned) || strings.Contains(event.Type, banned) {
+				t.Fatalf("ledger event %d (%s) mentions %q: %s", event.Seq, event.Type, banned, event.Payload)
+			}
+		}
+	}
+
+	// The same scripted run drained by a worker that does not export must leave
+	// the same ledger: an event written because of the export would show up as
+	// a difference in the sequence of event types.
+	plainDir := t.TempDir()
+	plainManifest := buildBillingManifest(t, plainDir)
+	plainDB := filepath.Join(plainDir, "world.db")
+	plainRunID := enqueueBillingRun(t, plainManifest, plainDB)
+	drainWorker(t, plainManifest, plainDB)
+	plain, err := store.OpenDSN(context.Background(), plainDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer plain.Close()
+	plainEvents, err := plain.Events(context.Background(), plainRunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shape := func(events []store.Event) []string {
+		out := make([]string, len(events))
+		for i, event := range events {
+			out[i] = strconv.Itoa(event.Seq) + " " + event.Type
+		}
+		return out
+	}
+	if got, want := shape(events), shape(plainEvents); !reflect.DeepEqual(got, want) {
+		t.Fatalf("exporting changed the ledger:\nwith export:    %v\nwithout export: %v", got, want)
+	}
+}
+
+func TestWorkerExportFailureDoesNotFailTheRun(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		endpoint    func(t *testing.T) (url string, posts func() int)
+		wantAttempt bool
+	}{
+		{"collector answers 500", func(t *testing.T) (string, func() int) {
+			c := newTestCollector(t, http.StatusInternalServerError)
+			return c.URL, func() int { return len(c.received()) }
+		}, true},
+		{"collector unreachable", func(t *testing.T) (string, func() int) {
+			closed := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+			url := closed.URL
+			closed.Close()
+			return url, func() int { return 0 }
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			manifestPath := buildBillingManifest(t, dir)
+			db := filepath.Join(dir, "world.db")
+			endpoint, posts := tc.endpoint(t)
+			runID := enqueueBillingRun(t, manifestPath, db)
+
+			outcomes := drainWorker(t, manifestPath, db, "--otlp-endpoint", endpoint)
+			if len(outcomes) != 1 {
+				t.Fatalf("outcomes=%+v", outcomes)
+			}
+			outcome := outcomes[0]
+			if outcome.Disposition != "finished" || outcome.RunStatus != "completed" {
+				t.Fatalf("a failed export changed the outcome: %+v", outcome)
+			}
+			if outcome.TraceExported {
+				t.Fatalf("outcome claims an export the collector refused: %+v", outcome)
+			}
+			if outcome.TraceID != trace.TraceIDFor(runID) {
+				t.Fatalf("trace id=%q want %q", outcome.TraceID, trace.TraceIDFor(runID))
+			}
+			if tc.wantAttempt && posts() != 1 {
+				t.Fatalf("collector received %d posts, want the one refused attempt", posts())
+			}
+
+			var queue bytes.Buffer
+			if err := runCLI([]string{"queue", "--db", db, "--run", runID}, &queue); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(queue.String(), `"state": "finished"`) {
+				t.Fatalf("the queue entry was not finished:\n%s", queue.String())
+			}
+		})
+	}
+}
+
+// A worker exporting traces is new behaviour, so it is opt-in by flag. The
+// environment variable that the trace command honours must not switch it on.
+func TestWorkerDoesNotExportWithoutTheFlag(t *testing.T) {
+	dir := t.TempDir()
+	manifestPath := buildBillingManifest(t, dir)
+	db := filepath.Join(dir, "world.db")
+	collector := newTestCollector(t, http.StatusOK)
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", collector.URL)
+	enqueueBillingRun(t, manifestPath, db)
+
+	outcomes := drainWorker(t, manifestPath, db)
+	if len(outcomes) != 1 || outcomes[0].Disposition != "finished" {
+		t.Fatalf("outcomes=%+v", outcomes)
+	}
+	if outcomes[0].TraceExported {
+		t.Fatalf("worker exported without --otlp-endpoint: %+v", outcomes[0])
+	}
+	if posts := collector.received(); len(posts) != 0 {
+		t.Fatalf("collector received %d posts from a worker with no --otlp-endpoint", len(posts))
+	}
+}
+
+// syncBuffer is a log sink that is safe to write from the worker's goroutines
+// and read from the test.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// A worker's warning is the only place an operator learns an export failed, so
+// it must name the trace and must not carry the credentials the export used.
+func TestWorkerExportFailureWarnsWithoutLeakingCredentials(t *testing.T) {
+	var logs syncBuffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	collector := newTestCollector(t, http.StatusForbidden)
+	const password = "endpoint-password-not-a-secret"
+	const token = "header-token-not-a-secret"
+	endpoint := strings.Replace(collector.URL, "http://", "http://collector:"+password+"@", 1)
+
+	dir := t.TempDir()
+	manifestPath := buildBillingManifest(t, dir)
+	db := filepath.Join(dir, "world.db")
+	runID := enqueueBillingRun(t, manifestPath, db)
+	outcomes := drainWorker(t, manifestPath, db, "--otlp-endpoint", endpoint, "--otlp-header", "X-Api-Key: "+token)
+	if len(outcomes) != 1 || outcomes[0].Disposition != "finished" || outcomes[0].TraceExported {
+		t.Fatalf("outcomes=%+v", outcomes)
+	}
+
+	text := logs.String()
+	warning := ""
+	for _, line := range strings.Split(text, "\n") {
+		if strings.Contains(line, "trace export failed") {
+			warning = line
+		}
+	}
+	if warning == "" {
+		t.Fatalf("no export warning was logged:\n%s", text)
+	}
+	for _, want := range []string{"level=WARN", "worker=export-worker", "run=" + runID, "trace_id=" + trace.TraceIDFor(runID), "HTTP 403"} {
+		if !strings.Contains(warning, want) {
+			t.Fatalf("warning lacks %q:\n%s", want, warning)
+		}
+	}
+	for _, secret := range []string{password, token} {
+		if strings.Contains(text, secret) {
+			t.Fatalf("a credential reached the worker log:\n%s", text)
+		}
+	}
+}
+
+// A malformed header is an operator mistake, so it fails before the worker
+// opens (and so creates) the database.
+func TestWorkerRejectsAMalformedOTLPHeaderBeforeAnyDatabaseWork(t *testing.T) {
+	dir := t.TempDir()
+	manifestPath := buildBillingManifest(t, dir)
+	db := filepath.Join(dir, "world.db")
+	var out bytes.Buffer
+	err := runCLI([]string{"worker", "--manifest", manifestPath, "--db", db, "--drain", "--otlp-endpoint", "http://127.0.0.1:1", "--otlp-header", "no-colon"}, &out)
+	if err == nil || err.Error() != `--otlp-header must be "Name: value"` {
+		t.Fatalf("err=%v", err)
+	}
+	if _, statErr := os.Stat(db); statErr == nil {
+		t.Fatal("a rejected header still created the database")
+	}
+}
+
+func TestParseOTLPHeader(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		raw     string
+		want    map[string]string
+		wantErr string
+	}{
+		{"empty means no header", "", nil, ""},
+		{"name and value", "Authorization: Bearer abc", map[string]string{"Authorization": "Bearer abc"}, ""},
+		{"whitespace is trimmed", "  X-Tenant :   acme  ", map[string]string{"X-Tenant": "acme"}, ""},
+		{"only the first colon splits", "X-Url: http://host:4318", map[string]string{"X-Url": "http://host:4318"}, ""},
+		{"no colon is rejected", "Authorization", nil, `--otlp-header must be "Name: value"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseOTLPHeader(tc.raw)
+			if tc.wantErr != "" {
+				if err == nil || err.Error() != tc.wantErr {
+					t.Fatalf("err=%v want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %v want %v", got, tc.want)
+			}
+			for key, value := range tc.want {
+				if got[key] != value {
+					t.Fatalf("got %v want %v", got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// The trace command shares the header helper with the worker. Its delivery
+// report now names the trace, and its header handling is unchanged.
+func TestTraceCommandExportSendsTheHeaderAndReportsTheTraceID(t *testing.T) {
+	dir := t.TempDir()
+	manifestPath := buildBillingManifest(t, dir)
+	db := filepath.Join(dir, "world.db")
+	runID := enqueueBillingRun(t, manifestPath, db)
+	if outcomes := drainWorker(t, manifestPath, db); len(outcomes) != 1 {
+		t.Fatalf("outcomes=%+v", outcomes)
+	}
+	collector := newTestCollector(t, http.StatusOK)
+
+	var out bytes.Buffer
+	if err := runCLI([]string{"trace", runID, "--format", "otlp", "--db", db, "--otlp-endpoint", collector.URL, "--otlp-header", "X-Tenant: acme"}, &out); err != nil {
+		t.Fatalf("trace export: %v\n%s", err, out.String())
+	}
+	var delivery struct {
+		Delivered bool   `json:"delivered"`
+		TraceID   string `json:"trace_id"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &delivery); err != nil {
+		t.Fatalf("decode delivery: %v\n%s", err, out.String())
+	}
+	if !delivery.Delivered || delivery.TraceID != trace.TraceIDFor(runID) {
+		t.Fatalf("delivery=%+v", delivery)
+	}
+	posts := collector.received()
+	if len(posts) != 1 || posts[0].Header.Get("X-Tenant") != "acme" {
+		t.Fatalf("posts=%+v", posts)
+	}
+
+	out.Reset()
+	err := runCLI([]string{"trace", runID, "--format", "otlp", "--db", db, "--otlp-endpoint", collector.URL, "--otlp-header", "no-colon"}, &out)
+	if err == nil || err.Error() != `--otlp-header must be "Name: value"` {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+// The metrics package declares the disposition label values so it can render
+// them at zero before the first claim. It cannot import the worker package, so
+// this is the one place a renamed or added disposition is caught.
+func TestMetricsDispositionLabelsMatchTheWorkerDispositions(t *testing.T) {
+	want := []string{
+		string(worker.Failed), string(worker.Fenced), string(worker.Finished), string(worker.Requeued),
+	}
+	sort.Strings(want)
+	if got := metrics.DispositionLabels(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("metrics.DispositionLabels()=%v, worker dispositions=%v", got, want)
+	}
+}
+
+// The worker command wires renewals and claim durations into the same counters
+// the endpoint serves. The run is held until the first renewal has been counted,
+// so the test sees the wiring work without depending on sleeps.
+func TestInstrumentedWorkerCountsRenewalsAndTimesEveryClaim(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "metrics.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	world, err := s.Seed(ctx, 42, "digest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var runIDs []string
+	base := time.Now().UTC().Add(-time.Minute)
+	for i := 0; i < 2; i++ {
+		run, err := s.CreateRun(ctx, world.ID, "duplicate-charge", "scripted", "fixture-v1", "task", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = s.Enqueue(ctx, run.ID, 10, base.Add(time.Duration(i)*time.Millisecond)); err != nil {
+			t.Fatal(err)
+		}
+		runIDs = append(runIDs, run.ID)
+	}
+	failing := runIDs[1]
+	renewed := make(chan struct{}, 1)
+	execute := func(execCtx context.Context, lease store.RunLease, _ store.QueueEntry) (store.Run, error) {
+		if lease.RunID == failing {
+			return store.Run{}, errors.New("provider unavailable")
+		}
+		select {
+		case <-renewed:
+			return store.Run{ID: lease.RunID, Status: "completed"}, nil
+		case <-execCtx.Done():
+			return store.Run{}, execCtx.Err()
+		case <-time.After(10 * time.Second):
+			return store.Run{}, errors.New("no renewal was counted while the run was held")
+		}
+	}
+	w := worker.New(s, execute, worker.Config{ID: "w", LeaseTTL: time.Minute, RenewEvery: 10 * time.Millisecond, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	counters := metrics.NewCounters()
+	instrumentWorker(w, counters)
+	counted := w.Config.OnRenew
+	w.Config.OnRenew = func(lease store.RunLease) {
+		counted(lease)
+		select {
+		case renewed <- struct{}{}:
+		default:
+		}
+	}
+	if err = w.Register(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []worker.Disposition{worker.Finished, worker.Requeued} {
+		outcome, err := w.ClaimAndRun(ctx)
+		if err != nil || outcome.Disposition != want {
+			t.Fatalf("outcome=%+v err=%v want %s", outcome, err, want)
+		}
+	}
+
+	body, err := metrics.Collector{Counters: counters, WorkerID: "w"}.Render(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	match := regexp.MustCompile(`twinwright_worker_lease_renewals_total\{worker="w"\} (\d+)`).FindStringSubmatch(body)
+	if match == nil {
+		t.Fatalf("no renewals sample\n%s", body)
+	}
+	if n, _ := strconv.Atoi(match[1]); n < 1 {
+		t.Fatalf("renewals=%s, want the worker's renewals to be counted\n%s", match[1], body)
+	}
+	for _, want := range []string{
+		`twinwright_worker_claims_total{worker="w"} 2`,
+		`twinwright_worker_claim_disposition_total{disposition="finished",worker="w"} 1`,
+		`twinwright_worker_claim_disposition_total{disposition="requeued",worker="w"} 1`,
+		`twinwright_worker_claim_disposition_total{disposition="failed",worker="w"} 0`,
+		`twinwright_worker_claim_disposition_total{disposition="fenced",worker="w"} 0`,
+		// Every disposition is timed, so the failed attempt counts too.
+		`twinwright_worker_run_duration_seconds_count{worker="w"} 2`,
+		`twinwright_worker_run_duration_seconds_bucket{le="+Inf",worker="w"} 2`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("metrics lack %q\n%s", want, body)
+		}
+	}
+}
+
+// The wiring test above covers the pieces; this one runs the command itself and
+// scrapes the endpoint it serves.
+func TestWorkerMetricsEndpointServesTheCompleteSet(t *testing.T) {
+	dir := t.TempDir()
+	manifestPath := buildBillingManifest(t, dir)
+	db := filepath.Join(dir, "world.db")
+	enqueueBillingRun(t, manifestPath, db)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := listener.Addr().String()
+	if err = listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	var out bytes.Buffer
+	go func() {
+		done <- workerCommand(ctx, []string{"worker", "--manifest", manifestPath, "--db", db, "--id", "metrics-worker",
+			"--poll", "20ms", "--lease-ttl", "60s", "--metrics-addr", addr}, &out)
+	}()
+	defer func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(15 * time.Second):
+			t.Error("the worker did not stop after its context was cancelled")
+		}
+	}()
+
+	scrape := func() string {
+		response, err := http.Get("http://" + addr + "/metrics")
+		if err != nil {
+			return ""
+		}
+		defer response.Body.Close()
+		body, _ := io.ReadAll(response.Body)
+		return string(body)
+	}
+	const finished = `twinwright_worker_claim_disposition_total{disposition="finished",worker="metrics-worker"} 1`
+	var body string
+	for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+		if body = scrape(); strings.Contains(body, finished) {
+			break
+		}
+	}
+	for _, want := range []string{
+		finished,
+		`twinwright_worker_claim_disposition_total{disposition="failed",worker="metrics-worker"} 0`,
+		`twinwright_worker_claim_disposition_total{disposition="fenced",worker="metrics-worker"} 0`,
+		`twinwright_worker_claim_disposition_total{disposition="requeued",worker="metrics-worker"} 0`,
+		`twinwright_worker_claims_total{worker="metrics-worker"} 1`,
+		`twinwright_worker_lease_renewals_total{worker="metrics-worker"} `,
+		`twinwright_worker_run_duration_seconds_bucket{le="+Inf",worker="metrics-worker"} 1`,
+		`twinwright_worker_run_duration_seconds_count{worker="metrics-worker"} 1`,
+		"# TYPE twinwright_worker_run_duration_seconds histogram",
+		"twinwright_queue_oldest_runnable_age_seconds 0",
+		`twinwright_worker_last_seen_age_seconds{worker="metrics-worker"} `,
+		`twinwright_queue_entries{state="finished"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("scrape lacks %q\n%s", want, body)
+		}
 	}
 }

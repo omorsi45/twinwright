@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"twinwright/internal/assertion"
 	"twinwright/internal/authz"
 	"twinwright/internal/behavior"
+	"twinwright/internal/buildinfo"
 	"twinwright/internal/chaos"
 	"twinwright/internal/compiler"
 	"twinwright/internal/dispatch"
@@ -28,11 +30,18 @@ type Options struct {
 	Model        string
 	BaseURL      string
 	Seed         *int64
-	ProviderFor  func(provider, model, scenario, baseURL string) (agent.Provider, error)
+	// Build describes the binary running the suite and is recorded in the
+	// report's environment.
+	Build       buildinfo.Info
+	ProviderFor func(provider, model, scenario, baseURL string) (agent.Provider, error)
+	// Trials is how many times each local case runs; 0 means 1. A case's own
+	// trials field wins. Distributed and counterfactual cases always run once.
+	Trials int
 }
 
 // Run executes every case in the suite.
 func Run(ctx context.Context, suite Suite, options Options) (Report, error) {
+	startedAt := time.Now().UTC()
 	if options.ProviderFor == nil {
 		return Report{}, fmt.Errorf("ProviderFor is required")
 	}
@@ -41,6 +50,9 @@ func Run(ctx context.Context, suite Suite, options Options) (Report, error) {
 	}
 	if options.Agent == "" {
 		options.Agent = "scripted"
+	}
+	if options.Trials < 0 {
+		return Report{}, fmt.Errorf("trials must not be negative, got %d", options.Trials)
 	}
 	if options.Agent == "scripted" && options.Model == "" {
 		options.Model = "fixture-v1"
@@ -56,12 +68,28 @@ func Run(ctx context.Context, suite Suite, options Options) (Report, error) {
 	if err != nil {
 		return Report{}, err
 	}
+	// A suite whose fixtures cannot be read cannot run either, so this fails
+	// the run instead of recording a digest that covers less than it claims.
+	contentDigest, err := suite.ContentDigest(options.ExamplesRoot)
+	if err != nil {
+		return Report{}, err
+	}
 	report := Report{
-		Suite:  suite.Name,
-		Digest: suite.Digest(),
-		Agent:  options.Agent,
-		Model:  options.Model,
-		Cases:  make([]CaseResult, 0, len(suite.Cases)),
+		SchemaVersion: ReportSchemaVersion,
+		Suite:         suite.Name,
+		Digest:        suite.Digest(),
+		ContentDigest: contentDigest,
+		Environment: &Environment{
+			Info:      options.Build,
+			GOOS:      runtime.GOOS,
+			GOARCH:    runtime.GOARCH,
+			NumCPU:    runtime.NumCPU(),
+			Seed:      seed,
+			StartedAt: startedAt.Format(time.RFC3339),
+		},
+		Agent: options.Agent,
+		Model: options.Model,
+		Cases: make([]CaseResult, 0, len(suite.Cases)),
 	}
 	models := map[string]bool{}
 	for _, c := range suite.Cases {
@@ -147,7 +175,97 @@ func confinedLoader(directory string) (func(string) ([]byte, error), error) {
 	}, nil
 }
 
+// caseTrials is how many times a case runs. Only a local case repeats: the
+// parser refuses a case-level value on the other modes, and an Options value is
+// ignored for them rather than failing a suite that mixes modes.
+func caseTrials(c Case, options Options) int {
+	if c.Mode != ModeLocal {
+		return 1
+	}
+	if c.Trials > 0 {
+		return c.Trials
+	}
+	if options.Trials > 0 {
+		return options.Trials
+	}
+	return 1
+}
+
+// runCase runs a case once per trial and folds the trials into one result.
 func runCase(ctx context.Context, c Case, manifests worldManifests, options Options, seed int64) CaseResult {
+	trials := caseTrials(c, options)
+	results := make([]CaseResult, 0, trials)
+	for trial := 1; trial <= trials; trial++ {
+		// A single trial keeps the historical database name. Repeats get a name
+		// per trial so each seeds and runs against fresh state.
+		dbName := c.ID + ".db"
+		if trials > 1 {
+			dbName = fmt.Sprintf("%s-%d.db", c.ID, trial)
+		}
+		results = append(results, runTrial(ctx, c, manifests, options, seed, dbName))
+	}
+	return foldTrials(results)
+}
+
+// foldTrials folds the per-trial results of one case, in trial order, into the
+// case's result. It is pure so the precedence can be tested without running
+// anything. The caller passes at least one result.
+//
+// Run identity, model, fingerprint and counts come from the first trial, so a
+// one-trial case reports exactly what it did before trials existed. WallMS is
+// the first trial's too: Summary latency percentiles read it, and a sum over
+// trials would make a --trials N run look N times slower than the same suite
+// run once.
+//
+// The verdict does not depend on trial order, because Aggregate drops errored
+// cases from every rate and an order-dependent fold would score the same
+// trials differently. A case is "failed" when any trial reached a failing
+// verdict, "error" when none failed but at least one trial stopped without a
+// verdict (a pass elsewhere cannot make the case passed, and the unscored
+// trial must not be hidden), and "passed" only when every trial passed. The
+// verdict fields (FailedChecks, Error) and VerdictTrial come from the first
+// trial of the winning kind, so the report names a real failure and says which
+// trial's database to open.
+//
+// The duplicate-effects inputs cover every trial rather than the first: a
+// retry that happened in trial 2 is still a retry, so UnsafeRetry is true if
+// any trial retried unsafely and the refund counts take the maximum.
+func foldTrials(trials []CaseResult) CaseResult {
+	result := trials[0]
+	result.Trials = len(trials)
+	passes := 0
+	failing, errored := -1, -1
+	for i, one := range trials {
+		switch {
+		case one.Status == "passed" && one.Passed:
+			passes++
+		case one.Status == "failed" && failing < 0:
+			failing = i
+		case one.Status != "failed" && errored < 0:
+			errored = i
+		}
+		result.UnsafeRetry = result.UnsafeRetry || one.UnsafeRetry
+		result.AgentRefunds = max(result.AgentRefunds, one.AgentRefunds)
+		result.DuplicateRefunds = max(result.DuplicateRefunds, one.DuplicateRefunds)
+	}
+	result.Passes = passes
+	verdict := failing
+	if verdict < 0 {
+		verdict = errored
+	}
+	if verdict >= 0 {
+		result.Status = trials[verdict].Status
+		result.Passed = false
+		result.FailedChecks = trials[verdict].FailedChecks
+		result.Error = trials[verdict].Error
+		if len(trials) > 1 {
+			result.VerdictTrial = verdict + 1
+		}
+	}
+	return result
+}
+
+func runTrial(ctx context.Context, c Case, manifests worldManifests, options Options, seed int64, dbName string) CaseResult {
 	start := time.Now()
 	result := CaseResult{ID: c.ID, Category: c.Category, Dimensions: append([]string(nil), c.Dimensions...), Status: "error", Expect: c.Expect}
 	manifest, err := manifestFor(c.World, manifests)
@@ -169,7 +287,7 @@ func runCase(ctx context.Context, c Case, manifests worldManifests, options Opti
 	}
 	model := options.Model
 	if options.Agent == "scripted" {
-		model = scriptedModel(c)
+		model = scriptedModel(c, options.Model)
 	} else if model == "" {
 		result.Error = "model is required for non-scripted agents"
 		result.WallMS = time.Since(start).Milliseconds()
@@ -182,13 +300,14 @@ func runCase(ctx context.Context, c Case, manifests worldManifests, options Opti
 		result.WallMS = time.Since(start).Milliseconds()
 		return result
 	}
+	provider = agent.WithManifest(provider, manifest)
 	runOpts, err := runOptions(c, manifest, options.ExamplesRoot)
 	if err != nil {
 		result.Error = err.Error()
 		result.WallMS = time.Since(start).Milliseconds()
 		return result
 	}
-	dbPath := filepath.Join(options.WorkDir, c.ID+".db")
+	dbPath := filepath.Join(options.WorkDir, dbName)
 	_ = os.Remove(dbPath)
 	s, err := store.Open(dbPath)
 	if err != nil {
@@ -246,6 +365,24 @@ func runCase(ctx context.Context, c Case, manifests worldManifests, options Opti
 	result.ModelTurns = run.Step
 	result.ToolCalls = countToolCalls(run.Transcript)
 
+	// The fingerprint is read for the case's own run only. A counterfactual
+	// case's database also holds fork runs, and a recovered distributed run keeps
+	// its run ID, so one run ID covers both.
+	result.Trajectory, result.Mutations, err = Fingerprint(ctx, s, run.ID)
+	if err != nil {
+		result.Error = err.Error()
+		result.WallMS = time.Since(start).Milliseconds()
+		return result
+	}
+	if c.Scenario == "prompt-injection-ticket" {
+		security, err := eval.AnalyzeSecurity(ctx, s, run.ID, manifest)
+		if err != nil {
+			result.Error = err.Error()
+			result.WallMS = time.Since(start).Milliseconds()
+			return result
+		}
+		result.SuccessfulViolations = len(security.SuccessfulViolation.EventIDs)
+	}
 	// A counterfactual case is judged on whether the analysis explains the
 	// parent's failure, not on whether the parent passed: the parent is required
 	// to fail, and Prepare refuses the case if it does not.
@@ -359,7 +496,13 @@ func manifestFor(world string, manifests worldManifests) (compiler.Manifest, err
 	}
 }
 
-func scriptedModel(c Case) string {
+// scriptedModel is the fixture a scripted case runs. Asking for the regressed
+// fixture applies it to every case: the gate check wants one deliberately
+// broken run of the whole suite, not a mix of healthy and broken cases.
+func scriptedModel(c Case, requested string) string {
+	if requested == agent.RegressedModel {
+		return requested
+	}
 	if c.Scenario == "ambiguous-commit" {
 		return "fixture-" + c.Recovery + "-v1"
 	}

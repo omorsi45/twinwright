@@ -30,11 +30,20 @@ type QueueEntry struct {
 	EnqueuedAt  string `json:"enqueued_at"`
 	AvailableAt string `json:"available_at"`
 	LastError   string `json:"last_error,omitempty"`
+	// Takeover is set by ClaimRun, never stored. It is true only when the claim
+	// displaced a lease that had expired, the state a dead worker leaves behind.
+	// A run that was requeued after an error is claimed from the runnable state
+	// and is a retry, not a takeover, however many attempts it has had.
+	Takeover bool `json:"takeover"`
 }
 
 // Enqueue makes a run claimable by any worker. Enqueueing a run that is
-// already queued resets it to runnable and clears its backoff, which is how an
-// operator retries a run that failed.
+// already queued resets it to runnable, clears its backoff and its delivery
+// count, which is how an operator retries a run that failed. The count is reset
+// because an explicit retry deserves a fresh delivery budget: left in place, a
+// run that failed at the delivery limit would be refused again on the next claim
+// without executing. Which workers held the run before stays in
+// run_ownership_log.
 func (s *Store) Enqueue(ctx context.Context, runID string, maxSteps int, now time.Time) error {
 	if maxSteps < 1 {
 		return fmt.Errorf("maxSteps must be positive")
@@ -46,11 +55,11 @@ func (s *Store) Enqueue(ctx context.Context, runID string, maxSteps int, now tim
 	if runs == 0 {
 		return fmt.Errorf("run %s does not exist", runID)
 	}
-	stamp := now.UTC().Format(time.RFC3339Nano)
+	stamp := CoordinationTime(now)
 	_, err := s.DB.ExecContext(ctx, `
 INSERT INTO work_queue(run_id,state,max_steps,attempts,enqueued_at,available_at,last_error)
 VALUES(?,?,?,0,?,?,'')
-ON CONFLICT(run_id) DO UPDATE SET state=excluded.state, max_steps=excluded.max_steps, available_at=excluded.available_at, last_error=''`,
+ON CONFLICT(run_id) DO UPDATE SET state=excluded.state, max_steps=excluded.max_steps, attempts=0, available_at=excluded.available_at, last_error=''`,
 		runID, QueueRunnable, maxSteps, stamp, stamp)
 	return err
 }
@@ -119,8 +128,8 @@ func (s *Store) claimOnce(ctx context.Context, owner string, ttl time.Duration, 
 	if s.Dialect == DialectPostgres {
 		lock = " FOR UPDATE OF q SKIP LOCKED"
 	}
-	stamp := now.UTC().Format(time.RFC3339Nano)
-	args := []any{stamp, stamp, owner, stamp}
+	stamp := CoordinationTime(now)
+	args := []any{stamp, stamp, stamp, owner, stamp}
 	// Placeholders are generated; the ids themselves are always bound values.
 	exclude := ""
 	if len(skip) > 0 {
@@ -132,8 +141,13 @@ func (s *Store) claimOnce(ctx context.Context, owner string, ttl time.Duration, 
 		exclude = "\n  AND q.run_id NOT IN (" + strings.Join(marks, ",") + ")"
 	}
 	var entry QueueEntry
+	// displaced is read from the lease row and not from the queue state. Enqueue
+	// resets a live run to runnable without touching its lease, so a claim that
+	// takes over from a dead owner can arrive through the runnable branch.
+	var displaced int
 	err = tx.QueryRowContext(ctx, `
-SELECT q.run_id, q.state, q.max_steps, q.attempts, q.enqueued_at, q.available_at
+SELECT q.run_id, q.state, q.max_steps, q.attempts, q.enqueued_at, q.available_at,
+       CASE WHEN l.owner <> '' AND l.expires_at <= ? THEN 1 ELSE 0 END
 FROM work_queue q
 LEFT JOIN run_leases l ON l.run_id = q.run_id
 WHERE q.available_at <= ?
@@ -142,7 +156,7 @@ WHERE q.available_at <= ?
   AND ( l.run_id IS NULL OR l.owner = '' OR l.owner = ? OR l.expires_at <= ? )`+exclude+`
 ORDER BY q.enqueued_at, q.run_id
 LIMIT 1`+lock, args...).
-		Scan(&entry.RunID, &entry.State, &entry.MaxSteps, &entry.Attempts, &entry.EnqueuedAt, &entry.AvailableAt)
+		Scan(&entry.RunID, &entry.State, &entry.MaxSteps, &entry.Attempts, &entry.EnqueuedAt, &entry.AvailableAt, &displaced)
 	if errors.Is(err, sql.ErrNoRows) {
 		return RunLease{}, QueueEntry{}, ErrNoWork
 	}
@@ -150,7 +164,9 @@ LIMIT 1`+lock, args...).
 		return RunLease{}, QueueEntry{}, err
 	}
 
-	takeover := entry.State == QueueLeased
+	// The same value goes to the ownership log and to the caller, so the two
+	// cannot disagree about whether this claim displaced a previous owner.
+	takeover := displaced == 1
 	lease, err := acquireRunLeaseTx(ctx, tx, s.Dialect, entry.RunID, owner, ttl, now, takeover)
 	if err != nil {
 		// entry carries the run id so the caller can skip this run and look at
@@ -168,6 +184,7 @@ LIMIT 1`+lock, args...).
 	}
 	entry.State = QueueLeased
 	entry.Attempts++
+	entry.Takeover = takeover
 	return lease, entry, nil
 }
 
@@ -191,9 +208,6 @@ func (s *Store) RequeueRun(ctx context.Context, lease RunLease, now, availableAt
 }
 
 func (s *Store) completeQueueEntry(ctx context.Context, lease RunLease, now time.Time, state, kind, reason string, availableAt time.Time) error {
-	if availableAt.IsZero() {
-		availableAt = now
-	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -204,19 +218,69 @@ func (s *Store) completeQueueEntry(ctx context.Context, lease RunLease, now time
 	if err = GuardFenceTx(ctx, tx, s.Dialect, lease.Fence(), now); err != nil {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, "UPDATE work_queue SET state=?, available_at=?, last_error=? WHERE run_id=?",
-		state, availableAt.UTC().Format(time.RFC3339Nano), reason, lease.RunID); err != nil {
+	if err = completeQueueEntryTx(ctx, tx, lease, now, state, kind, reason, availableAt); err != nil {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, "UPDATE run_leases SET owner='', expires_at=?, heartbeat_at=? WHERE run_id=? AND owner=? AND fence=?",
-		now.UTC().Format(time.RFC3339Nano), now.UTC().Format(time.RFC3339Nano), lease.RunID, lease.Owner, lease.Token); err != nil {
+	return tx.Commit()
+}
+
+// completeQueueEntryTx records a claim's end inside a transaction that has
+// already passed GuardFenceTx: the queue state, the released lease, and the
+// ownership log row.
+func completeQueueEntryTx(ctx context.Context, tx *sql.Tx, lease RunLease, now time.Time, state, kind, reason string, availableAt time.Time) error {
+	if availableAt.IsZero() {
+		availableAt = now
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE work_queue SET state=?, available_at=?, last_error=? WHERE run_id=?",
+		state, CoordinationTime(availableAt), reason, lease.RunID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE run_leases SET owner='', expires_at=?, heartbeat_at=? WHERE run_id=? AND owner=? AND fence=?",
+		CoordinationTime(now), CoordinationTime(now), lease.RunID, lease.Owner, lease.Token); err != nil {
 		return err
 	}
 	detail := map[string]any{"state": state}
 	if reason != "" {
 		detail["reason"] = reason
 	}
-	if err = appendOwnershipTx(ctx, tx, lease.RunID, kind, lease.Owner, lease.Token, now, detail); err != nil {
+	return appendOwnershipTx(ctx, tx, lease.RunID, kind, lease.Owner, lease.Token, now, detail)
+}
+
+// DeliveryLimitReason is the queue entry's last_error, and the worker's outcome
+// text, for a run that used up its deliveries without completing.
+func DeliveryLimitReason(deliveries, maxAttempts int) string {
+	return fmt.Sprintf("delivery limit: %d deliveries without completion (max attempts %d)", deliveries, maxAttempts)
+}
+
+// FailRunAtDeliveryLimit fails a run that was delivered more times than its
+// attempt bound allows without ever completing.
+//
+// MaxAttempts used to be checked only when execution returned an error. A worker
+// that dies reports nothing, so a run that kills its worker every time was taken
+// over forever. The claim count is the one signal a crash does leave behind.
+//
+// The run status, the ledger event, the queue entry, the released lease and the
+// ownership row commit together after GuardFenceTx, so a worker that lost the
+// run to a takeover cannot fail it. The ledger payload carries counts only: it
+// is the agent trajectory and never names a worker or a lease.
+func (s *Store) FailRunAtDeliveryLimit(ctx context.Context, lease RunLease, now time.Time, deliveries, maxAttempts int) error {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err = GuardFenceTx(ctx, tx, s.Dialect, lease.Fence(), now); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, "UPDATE runs SET status='failed' WHERE id=?", lease.RunID); err != nil {
+		return err
+	}
+	payload := map[string]any{"kind": "delivery_limit", "deliveries": deliveries, "max_attempts": maxAttempts}
+	if err = AppendEventTx(ctx, tx, lease.RunID, "error", payload); err != nil {
+		return err
+	}
+	reason := DeliveryLimitReason(deliveries, maxAttempts)
+	if err = completeQueueEntryTx(ctx, tx, lease, now, QueueFailed, OwnershipFailed, reason, time.Time{}); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -253,7 +317,7 @@ func (s *Store) QueueDepth(ctx context.Context) (map[string]int, error) {
 
 // RegisterWorker records a worker's presence so operators can see the fleet.
 func (s *Store) RegisterWorker(ctx context.Context, id, host string, now time.Time) error {
-	stamp := now.UTC().Format(time.RFC3339Nano)
+	stamp := CoordinationTime(now)
 	_, err := s.DB.ExecContext(ctx, `
 INSERT INTO workers(id,host,started_at,last_seen_at,claims) VALUES(?,?,?,?,0)
 ON CONFLICT(id) DO UPDATE SET host=excluded.host, last_seen_at=excluded.last_seen_at`,
@@ -263,7 +327,7 @@ ON CONFLICT(id) DO UPDATE SET host=excluded.host, last_seen_at=excluded.last_see
 
 // TouchWorker updates a worker's liveness stamp.
 func (s *Store) TouchWorker(ctx context.Context, id string, now time.Time) error {
-	_, err := s.DB.ExecContext(ctx, "UPDATE workers SET last_seen_at=? WHERE id=?", now.UTC().Format(time.RFC3339Nano), id)
+	_, err := s.DB.ExecContext(ctx, "UPDATE workers SET last_seen_at=? WHERE id=?", CoordinationTime(now), id)
 	return err
 }
 

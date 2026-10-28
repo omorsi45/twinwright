@@ -7,9 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"time"
 
 	"twinwright/internal/authz"
 	"twinwright/internal/compiler"
+	"twinwright/internal/crashpoint"
 	"twinwright/internal/dispatch"
 	"twinwright/internal/store"
 )
@@ -29,6 +31,13 @@ type Message struct {
 	RawOutput   []json.RawMessage `json:"raw_output,omitempty"`
 	RawBody     string            `json:"raw_body,omitempty"`
 	Usage       *Usage            `json:"usage,omitempty"`
+	// The provider's own account of the response, recorded so a live run can be
+	// compared with a later one. Each is omitted when empty, which is why a
+	// scripted run's ledger is byte-identical to what it was before they existed.
+	ResponseID   string `json:"response_id,omitempty"`
+	ServerModel  string `json:"server_model,omitempty"`
+	FinishReason string `json:"finish_reason,omitempty"`
+	HTTPStatus   int    `json:"http_status,omitempty"`
 	// Interruptions are the attempts that produced no turn before this one did.
 	// They live on the message because the message is what the ledger records and
 	// what a replay reads back: the recorded turn is what makes the interruption
@@ -56,6 +65,27 @@ type Runner struct {
 	// tests; nil means time.Now.
 	Fence *store.Fence
 	Clock store.Clock
+	// Crash, when set, is offered the model-call and completion boundaries so
+	// a harness can simulate process death at each. When it fires, Execute
+	// returns the crash at once and writes nothing more, as a dead process
+	// would.
+	Crash crashpoint.Hook
+	// Sleep pauses between two attempts at one model turn after a rate limit, a
+	// server error or a transport failure. It must return the context's error if
+	// the context ends first. Nil means a context-aware timer; a test supplies
+	// one so a retry costs no time. Replay from the ledger never reaches it: a
+	// replayed turn carries its interruptions already and arrives without an
+	// error. Replay through a real adapter (replay.VerifyWith) does reach it, and
+	// supplies one that returns at once.
+	Sleep func(ctx context.Context, d time.Duration) error
+}
+
+// sleep waits through the configured Sleep, or a timer when none is set.
+func (r Runner) sleep(ctx context.Context, d time.Duration) error {
+	if r.Sleep != nil {
+		return r.Sleep(ctx, d)
+	}
+	return sleepContext(ctx, d)
 }
 
 func (r Runner) Execute(ctx context.Context, runID string, maxSteps int) (store.Run, error) {
@@ -80,6 +110,11 @@ func (r Runner) Execute(ctx context.Context, runID string, maxSteps int) (store.
 		}
 		if call, ok := pending(history); ok {
 			if _, err = r.Dispatch.Invoke(ctx, runID, call.ID, call.OperationID, call.Arguments); err != nil {
+				if errors.Is(err, crashpoint.ErrCrashed) {
+					// A simulated death records nothing: no error event, no
+					// failed status.
+					return store.Run{}, err
+				}
 				payload := map[string]any{"kind": "dispatch", "call_id": call.ID, "operation_id": call.OperationID, "message": err.Error()}
 				if saveErr := r.Store.SaveStatusGuarded(ctx, r.Fence, r.Clock, runID, "failed", "error", payload); saveErr != nil {
 					return store.Run{}, fmt.Errorf("dispatch error: %v; recording error: %w", err, saveErr)
@@ -89,6 +124,9 @@ func (r Runner) Execute(ctx context.Context, runID string, maxSteps int) (store.
 			continue
 		}
 		if len(history) > 0 && history[len(history)-1].Role == "assistant" && len(history[len(history)-1].ToolCalls) == 0 {
+			if err = crashpoint.Fire(ctx, r.Crash, crashpoint.Site{Point: crashpoint.BeforeCompletion, RunID: runID, Step: run.Step}); err != nil {
+				return store.Run{}, err
+			}
 			if err = r.Store.SaveStatusGuarded(ctx, r.Fence, r.Clock, runID, "completed", "execution.completed", map[string]any{"step": run.Step}); err != nil {
 				return store.Run{}, err
 			}
@@ -105,7 +143,16 @@ func (r Runner) Execute(ctx context.Context, runID string, maxSteps int) (store.
 			return store.Run{}, err
 		}
 		request := map[string]any{"task": run.Task, "provider": run.Provider, "model": run.Model, "history": history, "operations": operations}
+		site := crashpoint.Site{RunID: runID, Step: run.Step}
+		site.Point = crashpoint.BeforeModelRequest
+		if err = crashpoint.Fire(ctx, r.Crash, site); err != nil {
+			return store.Run{}, err
+		}
 		if err = r.startModelCall(ctx, runID, request); err != nil {
+			return store.Run{}, err
+		}
+		site.Point = crashpoint.AfterModelRequest
+		if err = crashpoint.Fire(ctx, r.Crash, site); err != nil {
 			return store.Run{}, err
 		}
 		next, err := r.callProvider(ctx, run.Task, history, operations)
@@ -119,12 +166,7 @@ func (r Runner) Execute(ctx context.Context, runID string, maxSteps int) (store.
 			err = fmt.Errorf("provider returned role %q", next.Role)
 		}
 		if err == nil {
-			for _, call := range next.ToolCalls {
-				if call.ID == "" || r.Manifest.Operation(call.OperationID) == nil {
-					err = fmt.Errorf("provider returned invalid tool call")
-					break
-				}
-			}
+			err = r.validateCalls(history, next)
 		}
 		if err != nil {
 			if saveErr := r.Store.FailModelTurnGuarded(ctx, r.Fence, r.Clock, runID, next, interruptionPayloads(next.Interruptions), err.Error()); saveErr != nil {
@@ -140,31 +182,72 @@ func (r Runner) Execute(ctx context.Context, runID string, maxSteps int) (store.
 		if err = r.Store.SaveTurnGuarded(ctx, r.Fence, r.Clock, runID, run.Step+1, string(transcript), next, interruptionPayloads(next.Interruptions)); err != nil {
 			return store.Run{}, err
 		}
+		site.Point = crashpoint.AfterModelResponse
+		if err = crashpoint.Fire(ctx, r.Crash, site); err != nil {
+			return store.Run{}, err
+		}
 		used++
 	}
 }
 
+// validateCalls checks the tool calls of a turn the provider just returned.
+//
+// Every call needs an ID and a compiled operation. An ID may also be used only
+// once in a run. pending() treats a call as done once any tool message carries
+// its ID, so a reused ID would be skipped without ever being dispatched and the
+// model would never receive a result for that call. Failing the turn is the
+// only outcome that does not hide that from the model and the ledger.
+func (r Runner) validateCalls(history []Message, next Message) error {
+	seen := map[string]bool{}
+	for _, message := range history {
+		if message.Role == "assistant" {
+			for _, call := range message.ToolCalls {
+				seen[call.ID] = true
+			}
+		}
+	}
+	inTurn := map[string]bool{}
+	for _, call := range next.ToolCalls {
+		if call.ID == "" || r.Manifest.Operation(call.OperationID) == nil {
+			return fmt.Errorf("provider returned invalid tool call")
+		}
+		if inTurn[call.ID] {
+			return fmt.Errorf("provider returned invalid tool call: call ID %q appears twice in one turn", call.ID)
+		}
+		if seen[call.ID] {
+			return fmt.Errorf("provider reused call ID %q from an earlier turn", call.ID)
+		}
+		inTurn[call.ID] = true
+	}
+	return nil
+}
+
 // providerAttempts is how many times one model turn is attempted.
 //
-// Two, not more. An attempt that passed its deadline or came back cut short is
-// routinely transient, and killing a long run over the first one is the wrong
-// trade. The second failure is a different signal: whatever is wrong is not
-// something waiting again will fix, and a third attempt only delays the report
-// while spending another call. Nothing escalates silently either way, because
-// every attempt is recorded.
+// Two, not more. An attempt that passed its deadline, came back cut short, was
+// rate limited, hit a server error or lost its connection is routinely transient,
+// and killing a long run over the first one is the wrong trade. The second
+// failure is a different signal: whatever is wrong is not something waiting again
+// will fix, and a third attempt only delays the report while spending another
+// call. Nothing escalates silently either way, because every attempt is recorded.
 const providerAttempts = 2
 
 // callProvider makes up to providerAttempts attempts at one model turn and
 // returns the turn together with the attempts that produced nothing.
 //
 // Only an interrupted attempt is retried. An ordinary provider error - a rejected
-// key, a malformed request, a 500 - is returned as it always was, because a retry
+// key, a malformed request, a 400 - is returned as it always was, because a retry
 // cannot fix it and two identical failures are worse evidence than one.
+//
+// A rate limit, a server error or a transport failure is retried after a wait:
+// the server's Retry-After up to MaxRetryAfter, or one second when it named none.
+// A timeout or a truncation is retried at once. The wait goes through r.Sleep and
+// ends early, with the context's error, if the run is cancelled during it.
 //
 // A replayed turn arrives with its interruptions already on it and no error, so
 // the recorded list is what gets appended in both cases. That is what lets a run
 // that was interrupted once replay from its own ledger without the provider
-// having to be made to fail again.
+// having to be made to fail again, and without waiting out a recorded Retry-After.
 func (r Runner) callProvider(ctx context.Context, task string, history []Message, ops []compiler.Operation) (Message, error) {
 	var recorded []Interruption
 	for attempt := 1; ; attempt++ {
@@ -178,6 +261,12 @@ func (r Runner) callProvider(ctx context.Context, task string, history []Message
 		if attempt >= providerAttempts {
 			next.Interruptions = recorded
 			return next, fmt.Errorf("provider interrupted on %d of %d attempts: %w", len(recorded), providerAttempts, err)
+		}
+		if wait := interrupt.wait(); wait > 0 {
+			if sleepErr := r.sleep(ctx, wait); sleepErr != nil {
+				next.Interruptions = recorded
+				return next, sleepErr
+			}
 		}
 	}
 }

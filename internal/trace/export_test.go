@@ -67,6 +67,42 @@ func TestExporterPostsOTLPToACollector(t *testing.T) {
 	}
 }
 
+// TestDeliveryReportsTheTraceID lets an operator correlate a delivery with the
+// collector's index without re-deriving the ID, including when the collector
+// refused the spans and the delivery is the only record of the attempt.
+func TestDeliveryReportsTheTraceID(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		status    int
+		delivered bool
+	}{
+		{"accepted", http.StatusOK, true},
+		{"rejected", http.StatusForbidden, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+			}))
+			defer collector.Close()
+			built := sampleTrace()
+			delivery, err := Exporter{Endpoint: collector.URL}.Export(context.Background(), built)
+			if (err == nil) != tc.delivered {
+				t.Fatalf("err=%v delivered=%v", err, tc.delivered)
+			}
+			if delivery.TraceID != built.TraceID {
+				t.Fatalf("delivery trace id=%q want %q", delivery.TraceID, built.TraceID)
+			}
+			encoded, err := json.Marshal(delivery)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := `"trace_id":"` + built.TraceID + `"`; !strings.Contains(string(encoded), want) {
+				t.Fatalf("delivery JSON %s lacks %s", encoded, want)
+			}
+		})
+	}
+}
+
 func TestExporterAcceptsAFullTracesPath(t *testing.T) {
 	var hits int
 	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

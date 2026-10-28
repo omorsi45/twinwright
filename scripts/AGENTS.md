@@ -14,5 +14,15 @@ Applies to `scripts/`.
   unmeasured figures described in `docs/performance.md`.
 - A script change needs its relevant smoke run and must not delete
   developer data outside its own temporary workspace.
+- `live-model.sh` runs a local OpenAI-compatible model on the billing
+  world, records its HTTP exchanges and replays the run from the ledger and
+  the cassette. It is opt-in, needs a server and `TW_LIVE_MODEL`, never runs
+  in `make verify` or the fast CI lane, and its outputs hold prompts and
+  answers, so none of them is committed.
+- `demo-stack.sh` (`make demo-stack`) runs the Compose stack, two workers and
+  a takeover, and exits non-zero unless six checks read back from PostgreSQL,
+  Jaeger and Prometheus hold. It drops and recreates only the
+  `twinwright_demo_*` databases, never prints a DSN, and ends its workers and
+  its lock session in an exit trap. It leaves the stack running.
 
 From the root: `./scripts/e2e.sh` or `make bench-smoke`, as relevant.

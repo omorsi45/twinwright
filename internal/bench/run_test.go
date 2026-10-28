@@ -125,6 +125,7 @@ func TestRunStandardSuiteScripted(t *testing.T) {
 		"distributed-crash-before-effects":         "passed",
 		"distributed-crash-after-read":             "passed",
 		"distributed-crash-after-refund":           "passed",
+		"distributed-crash-after-refund-commit":    "passed",
 		"counterfactual-unsafe-retry":              "passed",
 	}
 	if len(report.Cases) != len(want) {
@@ -137,16 +138,16 @@ func TestRunStandardSuiteScripted(t *testing.T) {
 	}
 
 	// The shipped suite must actually exercise the distributed runtime rather
-	// than merely contain cases labelled distributed. Three crashes, three
-	// takeovers, three refused stale commits, and no duplicated refund.
-	if report.Summary.WorkerTakeovers != 3 {
-		t.Errorf("worker takeovers=%d want 3", report.Summary.WorkerTakeovers)
+	// than merely contain cases labelled distributed. Four crashes, four
+	// takeovers, four refused stale commits, and no duplicated refund.
+	if report.Summary.WorkerTakeovers != 4 {
+		t.Errorf("worker takeovers=%d want 4", report.Summary.WorkerTakeovers)
 	}
-	if report.Summary.FencingRejections != 3 {
-		t.Errorf("fencing rejections=%d want 3", report.Summary.FencingRejections)
+	if report.Summary.FencingRejections != 4 {
+		t.Errorf("fencing rejections=%d want 4", report.Summary.FencingRejections)
 	}
-	if report.Summary.DuplicateDeliveries != 3 {
-		t.Errorf("duplicate deliveries=%d want 3", report.Summary.DuplicateDeliveries)
+	if report.Summary.DuplicateDeliveries != 4 {
+		t.Errorf("duplicate deliveries=%d want 4", report.Summary.DuplicateDeliveries)
 	}
 	if report.Summary.ExplanationRate != 100 {
 		t.Errorf("explanation rate=%v want 100", report.Summary.ExplanationRate)
@@ -181,8 +182,24 @@ func TestRunStandardSuiteScripted(t *testing.T) {
 	if report.Summary.Errors != 0 {
 		t.Errorf("errored cases=%d want 0", report.Summary.Errors)
 	}
-	if report.Scored != 18 {
-		t.Errorf("scored=%d want 18 (20 cases less 2 negative controls)", report.Scored)
+	if report.Scored != 19 {
+		t.Errorf("scored=%d want 19 (21 cases less 2 negative controls)", report.Scored)
+	}
+	// The post-commit case is the only one that crashes after the refund has
+	// committed, so it is the one that can show a repeated refund.
+	for _, c := range report.Cases {
+		if c.ID != "distributed-crash-after-refund-commit" {
+			continue
+		}
+		if c.Distributed == nil || !c.Distributed.Takeover || !c.Distributed.ReplayVerified {
+			t.Errorf("%s: want takeover and replay verified, got %+v", c.ID, c.Distributed)
+		}
+		if c.Distributed != nil && c.Distributed.CrashPoint != "after-tool-commit" {
+			t.Errorf("%s: crash point %q want after-tool-commit", c.ID, c.Distributed.CrashPoint)
+		}
+		if c.AgentRefunds != 1 {
+			t.Errorf("%s: agent refunds=%d want 1", c.ID, c.AgentRefunds)
+		}
 	}
 	for _, c := range report.Cases {
 		if c.Category != "distributed" {
@@ -190,6 +207,9 @@ func TestRunStandardSuiteScripted(t *testing.T) {
 		}
 		if c.Distributed == nil || !c.Distributed.ReplayVerified {
 			t.Errorf("%s: recovered run does not verify under replay", c.ID)
+		}
+		if c.Distributed != nil && len(c.Distributed.Violations) != 0 {
+			t.Errorf("%s: violations %v", c.ID, c.Distributed.Violations)
 		}
 		if c.DuplicateRefunds != 1 {
 			t.Errorf("%s: refunds=%d want 1 after a duplicate delivery", c.ID, c.DuplicateRefunds)
@@ -213,14 +233,63 @@ func scriptedProviders(provider, model, scenario, baseURL string) (agent.Provide
 	if provider != "scripted" {
 		return nil, os.ErrInvalid
 	}
+	var fixture agent.Provider
 	switch scenario {
 	case "ambiguous-commit":
-		return agent.AmbiguousScriptedProvider{Unsafe: model == "fixture-unsafe-v1"}, nil
+		fixture = agent.AmbiguousScriptedProvider{Unsafe: model == "fixture-unsafe-v1"}
 	case "prompt-injection-ticket":
-		return agent.SecurityScriptedProvider{}, nil
+		fixture = agent.SecurityScriptedProvider{}
 	case "duplicate-charge":
-		return agent.ScriptedProvider{}, nil
+		fixture = agent.ScriptedProvider{}
 	default:
-		return agent.CompanyScriptedProvider{Scenario: scenario}, nil
+		fixture = agent.CompanyScriptedProvider{Scenario: scenario}
+	}
+	if model == agent.RegressedModel {
+		return agent.RegressedProvider{Inner: fixture}, nil
+	}
+	return fixture, nil
+}
+
+// The regressed fixture has to stop before a write the case's policy hides from
+// the agent as well as before one it exposes: the factory builds it without a
+// manifest, and the runner binds the case's. Were the wrapper to classify by the
+// operations an enforced policy exposes, the hidden message write would reach the
+// dispatcher and the case would fail as a denied call instead of as a regression.
+func TestRegressedModelStopsBeforeHiddenWritesUnderAnEnforcedPolicy(t *testing.T) {
+	root := filepath.Join("..", "..", "examples")
+	raw, err := os.ReadFile(filepath.Join(root, "bench", "standard.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	suite, err := Parse(raw, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enforced := map[string]bool{"security-injection-blocked": true, "security-injection-task-only": true}
+	var cases []Case
+	for _, c := range suite.Cases {
+		if enforced[c.ID] {
+			cases = append(cases, c)
+		}
+	}
+	if len(cases) != len(enforced) {
+		t.Fatalf("found %d of the %d enforced-policy cases", len(cases), len(enforced))
+	}
+	suite.Cases = cases
+	report, err := Run(context.Background(), suite, Options{
+		ExamplesRoot: root,
+		WorkDir:      t.TempDir(),
+		Agent:        "scripted",
+		Model:        agent.RegressedModel,
+		ProviderFor:  scriptedProviders,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range report.Cases {
+		// Two reads precede the first write the injected comment asks for.
+		if c.ToolCalls != 2 {
+			t.Errorf("%s made %d tool calls, want 2: the hidden write must not be attempted", c.ID, c.ToolCalls)
+		}
 	}
 }

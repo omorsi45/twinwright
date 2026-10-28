@@ -6,15 +6,44 @@ import (
 	"math"
 	"sort"
 	"strings"
+
+	"twinwright/internal/buildinfo"
 )
+
+// ReportSchemaVersion is the report layout this build writes. Version 2 added
+// SchemaVersion, ContentDigest and Environment so that a later comparison can
+// tell whether two reports measured the same suite on comparable builds.
+// Version 1 reports carry none of them.
+const ReportSchemaVersion = 2
+
+// Environment records what produced a report. A pointer on Report so a version
+// 1 report decodes with it nil instead of with a zero value that reads as a
+// real measurement.
+type Environment struct {
+	buildinfo.Info
+	GOOS      string `json:"goos"`
+	GOARCH    string `json:"goarch"`
+	NumCPU    int    `json:"num_cpu"`
+	Seed      int64  `json:"seed"`
+	StartedAt string `json:"started_at"` // RFC 3339, UTC
+}
 
 // Report is the machine-readable bench output.
 type Report struct {
-	Suite     string `json:"suite"`
-	Digest    string `json:"digest"`
-	Agent     string `json:"agent"`
-	Model     string `json:"model"`
-	Scenarios int    `json:"scenarios"`
+	// Suite stays the first field on purpose: the demo locates the JSON report
+	// inside the CLI output by its `{"suite"` prefix.
+	Suite string `json:"suite"`
+	// SchemaVersion is 1 when decoding a report written before the field existed.
+	SchemaVersion int    `json:"schema_version"`
+	Digest        string `json:"digest"`
+	// ContentDigest extends Digest over the bytes of the fixture files the
+	// suite references. Digest hashes only the case list, so an edited
+	// assertion file leaves it unchanged while changing what the suite measures.
+	ContentDigest string       `json:"content_digest"`
+	Environment   *Environment `json:"environment,omitempty"`
+	Agent         string       `json:"agent"`
+	Model         string       `json:"model"`
+	Scenarios     int          `json:"scenarios"`
 	// Scored is how many cases the compliance rates were computed over: cases
 	// that ran to a verdict and were expected to pass. Below Scenarios means
 	// negative controls, errored cases, or both were excluded.
@@ -101,6 +130,16 @@ type DistributedResult struct {
 	// that survives a crash but can no longer be audited has lost the property
 	// the project exists to provide.
 	ReplayVerified bool `json:"replay_verified"`
+	// CrashPoint is the boundary the first worker died at. A bare crash_at is
+	// reported as after-model-request, the point it has always meant.
+	CrashPoint string `json:"crash_point"`
+	// CrashOperation is the tool operation the crash was narrowed to, if any.
+	CrashOperation string `json:"crash_operation,omitempty"`
+	// Occurrence is which crossing of CrashPoint killed the worker.
+	Occurrence int `json:"occurrence"`
+	// Violations are the recovery invariants the crash matrix's verifier found
+	// broken. A case with any is an error case, not a measurement.
+	Violations []string `json:"violations,omitempty"`
 }
 
 // CounterfactualResult records what an intervention analysis found. The parent
@@ -120,16 +159,20 @@ type CounterfactualResult struct {
 
 // CaseResult is one case outcome.
 type CaseResult struct {
-	ID               string   `json:"id"`
-	Category         string   `json:"category"`
-	Status           string   `json:"status"`
-	RunID            string   `json:"run_id,omitempty"`
-	Model            string   `json:"model,omitempty"`
-	FailedChecks     []string `json:"failed_checks,omitempty"`
-	ToolCalls        int      `json:"tool_calls"`
-	ModelTurns       int      `json:"model_turns"`
-	WallMS           int64    `json:"wall_ms"`
-	DuplicateRefunds int      `json:"duplicate_refunds,omitempty"`
+	ID           string   `json:"id"`
+	Category     string   `json:"category"`
+	Status       string   `json:"status"`
+	RunID        string   `json:"run_id,omitempty"`
+	Model        string   `json:"model,omitempty"`
+	FailedChecks []string `json:"failed_checks,omitempty"`
+	ToolCalls    int      `json:"tool_calls"`
+	ModelTurns   int      `json:"model_turns"`
+	// WallMS is the wall time of the run in milliseconds. For a case with
+	// several trials it is the first trial's time, not the sum, so it stays
+	// comparable with a one-trial run and the latency percentiles are not
+	// inflated by the trial count.
+	WallMS           int64 `json:"wall_ms"`
+	DuplicateRefunds int   `json:"duplicate_refunds,omitempty"`
 	// AgentRefunds is how many refunds the agent itself committed, read from the
 	// ledger rather than from the refunds table. It exists because
 	// DuplicateRefunds counts every row in the world and so cannot tell the
@@ -161,6 +204,32 @@ type CaseResult struct {
 	// Counterfactual is set for mode: counterfactual cases only, for the same
 	// reason.
 	Counterfactual *CounterfactualResult `json:"counterfactual,omitempty"`
+
+	// Trajectory is the case's tool calls in ledger order, with the status each
+	// answered. Together with Mutations and SuccessfulViolations it is the
+	// case's behavioural fingerprint, so a regression gate can compare a
+	// candidate with a baseline without reopening any database. For a repeated
+	// case it is the first trial's.
+	Trajectory []Step `json:"trajectory,omitempty"`
+	// Mutations is how many state changes the agent's own calls committed. It is
+	// always present. Zero is a measurement only for a case that reached a
+	// verdict; an errored case stopped early and may report zero for that
+	// reason.
+	Mutations int `json:"mutations"`
+	// SuccessfulViolations counts the accepted cross-customer lookups and the
+	// accepted messaging.postMessage calls, as eval.AnalyzeSecurity does. It is
+	// measured for the prompt-injection scenario only.
+	SuccessfulViolations int `json:"successful_violations,omitempty"`
+	// Trials is how many times the case ran and Passes how many of those runs
+	// passed. Status is "passed" only when Passes equals Trials. Both are always
+	// present so a reader never has to guess whether 0 means unmeasured.
+	Trials int `json:"trials"`
+	Passes int `json:"passes"`
+	// VerdictTrial is the 1-based trial whose FailedChecks or Error this result
+	// reports. It is set only when Trials is above one and a trial did not pass,
+	// and names the first failing trial for a failed case and the first errored
+	// trial for an errored one, so a reader can open that trial's database.
+	VerdictTrial int `json:"verdict_trial,omitempty"`
 }
 
 // Aggregate fills Summary and category counts from Cases, and sets each case's
@@ -349,6 +418,20 @@ func (r Report) FormatText() string {
 	if r.Summary.Errors > 0 {
 		fmt.Fprintf(&b, "Errored Cases            %5d\n", r.Summary.Errors)
 	}
+	// A repeated case is listed with its pass count, because the rates above
+	// count it once and "failed" alone hides whether it failed 1 trial in 5 or 5
+	// in 5.
+	repeated := false
+	for _, c := range r.Cases {
+		if c.Trials <= 1 {
+			continue
+		}
+		if !repeated {
+			fmt.Fprintf(&b, "Repeated cases (passes/trials):\n")
+			repeated = true
+		}
+		fmt.Fprintf(&b, "  %-40s %d/%d\n", c.ID, c.Passes, c.Trials)
+	}
 	fmt.Fprintf(&b, "Median Tool Calls        %5.1f\n", r.Summary.MedianToolCalls)
 	fmt.Fprintf(&b, "Median Latency           %5.1f ms\n", r.Summary.MedianLatencyMS)
 	if excluded := r.Scenarios - r.Scored; excluded > 0 {
@@ -391,6 +474,9 @@ func DecodeReport(data []byte) (Report, error) {
 	}
 	if report.Suite == "" || report.Cases == nil {
 		return Report{}, fmt.Errorf("not a bench report")
+	}
+	if report.SchemaVersion == 0 {
+		report.SchemaVersion = 1
 	}
 	return report, nil
 }

@@ -6,8 +6,13 @@
 // unit of work is attempted again. Two properties make the repeat safe, and
 // neither of them is exactly-once delivery, which this package does not claim:
 //
-//   - Tool effects are idempotent by call ID. A repeated tool call returns the
-//     result recorded the first time instead of committing a second effect.
+//   - A tool call's effect, its ledger events, its saved result and its
+//     transcript entry commit in one fenced transaction. Resume dispatches only
+//     calls that have no tool message in the transcript, so a committed call is
+//     not presented again. The call-ID cache is a second guard: it answers a
+//     repeated dispatch of the same call with the recorded result instead of a
+//     second effect. Model calls are not covered; a crash before a response is
+//     recorded repeats the provider call. ADR 0029 has the full account.
 //   - Durable writes are fenced. A worker whose lease lapsed cannot commit
 //     after a newer worker owns the run, so a process that stalls and wakes up
 //     later cannot corrupt the run it lost.
@@ -22,6 +27,7 @@ import (
 	"time"
 
 	"twinwright/internal/store"
+	"twinwright/internal/trace"
 )
 
 // Defaults chosen so a renewal has two chances to land before a lease lapses.
@@ -54,13 +60,32 @@ type Config struct {
 	PollInterval time.Duration
 	// Backoff delays a requeued run so a failing run cannot spin.
 	Backoff time.Duration
-	// MaxAttempts bounds retries before a run is marked failed. At-least-once
-	// delivery without a bound is an infinite retry loop.
+	// MaxAttempts bounds deliveries before a run is marked failed, including
+	// deliveries whose worker crashed and reported nothing. A claim beyond it
+	// settles the run without executing it. At-least-once delivery without a
+	// bound is an infinite retry loop.
 	MaxAttempts int
 	// Clock is for deterministic tests; nil means time.Now.
 	Clock store.Clock
 	// Logger defaults to slog.Default.
 	Logger *slog.Logger
+	// ExportTrace, when set, sends the trace of a run this worker has just
+	// finished as completed. Nil means no export. It runs after the queue entry
+	// is finished and before the claim is observed and logged, under a context
+	// bounded by trace.DefaultExportTimeout.
+	//
+	// The export is best effort. Its error is logged at warn level and never
+	// changes the claim's disposition: the run is complete and recorded, and a
+	// collector outage must not requeue or fail it. The hook reads the run and
+	// writes nothing to the ledger. Its error text reaches the log, so the hook
+	// is responsible for keeping credentials out of it.
+	ExportTrace func(ctx context.Context, runID string) error
+	// OnRenew, when set, is called with the renewed lease after each successful
+	// lease renewal. A renewal the store refuses does not call it. It runs on
+	// the renewal goroutine while the run executes, so it must be quick and safe
+	// for concurrent use; the metrics counters are. It observes liveness only and
+	// must not write to the ledger: lease renewals are ownership bookkeeping.
+	OnRenew func(store.RunLease)
 }
 
 func (c Config) withDefaults() Config {
@@ -137,6 +162,14 @@ type Outcome struct {
 	Takeover    bool          `json:"takeover"`
 	Duration    time.Duration `json:"duration_ns"`
 	Err         string        `json:"error,omitempty"`
+	// TraceID names the run's trace in a collector. It is derived from the run
+	// ID, so it is set for every outcome that has a run, whether or not a trace
+	// was exported.
+	TraceID string `json:"trace_id"`
+	// TraceExported is true when the worker delivered the run's trace to the
+	// collector. It stays false when export is not configured, when the claim
+	// did not end finished with a completed run, and when the export failed.
+	TraceExported bool `json:"trace_exported,omitempty"`
 }
 
 // New returns a worker with defaults applied.
@@ -161,8 +194,16 @@ func (w *Worker) ClaimAndRun(ctx context.Context) (Outcome, error) {
 	if err != nil {
 		return Outcome{WorkerID: w.Config.ID}, err
 	}
-	outcome := Outcome{WorkerID: w.Config.ID, RunID: lease.RunID, Fence: lease.Token, Attempt: entry.Attempts, Takeover: entry.Attempts > 1}
+	outcome := Outcome{WorkerID: w.Config.ID, RunID: lease.RunID, Fence: lease.Token, Attempt: entry.Attempts, Takeover: entry.Takeover,
+		TraceID: trace.TraceIDFor(lease.RunID)}
 	started := now
+
+	// A crash reports no error, so the retry bound in the error path below never
+	// sees a run that kills its worker. Every claim counts as a delivery, and a
+	// run past its bound is settled here without executing it again.
+	if entry.Attempts > w.Config.MaxAttempts {
+		return w.settleOverDelivered(ctx, lease, entry, outcome)
+	}
 
 	// Renewal runs alongside execution. If the lease cannot be renewed the run
 	// has moved on, so the execution context is cancelled: continuing would
@@ -223,8 +264,56 @@ func (w *Worker) ClaimAndRun(ctx context.Context) (Outcome, error) {
 		if err = w.Store.FinishRun(ctx, lease, w.Config.Clock.Now()); err != nil {
 			return w.observe(outcome), fmt.Errorf("mark run finished: %w", err)
 		}
+		outcome = w.exportTrace(ctx, outcome)
 	}
 	return w.observe(outcome), nil
+}
+
+// settleOverDelivered ends a claim for a run that has been delivered more times
+// than MaxAttempts allows. A run that already completed lost only its final
+// bookkeeping to a crash, so it is finished; anything else is failed.
+func (w *Worker) settleOverDelivered(ctx context.Context, lease store.RunLease, entry store.QueueEntry, outcome Outcome) (Outcome, error) {
+	run, err := w.Store.Run(ctx, lease.RunID)
+	if err != nil {
+		return w.observe(outcome), fmt.Errorf("read run past delivery limit: %w", err)
+	}
+	outcome.RunStatus = run.Status
+	if run.Status == "completed" {
+		outcome.Disposition = Finished
+		if err = w.Store.FinishRun(ctx, lease, w.Config.Clock.Now()); err != nil {
+			return w.observe(outcome), fmt.Errorf("mark run finished: %w", err)
+		}
+		return w.observe(w.exportTrace(ctx, outcome)), nil
+	}
+	outcome.Disposition = Failed
+	outcome.Err = store.DeliveryLimitReason(entry.Attempts, w.Config.MaxAttempts)
+	if err = w.Store.FailRunAtDeliveryLimit(ctx, lease, w.Config.Clock.Now(), entry.Attempts, w.Config.MaxAttempts); err != nil {
+		return w.observe(outcome), fmt.Errorf("fail run at delivery limit: %w", err)
+	}
+	outcome.RunStatus = "failed"
+	return w.observe(outcome), nil
+}
+
+// exportTrace sends the trace of a run this claim finished as completed, when
+// the worker was given an exporter. A run paused at its step budget, a failed
+// attempt and a fenced claim all skip it: none of them leaves a finished run
+// whose trace is complete. Called only after the queue entry is finished, so a
+// failed FinishRun never exports for a claim that did not end.
+//
+// A failure is logged and otherwise ignored; see Config.ExportTrace.
+func (w *Worker) exportTrace(ctx context.Context, outcome Outcome) Outcome {
+	if w.Config.ExportTrace == nil || outcome.Disposition != Finished || outcome.RunStatus != "completed" {
+		return outcome
+	}
+	exportCtx, cancel := context.WithTimeout(ctx, trace.DefaultExportTimeout)
+	defer cancel()
+	if err := w.Config.ExportTrace(exportCtx, outcome.RunID); err != nil {
+		w.Config.Logger.Warn("trace export failed",
+			"worker", outcome.WorkerID, "run", outcome.RunID, "trace_id", outcome.TraceID, "error", err)
+		return outcome
+	}
+	outcome.TraceExported = true
+	return outcome
 }
 
 func (w *Worker) observe(outcome Outcome) Outcome {
@@ -234,7 +323,7 @@ func (w *Worker) observe(outcome Outcome) Outcome {
 	w.Config.Logger.Info("claim finished",
 		"worker", outcome.WorkerID, "run", outcome.RunID, "fence", outcome.Fence,
 		"attempt", outcome.Attempt, "disposition", string(outcome.Disposition),
-		"run_status", outcome.RunStatus, "error", outcome.Err)
+		"run_status", outcome.RunStatus, "trace_id", outcome.TraceID, "error", outcome.Err)
 	return outcome
 }
 
@@ -261,6 +350,9 @@ func (w *Worker) renew(ctx context.Context, lease store.RunLease, cancel context
 				return
 			}
 			current = renewed
+			if w.Config.OnRenew != nil {
+				w.Config.OnRenew(renewed)
+			}
 			if err = w.Store.TouchWorker(ctx, w.Config.ID, w.Config.Clock.Now()); err != nil && ctx.Err() == nil {
 				w.Config.Logger.Warn("worker heartbeat failed", "worker", w.Config.ID, "error", err)
 			}
