@@ -71,9 +71,11 @@ one that admits a gap.
   covers seven named boundaries across three scenarios, and the real-process test
   kills one process at a time at four points, so it does not show concurrent
   multi-process contention on one SQLite file. `after-completion` is simulated by
-  skipping `FinishRun`. The PostgreSQL matrix and real-process tests run only when
-  a DSN is set, in the Integration workflow, and had not run against a server when
-  this was written. `fork`, `counterfactual`, the non-distributed `bench`
+  skipping `FinishRun`. The PostgreSQL matrix and the PostgreSQL real-process test run
+  only when a DSN is set. The `postgres` job of the Integration workflow sets one and
+  runs the whole suite against PostgreSQL 16 and 17; it passed on every Integration
+  run of this branch on 2026-10-28, so those tests have run against a server there.
+  `fork`, `counterfactual`, the non-distributed `bench`
   modes and the shadow simulation execute their own new runs without a lease.
 - **The metrics endpoint is unauthenticated** and off by default. Bind it to
   loopback.

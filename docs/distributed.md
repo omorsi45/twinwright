@@ -172,9 +172,10 @@ What each test is:
   refused for a new call and for an already committed one.
 - `TestCrashMatrixPostgres` runs the first and last occurrence of each point on
   PostgreSQL when `TWINWRIGHT_TEST_POSTGRES_DSN` is set. It is skipped without a
-  server and runs in the Integration workflow. It had not run against a server
-  when this section was written, so the PostgreSQL half of the table is
-  unproven until it has.
+  server. The `postgres` job of the Integration workflow sets the DSN and runs
+  `go test -count=1 ./...` against PostgreSQL 16 and 17, so every PostgreSQL-gated test
+  runs there. That job passed on every Integration run of this branch on 2026-10-28,
+  so the PostgreSQL half of the table has been run against a server.
 - `TestRealProcessDeathIsRecovered` (unix only) re-executes the test binary as a
   worker that sends itself `SIGKILL` at the crash point, so the database has to
   cope with a client that vanished, possibly mid-transaction. It covers four

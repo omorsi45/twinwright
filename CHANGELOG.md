@@ -59,7 +59,12 @@ database written by a newer build is refused rather than downgraded.
   `deploy/prometheus.yml` now scrapes both ports. Delivery is still at-least-once: the
   takeover re-executes the run from the ledger, and the demo adds nothing to the ledger
   beyond normal runs. A new Integration job, `demo-stack`, runs `make demo-stack` on
-  every Integration trigger; its CI result is not recorded here.
+  every Integration trigger. On 2026-10-28 it passed on its first run on GitHub
+  Actions, with all six checks: 8 of 8 runs completed, the ownership log showed
+  demo-worker-b taking over demo-worker-a's lease,
+  `twinwright_worker_takeovers_total{worker="demo-worker-b"}` was 1 in Prometheus,
+  both workers were scraped, 8 of 8 traces were queryable in Jaeger, and the
+  benchmark gate passed.
 - **Measured platform results, a methodology, and ADR 0034.** Two `twinwright perf`
   reports are committed unchanged in `docs/benchmarks/`, one for SQLite on a Windows
   PC under WSL2 and one for PostgreSQL 17 on a GitHub runner, each with three trials.
@@ -231,14 +236,16 @@ database written by a newer build is refused rather than downgraded.
   recovery. `TestCrashMatrixSQLite` runs 120 cases over three scenarios
   (`duplicate-charge` 25, `ambiguous-commit` 15, `company-incident` 80) with zero
   violations; `TestCrashMatrixPostgres` runs the first and last occurrence of each
-  point when `TWINWRIGHT_TEST_POSTGRES_DSN` is set and had not run against a
-  server when this was written. `TestRealProcessDeathIsRecovered` (unix)
+  point when `TWINWRIGHT_TEST_POSTGRES_DSN` is set. The `postgres` job of the
+  Integration workflow sets it and runs `go test -count=1 ./...` against PostgreSQL 16
+  and 17, so this test ran against a server there, and the job passed on every
+  Integration run of this branch on 2026-10-28. `TestRealProcessDeathIsRecovered` (unix)
   SIGKILLs a re-executed test binary at `after-model-request` #2,
   `after-model-response` #3, and `before-tool-commit` and `after-tool-commit` on
   the first `createRefund`, then recovers with a second worker;
   `TestRealProcessDeathIsRecoveredPostgres` covers the two tool-commit points
-  against a server. `after-completion` is simulated by skipping `FinishRun`. See
-  ADR 0029.
+  against a server, and the same job runs it. `after-completion` is simulated by
+  skipping `FinishRun`. See ADR 0029.
 
   **`bench` distributed cases name a crash boundary.** Distributed mode now runs on
   the crash matrix and accepts `crash_point` and `crash_operation`
@@ -299,8 +306,11 @@ database written by a newer build is refused rather than downgraded.
   starts the pinned `ollama/ollama:0.40.11`, pulls `qwen2.5:1.5b`, runs the script,
   stops the container, replays from the cassette with the server gone, and uploads
   the report and the cassette as artifacts. The script ran against that image on a
-  developer machine and the job's steps were run in order there; the job had not
-  run on GitHub Actions when this was written. The local run of the script is
+  developer machine and the job's steps were run in order there. The job passed on
+  GitHub Actions on 2026-10-28, on its first run and on every run since: it recorded
+  with `qwen2.5:1.5b`, verified the ledger replay and the cassette replay, then
+  verified a second cassette replay with the server stopped. The model's evaluation
+  verdict is reported there and never gates. The local run of the script is
   recorded in `docs/live-model-run.md`: the evaluation failed and both replays
   verified. See ADR 0031.
 - **Opt-in live provider tests.** `TestLiveOpenAIToolCall`
@@ -367,8 +377,9 @@ database written by a newer build is refused rather than downgraded.
   endpoint and Jaeger's UI port, runs the two tests, prints `docker compose logs` on
   failure and removes the stack. The stack has no TLS and no authentication, every
   published port is on loopback, and the gated metrics listener binds `0.0.0.0`
-  only in that test. The job had not run on GitHub Actions when this was written;
-  the two tests passed against the stack on a developer machine. See ADR 0032.
+  only in that test. The job passed on GitHub Actions on 2026-10-28: the spans were
+  queried from Jaeger by trace ID, and a real Prometheus scrape and query succeeded.
+  The two tests had also passed against the stack on a developer machine. See ADR 0032.
 
 ### Fixed
 
