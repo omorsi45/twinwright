@@ -215,7 +215,7 @@ uploads both files as the artifact `perf-postgres17`.
   what was read off the machine or, for the runner, from its `runner.txt`.
 - **The database address is never recorded.** The report names the backend (`sqlite`
   or `postgres`), not the DSN, and an error from a failed run has the DSN removed
-  from its text.
+  from its text, including when the DSN is not a valid URL (`TestRunNeverPrintsAMalformedDSN`).
 - **Where published figures come from.** A figure in the Results section is copied
   from a report committed unchanged in `docs/benchmarks/`. The file name states the
   date and the machine. `TestBenchmarkDocsMatchTheirReports` reads those reports and

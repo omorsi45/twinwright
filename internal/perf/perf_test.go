@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -351,6 +352,36 @@ func TestConfigJSONUsesMillisecondsAndOmitsPrivateFields(t *testing.T) {
 	}
 }
 
+// malformedDSNs are DSNs whose password holds a reserved character that was not
+// percent-encoded, so url.Parse rejects them and the error it builds quotes the
+// part of the string it choked on. Each one makes the underlying error carry the
+// password, which is the only input on which the scrubber has anything to do:
+// pgx's own connection errors never contain it.
+var malformedDSNs = map[string]struct{ dsn, password string }{
+	"slash":             {"postgres://perf:hunter2/secret@127.0.0.1:1/perf?sslmode=disable", "hunter2/secret"},
+	"hash":              {"postgres://perf:hunter2#secret@127.0.0.1:1/perf?sslmode=disable", "hunter2#secret"},
+	"question mark":     {"postgres://perf:hunter2?secret@127.0.0.1:1/perf?sslmode=disable", "hunter2?secret"},
+	"bad escape":        {"postgres://perf:hun%zzer2-secret@127.0.0.1:1/perf?sslmode=disable", "hun%zzer2-secret"},
+	"digits then slash": {"postgres://perf:12345/secret@127.0.0.1:1/perf?sslmode=disable", "12345/secret"},
+	"digits then hash":  {"postgres://perf:12345#secret@127.0.0.1:1/perf?sslmode=disable", "12345#secret"},
+}
+
+// assertNoPasswordIn fails when text carries the DSN, the password, or any four
+// character piece of the password: a scrubber that removes the whole password and
+// leaves its first half has not scrubbed anything.
+func assertNoPasswordIn(t *testing.T, text, dsn, password string) {
+	t.Helper()
+	if strings.Contains(text, strings.TrimSpace(dsn)) {
+		t.Errorf("the DSN itself is in the text: %s", text)
+	}
+	for i := 0; i+4 <= len(password); i++ {
+		if piece := password[i : i+4]; strings.Contains(text, piece) {
+			t.Errorf("a piece of the password (%q) is in the text: %s", piece, text)
+			return
+		}
+	}
+}
+
 func TestScrubErrorRemovesTheDSN(t *testing.T) {
 	const dsn = "postgres://perf:hunter2-secret@db.internal:5432/perf?sslmode=disable&password=also-secret"
 	cause := errors.New("connect to " + dsn + ": refused for password hunter2-secret")
@@ -372,6 +403,50 @@ func TestScrubErrorRemovesTheDSN(t *testing.T) {
 	plain := errors.New("no database involved")
 	if got := scrubError(plain, ""); got != plain {
 		t.Errorf("an error with no DSN to hide was rewritten: %v", got)
+	}
+}
+
+// url.Parse quotes what it rejects, so an error about a DSN that does not parse
+// carries the password, in a form (a piece of it, in a message about a bad port)
+// that no replacement of the whole DSN can find. The scrubber therefore drops the
+// cause's text for such a DSN and says only what is wrong.
+func TestScrubErrorDropsTheTextOfAnErrorAboutAMalformedDSN(t *testing.T) {
+	for name, tc := range malformedDSNs {
+		_, parseErr := url.Parse(tc.dsn)
+		if parseErr == nil {
+			// These parse, with the front of the password as the port. The error
+			// pgx builds for them is not url.Parse's, so Run's test covers them.
+			continue
+		}
+		t.Run(name, func(t *testing.T) {
+			// The shape the store gives it: its own prefix around url.Parse's text.
+			cause := errors.New("parse postgres DSN: " + parseErr.Error())
+			scrubbed := scrubError(cause, tc.dsn)
+			assertNoPasswordIn(t, scrubbed.Error(), tc.dsn, tc.password)
+			if !errors.Is(scrubbed, cause) {
+				t.Error("scrubbing hid the cause from errors.Is")
+			}
+			if !strings.Contains(scrubbed.Error(), "--db") {
+				t.Errorf("the scrubbed error does not say which flag is wrong: %s", scrubbed)
+			}
+		})
+	}
+}
+
+// Run's error is what the command prints, so this is the path that matters. The
+// DSN must be one whose unscrubbed error carries the password; with the scrubber
+// removed, every case here fails.
+func TestRunNeverPrintsAMalformedDSN(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	for name, tc := range malformedDSNs {
+		t.Run(name, func(t *testing.T) {
+			_, err := Run(ctx, Config{DSN: tc.dsn, Examples: examplesRoot, Workloads: []string{WorkloadReplay}, ReplayRuns: 1})
+			if err == nil {
+				t.Fatal("Run succeeded against a DSN that cannot be parsed")
+			}
+			assertNoPasswordIn(t, err.Error(), tc.dsn, tc.password)
+		})
 	}
 }
 

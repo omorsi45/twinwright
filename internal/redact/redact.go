@@ -58,8 +58,8 @@ var userinfo = regexp.MustCompile(`^([A-Za-z][A-Za-z0-9+.-]*://)[^/?#@]*@`)
 // routinely carries a trailing newline.
 func URL(raw string) string {
 	raw = strings.TrimSpace(raw)
-	u, err := url.Parse(raw)
-	if err != nil || (u.User == nil && strings.Contains(raw, "@")) {
+	u, ok := parseURL(raw)
+	if !ok {
 		return unparsedURL(raw)
 	}
 	u.User = nil
@@ -67,6 +67,25 @@ func URL(raw string) string {
 	u.ForceQuery = false
 	u.Fragment, u.RawFragment = "", ""
 	return u.String()
+}
+
+// WellFormedURL reports whether URL can trust its own parse of raw: the string
+// parses, and any "@" in it ends a userinfo. A caller that holds a URL which is
+// not well formed knows that an error built from it may quote part of a
+// credential, and can drop that error's text rather than try to clean it.
+func WellFormedURL(raw string) bool {
+	_, ok := parseURL(strings.TrimSpace(raw))
+	return ok
+}
+
+// parseURL parses raw, and refuses a result it cannot trust. See URL for why a
+// string that parses but holds an "@" without userinfo is not trusted.
+func parseURL(raw string) (*url.URL, bool) {
+	u, err := url.Parse(raw)
+	if err != nil || (u.User == nil && strings.Contains(raw, "@")) {
+		return nil, false
+	}
+	return u, true
 }
 
 // unparseableURL stands in for a URL of which nothing is certainly safe to show.

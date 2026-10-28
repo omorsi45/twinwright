@@ -168,26 +168,43 @@ func TestPerfFinishWritesTheReportBeforeFailingOnAProblem(t *testing.T) {
 }
 
 func TestPerfCLINeverPrintsTheDSN(t *testing.T) {
-	const dsn = "postgres://perf:hunter2-secret@127.0.0.1:1/perf?sslmode=disable"
-	outPath := filepath.Join(t.TempDir(), "perf.json")
-	var out bytes.Buffer
-	err := runCLI([]string{
-		"perf", "--examples", perfExamples(), "--db", dsn,
-		"--workloads", "replay", "--replay-runs", "1", "--out", outPath,
-	}, &out)
-	if err == nil {
-		t.Fatal("perf succeeded against a port nothing listens on")
-	}
-	if got := exitCode(err); got != 1 {
-		t.Errorf("exit code=%d want 1 for a run that could not start", got)
-	}
-	for _, leaked := range []string{"hunter2-secret", dsn} {
-		if strings.Contains(err.Error(), leaked) || strings.Contains(out.String(), leaked) {
-			t.Errorf("the DSN leaked into the output: %v / %s", err, out.String())
-		}
-	}
-	if _, statErr := os.Stat(outPath); statErr == nil {
-		t.Error("a run that could not start still wrote a report")
+	// The first is well formed and refused by the network; the rest do not parse,
+	// which is the only kind whose unscrubbed error carries the password, so the
+	// test fails when the command stops scrubbing.
+	for name, tc := range map[string]struct{ dsn, password string }{
+		"refused connection": {"postgres://perf:hunter2-secret@127.0.0.1:1/perf?sslmode=disable", "hunter2-secret"},
+		"slash":              {"postgres://perf:hunter2/secret@127.0.0.1:1/perf?sslmode=disable", "hunter2/secret"},
+		"hash":               {"postgres://perf:hunter2#secret@127.0.0.1:1/perf?sslmode=disable", "hunter2#secret"},
+		"question mark":      {"postgres://perf:hunter2?secret@127.0.0.1:1/perf?sslmode=disable", "hunter2?secret"},
+		"bad escape":         {"postgres://perf:hun%zzer2-secret@127.0.0.1:1/perf?sslmode=disable", "hun%zzer2-secret"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			outPath := filepath.Join(t.TempDir(), "perf.json")
+			var out bytes.Buffer
+			err := runCLI([]string{
+				"perf", "--examples", perfExamples(), "--db", tc.dsn,
+				"--workloads", "replay", "--replay-runs", "1", "--out", outPath,
+			}, &out)
+			if err == nil {
+				t.Fatal("perf succeeded against a DSN nothing can serve")
+			}
+			if got := exitCode(err); got != 1 {
+				t.Errorf("exit code=%d want 1 for a run that could not start", got)
+			}
+			text := err.Error() + "\n" + out.String()
+			if strings.Contains(text, tc.dsn) {
+				t.Errorf("the DSN leaked into the output: %s", text)
+			}
+			for i := 0; i+4 <= len(tc.password); i++ {
+				if piece := tc.password[i : i+4]; strings.Contains(text, piece) {
+					t.Errorf("a piece of the password (%q) leaked into the output: %s", piece, text)
+					break
+				}
+			}
+			if _, statErr := os.Stat(outPath); statErr == nil {
+				t.Error("a run that could not start still wrote a report")
+			}
+		})
 	}
 }
 

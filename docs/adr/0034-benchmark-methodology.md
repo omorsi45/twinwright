@@ -113,10 +113,17 @@ or `postgres`,
 and the copy of the config in the report has the DSN cleared. An error from `perf.Run`
 has the DSN removed from its text, with its password and any credential-like query
 value, before the command prints it, while still unwrapping to the original cause.
+A PostgreSQL DSN that does not parse as a URL, such as one with an unencoded `/`, `#`
+or `?` in the password, gets the cause's text replaced entirely by a fixed message
+about the `--db` value, because `url.Parse` quotes what it rejected, a piece of the
+password among it, and no search for the whole DSN finds that piece.
 `TestPerfReportShape` and `TestPerfCLIWritesTheReport` require that the report holds no
 `dsn` key and does not mention one, `TestConfigJSONUsesMillisecondsAndOmitsPrivateFields`
-holds the config's wire form, and `TestScrubErrorRemovesTheDSN` and
-`TestRunNeverPrintsTheDSNOnAConnectionFailure` hold the error text.
+holds the config's wire form, and `TestScrubErrorRemovesTheDSN`,
+`TestRunNeverPrintsAMalformedDSN` and `TestPerfCLINeverPrintsTheDSN` hold the error
+text. The last two use DSNs whose unscrubbed error carries the password, so they fail
+when the scrubber is removed; `TestRunNeverPrintsTheDSNOnAConnectionFailure` does not
+prove that, because a refused connection never puts the password in the error.
 
 ### Where published figures come from, and how they are labelled
 
@@ -243,3 +250,7 @@ backend, so a joint table would invite a conclusion they do not support.
 - The `perf` job costs runner time only when someone dispatches it.
 - The report carries `schema_version`, 1 today. The test refuses a committed report
   whose version is 0 or newer than the build writes.
+
+## Corrections
+
+- 2026-10-28: "The database address is never recorded" claimed that an error from `perf.Run` has the DSN and its password removed, and cited two tests for it that pass with the scrubber removed. That held only for a DSN that parses: for a PostgreSQL password with an unencoded `/`, `#` or `?` the error quoted a piece of the password, and `redact.URL` kept the userinfo of such a string. The scrubber now replaces the text of an error about a DSN that does not parse cleanly, and the cited tests now use such DSNs.

@@ -13,6 +13,14 @@ database written by a newer build is refused rather than downgraded.
 
 ### Fixed
 
+- **`perf` no longer prints the PostgreSQL password when it holds an unencoded `/`, `#` or
+  `?`.** `url.Parse` rejects such a DSN and quotes a piece of the password in its error,
+  which the scrubber's search for the whole DSN never found, so `perf --db` printed it
+  (the `/` case printed the complete password). An error about a PostgreSQL DSN that does
+  not parse cleanly now has its text replaced by a fixed message, and the two tests that
+  cited the guarantee used a DSN whose error never held the password, so they passed
+  without the scrubber; they now use malformed DSNs and fail without it
+  (`TestRunNeverPrintsAMalformedDSN`, `TestPerfCLINeverPrintsTheDSN`).
 - **A base URL that does not parse no longer puts its credentials into errors, the ledger
   or a trace.** The three HTTP adapters redacted only the error from sending a request.
   The error from building one quoted the whole URL, so an unencoded `%` in a password, a

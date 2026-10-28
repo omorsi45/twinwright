@@ -27,6 +27,7 @@ import (
 	"twinwright/internal/bench"
 	"twinwright/internal/buildinfo"
 	"twinwright/internal/redact"
+	"twinwright/internal/store"
 )
 
 // SchemaVersion is the report layout this build writes.
@@ -464,6 +465,19 @@ func scrubError(err error, dsn string) error {
 	if err == nil || dsn == "" {
 		return err
 	}
+	// A PostgreSQL URL that does not parse cleanly is the case replacement cannot
+	// fix. url.Parse quotes what it rejected, and for a password with an
+	// unencoded "/", "#" or "?" that is a piece of the password in a message about
+	// a bad port, which no search for the whole DSN or the parsed password will
+	// find. pgx builds the same kind of message for the ones that parse. So the
+	// text is not cleaned, it is replaced, and the cause stays reachable for
+	// errors.Is and errors.As.
+	if store.IsPostgresDSN(dsn) && !redact.WellFormedURL(dsn) {
+		return &scrubbedError{
+			text: fmt.Sprintf("the --db value is not a usable postgres URL (%s): percent-encode any %%, /, # or ? in the password and remove spaces and control characters", redact.URL(dsn)),
+			err:  err,
+		}
+	}
 	text := err.Error()
 	clean := strings.ReplaceAll(text, dsn, redact.URL(dsn))
 	for _, secret := range dsnSecrets(dsn) {
@@ -477,8 +491,8 @@ func scrubError(err error, dsn string) error {
 
 // dsnSecrets returns the parts of a URL-form DSN that must not be printed on
 // their own: the password and any query value whose key suggests a credential.
-// A DSN that does not parse as a URL has no parts to find, and is covered by
-// the whole-string replacement in scrubError.
+// A DSN that does not parse as a URL has no parts to find; scrubError replaces
+// the whole text of an error about one instead.
 func dsnSecrets(dsn string) []string {
 	parsed, err := url.Parse(dsn)
 	if err != nil {

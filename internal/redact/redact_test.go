@@ -76,6 +76,27 @@ func TestURLStripsUserinfoAndTheWholeQuery(t *testing.T) {
 	}
 }
 
+// WellFormedURL is how a caller learns that an error built from a URL may quote
+// part of a credential. A parse that succeeds is not enough: the front of a
+// password with an unencoded "/" parses as a port.
+func TestWellFormedURL(t *testing.T) {
+	for in, want := range map[string]bool{
+		"postgres://perf:pw@127.0.0.1:5432/perf?sslmode=disable": true,
+		"https://api.example.com/v1/messages":                    true,
+		"  http://host/v1\n":                                     true,
+		"":                                                       true,
+		"postgres://perf:pa%ss@127.0.0.1/perf":                   false,
+		"postgres://perf:hunter2/secret@127.0.0.1/perf":          false,
+		"postgres://perf:12345#secret@127.0.0.1/perf":            false,
+		"postgres://perf:12345?secret@127.0.0.1/perf":            false,
+		"http://host:notaport/v1":                                false,
+	} {
+		if got := WellFormedURL(in); got != want {
+			t.Errorf("WellFormedURL(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
 // A string url.Parse rejects is exactly when an error message is most likely to
 // print it, and a hand-cut guess at which part is the userinfo fails on the
 // passwords that break the parse: an unencoded "/", "#" or "?" ends the
