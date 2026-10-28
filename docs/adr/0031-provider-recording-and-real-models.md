@@ -80,15 +80,19 @@ once:
 | `timeout` | the attempt's own deadline passed | none |
 | `truncated` | the provider said the completion was cut short | none |
 | `rate_limited` | HTTP 429 | `Retry-After`, or 1 s |
-| `server_error` | HTTP 500, 502, 503 or 504 | `Retry-After`, or 1 s |
+| `server_error` | HTTP 500, 502, 503 or 504, and 529 from the Anthropic adapter | `Retry-After`, or 1 s |
 | `transport` | the request failed while neither the caller nor the attempt deadline had given up | 1 s |
 
 `Retry-After` is whole seconds or an HTTP date, capped at `MaxRetryAfter` (30 s).
 A missing, zero, negative, fractional, unparseable or past value counts as not
 sent. The wait goes through `Runner.Sleep`, which returns the context's error if
 the run is cancelled during it, and then no second attempt is made. Every other
-status, 501, 505 and 529 included, stays an ordinary error. A body that fails
-part way through is also an ordinary error; only a failure of the request itself
+status, 501 and 505 included, stays an ordinary error. 529 is the exception for the
+Anthropic adapter only: Anthropic documents it as `overloaded_error`, a temporary
+condition, so that adapter retries it like a 503 (`TestAnthropicOverloadedIsRetriedOnce`),
+while the other two adapters keep it an ordinary error. A body that fails
+part way through is also an ordinary error, on the first attempt and with no second
+call (`TestBodyFailurePartWayIsNotRetried`); only a failure of the request itself
 is a `transport` interruption.
 
 Both attempts are recorded on the turn, as ADR 0027 describes. The
@@ -256,8 +260,13 @@ here.
 
 ## Consequences and limits
 
-- A recorded per-attempt timeout replays from a cassette as a `transport`
-  interruption, and the replay reports a divergence. Deadlines are not simulated.
+- A per-attempt timeout that passed before the response headers arrived is recorded
+  as a failed round trip and replays from a cassette as a `transport`
+  interruption, and the replay reports a divergence. A deadline that passes while
+  the body is being read is recorded as a 200 with an error, and replays as an
+  ordinary error, which fails the run without a retry
+  (`TestRecordedBodyFailureReplaysAsAnOrdinaryError`); the replay reports a
+  divergence there too. Deadlines are not simulated.
 - A `Retry-After` given as an HTTP date is clock relative, so a replay at another
   time can compute a different wait. It is not verified to replay identically.
 - A response body that is not valid UTF-8 is stored as a JSON string.
@@ -289,3 +298,4 @@ here.
 
 - 2026-10-28: the success path, the error path and the cassette URL did not mask what this ADR said they masked. The error from building a request (a base URL that does not parse) was returned as it was and quoted the URL, userinfo and query included; `redact.URL` kept the userinfo of an unparseable string; the response's id, model and stop reason, and a key in the URL path, were not masked; and a key the server escaped in its JSON was not recognised. Each is fixed as the Decision section above now reads. A base URL with a query now keeps it, where the suffix used to be appended inside the query.
 - 2026-10-28: a cassette served only `Content-Type` and `Retry-After`, so a run whose endpoint redirected could be recorded and never replayed, and the file's 0600 mode applied only when it was created, so a recording over an existing 0644 file stayed readable by everyone. A 3xx exchange now records and serves its `Location` (without userinfo, query or fragment), and the recorder sets the mode to 0600 whether the file is new or not.
+- 2026-10-28: the retry classification and the consequences did not say what the code does. Anthropic documents 529 as `overloaded_error`, a temporary condition, yet it failed the run on the first attempt with no stated reason; the Anthropic adapter now retries it once like a 503 and the other two adapters do not. The consequence about timeouts held only for a deadline that passes before the response headers: one that passes while the body is read is recorded as a 200 with an error and replays as an ordinary error, and the mid-body case now has a test at the adapter.

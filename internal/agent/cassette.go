@@ -44,10 +44,13 @@ type CassetteHeader struct {
 // What a cassette cannot reproduce, stated once because replay's guarantee is
 // only as wide as this list:
 //
-//   - A deadline. A per-attempt timeout is recorded as a failed round trip (the
-//     error text is all there is of it), and replays as a transport
-//     interruption, so the replayed ledger differs from the recorded one and the
-//     replay reports a divergence. Deadlines are not simulated.
+//   - A deadline. A per-attempt timeout that passes before the response headers
+//     arrive is recorded as a failed round trip (the error text is all there is
+//     of it), and replays as a transport interruption, so the replayed ledger
+//     differs from the recorded one and the replay reports a divergence. One that
+//     passes while the body is being read is recorded as the status with the
+//     error, and replays as an ordinary error that fails the run, with no retry.
+//     Deadlines are not simulated.
 //   - A Retry-After given as an HTTP date. The wait is worked out against the
 //     clock when the response arrives, so a replay at another time can compute a
 //     different wait. Only the header text is recorded.

@@ -122,7 +122,7 @@ func (p AnthropicProvider) Next(ctx context.Context, task string, history []Mess
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		text := redact.String(string(body), p.APIKey)
 		failure := fmt.Errorf("Anthropic HTTP %d: %s", res.StatusCode, text)
-		if interrupt := statusInterruption(res, failure); interrupt != nil {
+		if interrupt := statusInterruption(res, failure, anthropicOverloaded); interrupt != nil {
 			return Message{RawBody: text}, interrupt
 		}
 		return Message{RawBody: text}, failure

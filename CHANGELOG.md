@@ -62,6 +62,14 @@ database written by a newer build is refused rather than downgraded.
   succeeded live (`TestCassetteReplaysARedirectedExchange`). `--record-cassette` over an
   existing 0644 file left it 0644; the mode is now set whether the file is new or not
   (`TestRecordingTransportReplacesWithMode0600`).
+- **An Anthropic 529 is retried once.** Anthropic documents 529 as `overloaded_error`, a
+  temporary overload, yet the Anthropic adapter failed the run on it at the first attempt,
+  while the same overload reported as a 503 was retried. It is now a `server_error`
+  interruption for that adapter only, and the comment that stated why other 5xx codes are
+  excluded says so (`TestAnthropicOverloadedIsRetriedOnce`). ADR 0031's claim about a recorded
+  timeout was corrected (it held only for a deadline that passes before the response
+  headers) and the mid-body failure it describes now has a test at the adapter
+  (`TestBodyFailurePartWayIsNotRetried`, `TestRecordedBodyFailureReplaysAsAnOrdinaryError`).
 
 ### Added
 

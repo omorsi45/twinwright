@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -32,15 +33,23 @@ const (
 	// InterruptRateLimited is an HTTP 429: the provider asked the caller to slow
 	// down, usually saying for how long in Retry-After.
 	InterruptRateLimited = "rate_limited"
-	// InterruptServerError is an HTTP 500, 502, 503 or 504: the provider failed
-	// to answer, which is routinely gone a moment later. Other 5xx codes are not
-	// in the list on purpose; 501 and 505 say the request itself is unsupported.
+	// InterruptServerError is an HTTP 500, 502, 503 or 504, or a status an adapter
+	// names as its provider's own overloaded signal: the provider failed to answer,
+	// which is routinely gone a moment later. Other 5xx codes are not in the list
+	// on purpose. 501 and 505 say the request itself is unsupported, and 529 means
+	// overloaded only to Anthropic, whose adapter alone treats it as this kind
+	// (anthropicOverloaded); to another server it is not a documented status, so a
+	// retry there would be a guess.
 	InterruptServerError = "server_error"
 	// InterruptTransport is a request that failed before any response arrived
 	// while neither the caller nor the attempt deadline had given up: a refused
 	// or dropped connection.
 	InterruptTransport = "transport"
 )
+
+// anthropicOverloaded is the status Anthropic documents for overloaded_error: the
+// service is temporarily at capacity. The Anthropic adapter retries it like a 503.
+const anthropicOverloaded = 529
 
 // MaxRetryAfter bounds how long a server's Retry-After is honoured and recorded.
 // A run that sleeps for an hour on one header is a hung run, so a server asking
@@ -177,16 +186,18 @@ func parseRetryAfter(value string, now time.Time) time.Duration {
 }
 
 // statusInterruption classifies a non-2xx response. Only a 429 and the four
-// transient 5xx codes are interruptions; every other status is nil, and the
-// caller returns its ordinary error, because a rejected key or a malformed
-// request is not something a retry can fix. cause is that ordinary error, kept
-// as the interruption's text so the provider's own message is not lost.
-func statusInterruption(res *http.Response, cause error) *CallInterrupted {
+// transient 5xx codes are interruptions, plus any extra statuses the calling
+// adapter names as transient; every other status is nil, and the caller returns
+// its ordinary error, because a rejected key or a malformed request is not
+// something a retry can fix. cause is that ordinary error, kept as the
+// interruption's text so the provider's own message is not lost.
+func statusInterruption(res *http.Response, cause error, transient ...int) *CallInterrupted {
 	var kind string
-	switch res.StatusCode {
-	case http.StatusTooManyRequests:
+	switch {
+	case res.StatusCode == http.StatusTooManyRequests:
 		kind = InterruptRateLimited
-	case http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+	case slices.Contains([]int{http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout}, res.StatusCode),
+		slices.Contains(transient, res.StatusCode):
 		kind = InterruptServerError
 	default:
 		return nil
