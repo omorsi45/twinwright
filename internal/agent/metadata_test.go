@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -108,6 +109,35 @@ func TestOversizedResponseIsAnExplicitError(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The length check alone would also refuse an oversized body, but only after the
+// whole of it was in memory. The cap is what keeps a hostile or broken server
+// from making one call cost an unbounded read, so it is pinned on its own: the
+// reader is never asked for more than one byte past the limit.
+func TestReadBodyStopsReadingOneBytePastTheLimit(t *testing.T) {
+	source := &zeroReader{left: 2 * MaxResponseBytes}
+	_, err := readBody(&http.Response{Body: io.NopCloser(source)})
+	if !errors.Is(err, ErrResponseTooLarge) {
+		t.Fatalf("err = %v, want ErrResponseTooLarge", err)
+	}
+	if source.served != MaxResponseBytes+1 {
+		t.Fatalf("read %d bytes, want exactly %d", source.served, MaxResponseBytes+1)
+	}
+}
+
+// zeroReader serves zero bytes and counts how many it handed out.
+type zeroReader struct{ left, served int }
+
+func (z *zeroReader) Read(p []byte) (int, error) {
+	if z.left == 0 {
+		return 0, io.EOF
+	}
+	n := min(len(p), z.left)
+	clear(p[:n])
+	z.left -= n
+	z.served += n
+	return n, nil
 }
 
 func TestResponseAtTheLimitIsStillAccepted(t *testing.T) {

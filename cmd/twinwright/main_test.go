@@ -1846,8 +1846,11 @@ func TestProviderFlagsKeepTheirNamesAndDefaults(t *testing.T) {
 	if err := fs.Parse(nil); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Timeout != 90*time.Second || cfg.Timeout != agent.DefaultCallTimeout {
+	if cfg.Timeout != 90*time.Second {
 		t.Fatalf("--provider-timeout defaults to %v, want 90s", cfg.Timeout)
+	}
+	if cfg.Timeout != agent.DefaultCallTimeout {
+		t.Fatalf("--provider-timeout defaults to %v, want agent.DefaultCallTimeout", cfg.Timeout)
 	}
 	if cfg.BaseURL != "http://env.example/v1" {
 		t.Fatalf("--base-url defaults to %q, want $OPENAI_BASE_URL", cfg.BaseURL)
