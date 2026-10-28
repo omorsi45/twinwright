@@ -128,11 +128,13 @@ exchange:
 | `status` | the response status, or 0 when the round trip failed |
 | `retry_after` | the `Retry-After` header text, when sent |
 | `content_type` | the `Content-Type` header, when sent |
+| `location` | the redirect target of a 3xx response, without userinfo, query or fragment, when sent |
 | `error` | set when the round trip did not complete; with `status` 0 there was no response at all |
 | `response` | the response body with the configured secrets masked |
 
-The exchange count of a file is its line count minus one. The file is created with
-mode 0600 and each exchange is written with one `Write` as it happens. A write that
+The exchange count of a file is its line count minus one. The file has mode 0600,
+whether it is new or replaces an existing file, and each exchange is written with
+one `Write` as it happens. A write that
 fails fails that round trip and every later one, because a cassette missing an
 exchange would replay as a divergence nobody can explain. The recorder reads at
 most one byte past the adapters' 4 MiB limit, so a hostile server cannot fill the
@@ -153,8 +155,9 @@ An incoming request is matched to the next exchange by method, then URL path, th
 `request_sha256`, and the first field that differs is named in the error with the
 `seq`: `cassette divergence: seq 2: request_sha256 differs`. The host and the query
 are not compared, so a cassette recorded against one address replays against
-another. The cursor does not move on a divergence. Only `Content-Type` and
-`Retry-After` are served back. A recorded failure replays as an error and never as
+another. The cursor does not move on a divergence. Only `Content-Type`,
+`Retry-After` and, for a 3xx, `Location` are served back, so a recorded redirect is
+followed on replay. A recorded failure replays as an error and never as
 a response. Retry waits are skipped, so a recorded 429 replays at once. A reader
 refuses a version it does not know, a header without a provider or model, a `seq`
 out of order, and a `status` that is neither a response nor a recorded failure.
@@ -285,3 +288,4 @@ here.
 ## Corrections
 
 - 2026-10-28: the success path, the error path and the cassette URL did not mask what this ADR said they masked. The error from building a request (a base URL that does not parse) was returned as it was and quoted the URL, userinfo and query included; `redact.URL` kept the userinfo of an unparseable string; the response's id, model and stop reason, and a key in the URL path, were not masked; and a key the server escaped in its JSON was not recognised. Each is fixed as the Decision section above now reads. A base URL with a query now keeps it, where the suffix used to be appended inside the query.
+- 2026-10-28: a cassette served only `Content-Type` and `Retry-After`, so a run whose endpoint redirected could be recorded and never replayed, and the file's 0600 mode applied only when it was created, so a recording over an existing 0644 file stayed readable by everyone. A 3xx exchange now records and serves its `Location` (without userinfo, query or fragment), and the recorder sets the mode to 0600 whether the file is new or not.

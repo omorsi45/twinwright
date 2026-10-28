@@ -72,9 +72,14 @@ type Exchange struct {
 	Request    json.RawMessage `json:"request"`
 	Status     int             `json:"status"`
 	RetryAfter string          `json:"retry_after,omitempty"`
-	// ContentType is the response's Content-Type header, one of the two response
-	// headers a cassette replays.
+	// ContentType is the response's Content-Type header, one of the headers a
+	// cassette replays.
 	ContentType string `json:"content_type,omitempty"`
+	// Location is the redirect target of a 3xx response, with redact.URL applied
+	// and the configured secrets masked. A replay serves it, because Go's client
+	// returns a redirect it cannot follow as the response itself. It is set for a
+	// 3xx only, and older readers ignore it.
+	Location string `json:"location,omitempty"`
 	// Response is the response body with redact.Secrets applied.
 	Response string `json:"response"`
 	// Error is set when the round trip did not complete. With Status 0 there was
@@ -123,10 +128,17 @@ func NewRecordingTransportWith(base http.RoundTripper, path string, header Casse
 	if err != nil {
 		return nil, err
 	}
-	// 0600: the bodies are the prompts and answers of a run, even masked.
+	// 0600: the bodies are the prompts and answers of a run, even masked. The mode
+	// given to OpenFile applies only when the file is created, and a recording
+	// replaces an existing file in place, so it is set again here: a file that was
+	// 0644 would otherwise stay readable by every user on the machine.
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("create cassette: %w", err)
+	}
+	if err = file.Chmod(0o600); err != nil {
+		file.Close()
+		return nil, fmt.Errorf("restrict cassette %s to its owner: %w", path, err)
 	}
 	if _, err = file.Write(line); err != nil {
 		file.Close()
@@ -200,6 +212,13 @@ func (t *RecordingTransport) RoundTrip(req *http.Request) (*http.Response, error
 	ex.Status = res.StatusCode
 	ex.ContentType = res.Header.Get("Content-Type")
 	ex.RetryAfter = res.Header.Get("Retry-After")
+	if res.StatusCode >= 300 && res.StatusCode < 400 {
+		// Without it the replay serves a redirect the client cannot follow. It is
+		// a URL like any other, so it loses its userinfo, query and fragment.
+		if location := res.Header.Get("Location"); location != "" {
+			ex.Location = redact.Secrets(redact.URL(location), t.secrets...)
+		}
+	}
 	ex.Response = redact.Secrets(string(data), t.secrets...)
 	if readErr != nil {
 		ex.Error = t.errorText(readErr)
@@ -433,6 +452,9 @@ func (t *cassetteTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	}
 	if ex.RetryAfter != "" {
 		header.Set("Retry-After", ex.RetryAfter)
+	}
+	if ex.Location != "" {
+		header.Set("Location", ex.Location)
 	}
 	res := &http.Response{
 		Status:        fmt.Sprintf("%d %s", ex.Status, http.StatusText(ex.Status)),

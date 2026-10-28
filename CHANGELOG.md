@@ -56,6 +56,12 @@ database written by a newer build is refused rather than downgraded.
   key the server escaped in its JSON (`\u0026`, `\/`), the response's `id`, `model` and stop
   reason, and a key in the URL path of an error or a cassette (`TestSuccessfulOutputIsRedactedWhenEscaped`,
   `TestEchoedTopLevelFieldsAreMasked`, `TestKeyInTheURLPathIsMasked`).
+- **A cassette replays a redirect, and is always mode 0600.** A 3xx exchange now records its
+  `Location` (without userinfo, query or fragment) and the replay serves it, where it used to
+  serve a redirect the client could not follow and fail with `HTTP 308` on a run that had
+  succeeded live (`TestCassetteReplaysARedirectedExchange`). `--record-cassette` over an
+  existing 0644 file left it 0644; the mode is now set whether the file is new or not
+  (`TestRecordingTransportReplacesWithMode0600`).
 
 ### Added
 
