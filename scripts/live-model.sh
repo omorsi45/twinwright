@@ -53,7 +53,9 @@
 # build included; run_ms, ledger_replay_ms and cassette_replay_ms are the steps.
 # If OPENAI_API_KEY is set the CLI sends it as a bearer token to BASE_URL, as it
 # does for any openai-compatible run, and this script fails if that value appears
-# in anything it wrote.
+# in the report, the cassette, the database or the output of a step. A key
+# shorter than 8 characters is the exception: the masks ignore one (redact.Secrets),
+# so it is not searched for, and the script says so.
 set -euo pipefail
 
 BASE_URL="${1:-http://127.0.0.1:11434/v1}"
@@ -129,6 +131,13 @@ go build -o "$BIN" ./cmd/twinwright
   --bindings examples/billing/bindings.yaml \
   --out "$MANIFEST" > /dev/null
 
+# The host and port are all this script says about the server, in the report and
+# in every message: a base URL can carry userinfo, a path prefix or a query that
+# names an account.
+HOST="${BASE_URL#*://}"
+HOST="${HOST%%[/?#]*}"
+HOST="${HOST##*@}"
+
 # The digest is what makes a model name a specific set of weights: a tag can be
 # re-pushed. Ollama reports it on /api/tags next to the /v1 API; a server without
 # that endpoint, or without the model, leaves it empty rather than failing.
@@ -139,13 +148,7 @@ if TAGS="$(curl -fsS --max-time 10 "$TAGS_URL" 2> /dev/null)"; then
   MODEL_DIGEST="$(printf '%s' "$TAGS" | jq -r --arg m "$MODEL" \
     '[.models[]? | select(.name == $m or .model == $m or .name == ($m + ":latest")) | .digest][0] // ""' 2> /dev/null || true)"
 fi
-[ -n "$MODEL_DIGEST" ] || note "no model digest from $TAGS_URL; model_digest will be empty"
-
-# The host and port are all the report says about the server: a base URL can
-# carry userinfo, a path prefix or a query that names an account.
-HOST="${BASE_URL#*://}"
-HOST="${HOST%%[/?#]*}"
-HOST="${HOST##*@}"
+[ -n "$MODEL_DIGEST" ] || note "no model digest from $HOST (/api/tags); model_digest will be empty"
 
 step "run duplicate-charge with $MODEL (steps $STEPS, recording $CASSETTE)"
 T0="$(now_ms)"
@@ -288,14 +291,27 @@ jq -n \
 # cassette and the CLI masks it in errors; this is the check that says so about
 # this run's files rather than about the code in general. grep reads the key from
 # a pipe so it never appears in a process listing.
+#
+# A key shorter than 8 characters is not checked. The masks ignore one on purpose
+# (redact.Secrets, so that ordinary words are never rewritten), so this check
+# cannot ask for more than the masks give: Ollama's own documentation uses the
+# placeholder key "ollama", which is in every response as "fp_ollama" and would
+# fail every clean run. The check says so when it skips.
+#
+# The files are the report, the cassette, the database and its write-ahead log,
+# and the output of each step. The CLI binary and the manifest are not searched.
 if [ -n "${OPENAI_API_KEY:-}" ]; then
-  for f in "$REPORT" "$CASSETTE" "$OUT"/run.json "$OUT"/run.err "$OUT"/inspect.json \
-    "$OUT"/ledger-replay.json "$OUT"/ledger-replay.err "$OUT"/cassette-replay.json "$OUT"/cassette-replay.err; do
-    [ -f "$f" ] || continue
-    if grep -qF -f <(printf '%s\n' "$OPENAI_API_KEY") "$f"; then
-      problem "the value of OPENAI_API_KEY appears in $(basename "$f")"
-    fi
-  done
+  if [ "${#OPENAI_API_KEY}" -lt 8 ]; then
+    note "OPENAI_API_KEY is shorter than 8 characters, which the masks ignore by design, so it is not searched for in the output files"
+  else
+    for f in "$REPORT" "$CASSETTE" "$DB" "$DB-wal" "$OUT"/run.json "$OUT"/run.err "$OUT"/inspect.json \
+      "$OUT"/ledger-replay.json "$OUT"/ledger-replay.err "$OUT"/cassette-replay.json "$OUT"/cassette-replay.err; do
+      [ -f "$f" ] || continue
+      if grep -qaF -f <(printf '%s\n' "$OPENAI_API_KEY") "$f"; then
+        problem "the value of OPENAI_API_KEY appears in $(basename "$f")"
+      fi
+    done
+  fi
 fi
 
 step "report"

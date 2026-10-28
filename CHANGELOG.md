@@ -75,6 +75,16 @@ database written by a newer build is refused rather than downgraded.
   wrote the key into test output that is routinely pasted into issues. A failure now prints the problem,
   the names of the fields that held the key and the turn's metadata with the key masked
   (`TestLiveFailureLineNeverCarriesTheKey`).
+- **`scripts/live-model.sh` no longer prints the base URL, and its key check is exact.** The
+  note about a missing model digest printed the base URL with its userinfo and query, on
+  every run against a server without `/api/tags`; it now names the host and port, as the
+  report does. The check that the value of `OPENAI_API_KEY` is in no output file also
+  searched only some of them and failed every clean run for a key under 8 characters, such
+  as Ollama's placeholder `ollama`, which is in every response as `fp_ollama` and which the
+  masks ignore on purpose. It now includes the database and its write-ahead log and skips
+  a short key with a message (`TestLiveModelScriptNeverPrintsTheBaseURL`,
+  `TestLiveModelScriptSkipsTheKeyCheckForAKeyTheMasksIgnore`,
+  `TestLiveModelScriptChecksTheDatabaseForTheKey`).
 
 ### Added
 

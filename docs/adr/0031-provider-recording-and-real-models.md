@@ -196,7 +196,15 @@ exchange count and wall time, plus the run ID and status, the model's digest fro
 Ollama's `/api/tags` (empty when the endpoint is unavailable), the machine, the Go
 version, the git revision, the start time and the per-step times. No key or header
 value is written, and the script fails if the value of `OPENAI_API_KEY` appears in
-any file it wrote.
+the report, the cassette, the database or its write-ahead log, or the output of a
+step. A key shorter than 8 characters is not searched for, because the masks
+ignore one on purpose (`redact.Secrets`) and a placeholder such as Ollama's
+`ollama` is in every response as `fp_ollama`; the script says so when it skips. The
+CLI binary and the manifest are not searched. All of this is held by
+`TestLiveModelScriptNeverPrintsTheBaseURL`,
+`TestLiveModelScriptSkipsTheKeyCheckForAKeyTheMasksIgnore` and
+`TestLiveModelScriptChecksTheDatabaseForTheKey`, which run the script against a
+local server and skip without bash, jq, curl and go.
 
 It exits non-zero when recording fails, when the run does not reach `completed`,
 when ledger replay is not verified, or when cassette replay is not verified. The
@@ -303,3 +311,4 @@ here.
 - 2026-10-28: a cassette served only `Content-Type` and `Retry-After`, so a run whose endpoint redirected could be recorded and never replayed, and the file's 0600 mode applied only when it was created, so a recording over an existing 0644 file stayed readable by everyone. A 3xx exchange now records and serves its `Location` (without userinfo, query or fragment), and the recorder sets the mode to 0600 whether the file is new or not.
 - 2026-10-28: the retry classification and the consequences did not say what the code does. Anthropic documents 529 as `overloaded_error`, a temporary condition, yet it failed the run on the first attempt with no stated reason; the Anthropic adapter now retries it once like a 503 and the other two adapters do not. The consequence about timeouts held only for a deadline that passes before the response headers: one that passes while the body is read is recorded as a 200 with an error and replays as an ordinary error, and the mid-body case now has a test at the adapter.
 - 2026-10-28: the live provider tests kept the key out of the problem text but printed the whole turn with `%+v` when they failed, so the check that finds the key in a turn wrote the key to the test output. A failure now prints the problem, the names of the fields that held the key and the turn's metadata with the key masked, and never the turn.
+- 2026-10-28: `scripts/live-model.sh` named the server by host and port everywhere except one note, which printed the base URL with its userinfo and query whenever the server had no `/api/tags`. Its key check also searched only some of the files it wrote, and failed every clean run for a key under 8 characters such as Ollama's placeholder `ollama`. The note names the host and port, the check now includes the database and its write-ahead log and skips a short key with a message, and the sentence above says which files are searched.
