@@ -38,18 +38,64 @@ func Secrets(s string, secrets ...string) string {
 
 var userinfo = regexp.MustCompile(`^([A-Za-z][A-Za-z0-9+.-]*://)[^/?#@]*@`)
 
-// URL removes what a URL can carry besides its address: the userinfo and the
-// whole query string, where API keys and signed tokens are usually passed. A
-// string that does not parse is cut by hand rather than returned whole, because
-// a malformed URL is exactly when an error message is most likely to print it.
+// URL removes what a URL can carry besides its address: the userinfo, the whole
+// query string, where API keys and signed tokens are usually passed, and the
+// fragment.
+//
+// A string that does not parse is not cut by hand around a guess at where the
+// userinfo ends. A malformed URL is exactly when an error message is most likely
+// to print it, and the passwords that break the parse (an unencoded "/", "#" or
+// "?") are the ones a guess gets wrong: the authority ends early, so the rest of
+// the password is in what looks like the path. Such a string keeps only what is
+// certainly safe, which is its scheme and host when it holds no "@" at all (so
+// it cannot hold userinfo), and is otherwise replaced by a fixed placeholder.
+//
+// The same reasoning applies to a string that parses but holds an "@" without
+// any userinfo: the "@" ended the userinfo in the author's mind, and an early
+// delimiter moved the front of the password into the host and the rest into the
+// path, the query or the fragment. It is treated as unparseable too.
+// Surrounding whitespace is dropped first, since an environment variable
+// routinely carries a trailing newline.
 func URL(raw string) string {
+	raw = strings.TrimSpace(raw)
 	u, err := url.Parse(raw)
-	if err != nil {
-		raw, _, _ = strings.Cut(raw, "?")
-		return userinfo.ReplaceAllString(raw, "${1}")
+	if err != nil || (u.User == nil && strings.Contains(raw, "@")) {
+		return unparsedURL(raw)
 	}
 	u.User = nil
 	u.RawQuery = ""
 	u.ForceQuery = false
+	u.Fragment, u.RawFragment = "", ""
 	return u.String()
+}
+
+// unparseableURL stands in for a URL of which nothing is certainly safe to show.
+const unparseableURL = "[unparseable URL]"
+
+var (
+	urlScheme = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*$`)
+	plainHost = regexp.MustCompile(`^[A-Za-z0-9.-]+$`)
+	allDigits = regexp.MustCompile(`^[0-9]+$`)
+)
+
+// unparsedURL is what is safe to keep of a string that could not be trusted to
+// parse: scheme://host, plus the port when it is plain digits. A host that is not
+// a plain name or an IPv4 address, or any "@" anywhere in the string, gives the
+// placeholder instead.
+func unparsedURL(raw string) string {
+	scheme, rest, found := strings.Cut(raw, "://")
+	if !found || !urlScheme.MatchString(scheme) || strings.Contains(rest, "@") {
+		return unparseableURL
+	}
+	if end := strings.IndexAny(rest, "/?#"); end >= 0 {
+		rest = rest[:end]
+	}
+	host, port, hasPort := strings.Cut(rest, ":")
+	if !plainHost.MatchString(host) {
+		return unparseableURL
+	}
+	if hasPort && allDigits.MatchString(port) {
+		host += ":" + port
+	}
+	return scheme + "://" + host
 }

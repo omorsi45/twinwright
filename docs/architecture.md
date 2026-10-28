@@ -150,7 +150,7 @@ Applies to `--agent exec`. The process is yours; it is not trusted.
 The provider is a remote service that receives the task, the history and the operation list over HTTP, and returns text and proposed calls. Its output is untrusted data.
 
 - It may influence what the agent proposes. It may not widen the principal's permissions, because authorization does not read the transcript (`TestInjectedTicketIsUntrustedServiceData`).
-- The API key travels only in the request header. The configured key is masked in each output item before the item is interpreted (`TestSuccessfulOutputIsRedacted`), error bodies are redacted (`TestProviderErrorReachesTheLedgerWithoutTheKey`), and transport errors lose their URL userinfo and query (`TestTransportErrorHidesURLQueryAndUserinfo`). Cassettes record no request headers.
+- The API key travels only in the request header. The configured key is masked in each output item before the item is interpreted, as written and as the server's JSON escapes it (`TestSuccessfulOutputIsRedacted`, `TestSuccessfulOutputIsRedactedWhenEscaped`), error bodies are redacted (`TestProviderErrorReachesTheLedgerWithoutTheKey`), and transport errors lose their URL userinfo and query (`TestTransportErrorHidesURLQueryAndUserinfo`, `TestMalformedBaseURLNeverLeaks`). Cassettes record no request headers.
 - A cassette holds the prompts and answers of a real run. It is not a secret-free artifact; do not commit one.
 - Truncation detection depends on the provider sending its stop reason. A surface that omits it, or a gateway that rewrites it to a success value, gives nothing to check.
 

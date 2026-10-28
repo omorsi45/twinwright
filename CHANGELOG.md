@@ -11,6 +11,28 @@ database written by a newer build is refused rather than downgraded.
 
 ## Unreleased
 
+### Fixed
+
+- **A base URL that does not parse no longer puts its credentials into errors, the ledger
+  or a trace.** The three HTTP adapters redacted only the error from sending a request.
+  The error from building one quoted the whole URL, so an unencoded `%` in a password, a
+  trailing newline or a bad port printed the userinfo and query on stderr, stored them in
+  the run's `error` event and copied them into the model span. Both errors now go through
+  one redaction that drops `url.Parse`'s own text, and `run` refuses an invalid `--base-url`
+  before it creates a run (`TestMalformedBaseURLNeverLeaks`, `TestBuildNeverCarriesAMalformedBaseURL`,
+  `TestMalformedBaseURLNeverLeaksFromTheCLI`). `redact.URL` now fails closed on a string it
+  cannot parse: it trims whitespace, drops the fragment and keeps only the scheme and host
+  when the string holds no `@`, and `[unparseable URL]` otherwise, where it used to keep the
+  userinfo of a string with a leading space or a `/`, `#` or `?` in the password
+  (`TestURLFailsClosedOnAnUnparseableURL`).
+- **An OpenAI-compatible base URL with a query keeps it.** `/chat/completions` was appended
+  after the query, so `http://host/v1?api-version=1` was sent to `/v1`
+  (`TestChatBaseURLQueryIsKept`).
+- **The configured key is masked in more places.** The success-path mask now also covers a
+  key the server escaped in its JSON (`\u0026`, `\/`), the response's `id`, `model` and stop
+  reason, and a key in the URL path of an error or a cassette (`TestSuccessfulOutputIsRedactedWhenEscaped`,
+  `TestEchoedTopLevelFieldsAreMasked`, `TestKeyInTheURLPathIsMasked`).
+
 ### Added
 
 - **Documentation as Twinwright Cloud.** The README is rewritten as the overview of the

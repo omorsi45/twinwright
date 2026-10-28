@@ -62,7 +62,8 @@ type Exchange struct {
 	// included.
 	Seq    int    `json:"seq"`
 	Method string `json:"method"`
-	// URL has had redact.URL applied: no userinfo, no query.
+	// URL has had redact.URL applied: no userinfo, no query. The secrets are
+	// masked in what is left, since some gateways take the key in the path.
 	URL string `json:"url"`
 	// RequestSHA256 is of the request body bytes as sent.
 	RequestSHA256 string `json:"request_sha256"`
@@ -178,7 +179,7 @@ func (t *RecordingTransport) RoundTrip(req *http.Request) (*http.Response, error
 	}
 	ex := Exchange{
 		Method:        req.Method,
-		URL:           redact.URL(req.URL.String()),
+		URL:           redact.Secrets(redact.URL(req.URL.String()), t.secrets...),
 		RequestSHA256: sha256Sum(body),
 		Request:       t.requestJSON(body),
 	}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -14,6 +15,7 @@ import (
 	"unicode"
 
 	"twinwright/internal/agent"
+	"twinwright/internal/redact"
 )
 
 // providerConfig is everything a command needs to say to build a provider.
@@ -205,6 +207,14 @@ func openProvider(cfg providerConfig) (agent.Provider, io.Closer, error) {
 	}
 	if cfg.Model == "" {
 		return nil, nil, fmt.Errorf("model is required for %s", cfg.Name)
+	}
+	// Refused here, before a run exists, with the address redacted: the adapter
+	// would only discover it on the first model call, after the run was created.
+	// url.Parse's own error quotes the string, so it is not repeated.
+	if cfg.Name == "openai-compatible" && cfg.Cassette == "" {
+		if _, err := url.Parse(cfg.BaseURL); err != nil {
+			return nil, nil, fmt.Errorf("--base-url is an invalid URL (%s): remove spaces and control characters, and percent-encode any %%, /, # or ? in the userinfo", redact.URL(cfg.BaseURL))
+		}
 	}
 
 	var client *http.Client

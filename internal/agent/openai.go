@@ -85,7 +85,7 @@ func (p OpenAIProvider) Next(ctx context.Context, task string, history []Message
 	}
 	req, err := http.NewRequestWithContext(attemptCtx, http.MethodPost, endpoint, bytes.NewReader(data))
 	if err != nil {
-		return Message{}, err
+		return Message{}, safeRequestError(err, endpoint, p.APIKey)
 	}
 	req.Header.Set("Authorization", "Bearer "+p.APIKey)
 	req.Header.Set("Content-Type", "application/json")
@@ -134,7 +134,7 @@ func (p OpenAIProvider) Next(ctx context.Context, task string, history []Message
 		return Message{RawBody: redact.String(string(body), p.APIKey)}, truncatedCompletion(reason)
 	}
 	wire.Output = redactOutput(wire.Output, p.APIKey)
-	message := Message{Role: "assistant", RawOutput: wire.Output, Usage: wire.Usage, ResponseID: wire.ID, ServerModel: wire.Model, FinishReason: wire.Status, HTTPStatus: res.StatusCode}
+	message := Message{Role: "assistant", RawOutput: wire.Output, Usage: wire.Usage, ResponseID: redact.Secrets(wire.ID, p.APIKey), ServerModel: redact.Secrets(wire.Model, p.APIKey), FinishReason: redact.Secrets(wire.Status, p.APIKey), HTTPStatus: res.StatusCode}
 	var texts []string
 	for _, raw := range wire.Output {
 		var item struct {

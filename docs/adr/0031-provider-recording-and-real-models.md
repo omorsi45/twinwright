@@ -58,12 +58,17 @@ regenerated.
 - A response body is read up to 4 MiB plus one byte. A body at the limit is
   accepted and a longer one is `ErrResponseTooLarge`, which is an ordinary error
   and not an interruption, so it is not retried.
-- The configured key is masked with `redact.Secrets` in every output item before
-  the item is interpreted, so the content, the tool arguments and the raw items
-  kept for replay all derive from the masked text. Error bodies keep the pattern
-  masks, since their text is not trusted. A transport error goes through
-  `redact.URL` and its cause text is masked, so a base URL with userinfo or a key
-  in its query is not printed.
+- The configured key is masked in every output item before the item is
+  interpreted, as written and as a JSON string escapes it (`\u0026` for `&`, `\/`
+  for `/`), so the content, the tool arguments and the raw items kept for replay
+  all derive from the masked text. The response's `id`, `model` and stop reason
+  are masked the same way. Error bodies keep the pattern masks, since their text
+  is not trusted. A transport error goes through `redact.URL` and its cause text
+  is masked, so a base URL with userinfo or a key in its query or path is not
+  printed. So does the error from building the request. For a URL that does not
+  parse, `url.Parse`'s own text is dropped, because it quotes the part it choked
+  on, and `redact.URL` keeps only the scheme and host of a string it cannot parse,
+  and nothing when the string holds an `@`.
 
 ### Retries cover rate limits, server errors and dropped connections
 
@@ -117,7 +122,7 @@ exchange:
 | Field | Meaning |
 | --- | --- |
 | `seq` | 1-based, counting failed round trips |
-| `method`, `url` | the request line; the URL has lost its userinfo and query |
+| `method`, `url` | the request line; the URL has lost its userinfo, its query and fragment, and the configured key where it was in the path |
 | `request_sha256` | SHA-256 of the request body bytes as sent, before masking |
 | `request` | the request body with the configured secrets masked; the body itself when it is JSON, a JSON string holding it otherwise |
 | `status` | the response status, or 0 when the round trip failed |
@@ -136,8 +141,11 @@ disk and the adapters' too-large refusal reproduces.
 **Replay.** The adapter is rebuilt from the run record (provider and model), the
 cassette header (the ceiling) and the first exchange (the address; for
 `openai-compatible` the trailing `/chat/completions` is removed to give the base
-URL). The key is a fixed placeholder, so replay needs neither `--base-url` nor an
-API key. The cassette is the adapter's only transport. It has no base transport
+URL). The adapter appends `/chat/completions` to the base URL's path and keeps the
+base URL's query on the request, so `http://host/v1?api-version=1` is sent to
+`/v1/chat/completions` with that query, and the query is not in the cassette. The
+key is a fixed placeholder, so replay needs neither `--base-url` nor an API key.
+The cassette is the adapter's only transport. It has no base transport
 and never dials; `TestCassetteNeverDials` replaces the default transport with a
 tripwire to show it.
 
@@ -262,8 +270,10 @@ here.
   more before it fails.
 - A close error on the cassette file is ignored when `run` ends; every write was
   checked when it happened. A full disk was not exercised.
-- The success-path mask knows only the configured key. A credential a model makes
-  up, or a configured secret under 8 characters, is not recognised.
+- The success-path mask knows only the configured key, as written and in the
+  spellings above. A credential a model makes up, a configured secret under 8
+  characters, and a key escaped some other way (such as `\u002f` for `/`) are not
+  recognised.
 - A cassette and the script's run output hold a model's prompts and answers, even
   masked. They are written 0600 or into a temporary directory, and
   `live-model-report.json` and `*.cassette.jsonl` are ignored by git so they are
@@ -271,3 +281,7 @@ here.
 - ADR 0027 said no live provider call had been verified. That stands for the
   hosted vendors. The chat completions adapter is exercised against a real local
   server by the script and the CI job.
+
+## Corrections
+
+- 2026-10-28: the success path, the error path and the cassette URL did not mask what this ADR said they masked. The error from building a request (a base URL that does not parse) was returned as it was and quoted the URL, userinfo and query included; `redact.URL` kept the userinfo of an unparseable string; the response's id, model and stop reason, and a key in the URL path, were not masked; and a key the server escaped in its JSON was not recognised. Each is fixed as the Decision section above now reads. A base URL with a query now keeps it, where the suffix used to be appended inside the query.

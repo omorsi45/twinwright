@@ -1,6 +1,9 @@
 package redact
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestStringMasksSecrets(t *testing.T) {
 	// Assembled at run time so the secret scanner does not flag the fixture.
@@ -56,11 +59,66 @@ func TestURLStripsUserinfoAndTheWholeQuery(t *testing.T) {
 		"https://api.example.com/v1?":              "https://api.example.com/v1",
 		"http://user:***@127.0.0.1:1/v1?key=abc/x": "http://127.0.0.1:1/v1",
 		"": "",
-		"http://user:pw@host:notaport/v1?key=abc": "http://host:notaport/v1",
+		// A fragment is never sent to a server, but it is part of what the string
+		// carries, and a password with an unencoded "#" ends up in it.
+		"https://api.example.com/v1#frag": "https://api.example.com/v1",
+		"http://[::1]:8080/v1?key=abc":    "http://[::1]:8080/v1",
+		// Surrounding whitespace is not part of the URL. A leading blank used to
+		// make the hand-cut fallback miss the scheme and keep the userinfo.
+		" http://user:userinfo-pw@127.0.0.1:1/v1?key=query-token":  "http://127.0.0.1:1/v1",
+		"http://user:userinfo-pw@127.0.0.1:1/v1?key=query-token\n": "http://127.0.0.1:1/v1",
+		" \t ": "",
 	}
 	for in, want := range cases {
 		if got := URL(in); got != want {
 			t.Errorf("URL(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// A string url.Parse rejects is exactly when an error message is most likely to
+// print it, and a hand-cut guess at which part is the userinfo fails on the
+// passwords that break the parse: an unencoded "/", "#" or "?" ends the
+// authority early, so the rest of the password lands in the path, the query or
+// the fragment. URL therefore keeps only what is certainly safe, and nothing at
+// all whenever an "@" could be the end of userinfo.
+func TestURLFailsClosedOnAnUnparseableURL(t *testing.T) {
+	const placeholder = "[unparseable URL]"
+	cases := []struct {
+		name, in, want string
+		// leaks are fragments of the credential that must not survive.
+		leaks []string
+	}{
+		{"unencoded percent in the password", "http://user:pa%ss@127.0.0.1:1/v1?key=query-token/chat/completions", placeholder, []string{"pa%ss", "query-token", "user"}},
+		{"control character after the query", "http://user:userinfo-pw@127.0.0.1:1/v1?key=query-token\n/chat/completions", placeholder, []string{"userinfo-pw", "query-token"}},
+		{"slash in the password", "postgres://perf:hunter2/secret@127.0.0.1:5432/perf", placeholder, []string{"hunter2", "secret"}},
+		{"hash in the password", "postgres://perf:hunter2#secret@127.0.0.1:5432/perf", placeholder, []string{"hunter2", "secret"}},
+		{"question mark in the password", "postgres://perf:hunter2?secret@127.0.0.1:5432/perf", placeholder, []string{"hunter2", "secret"}},
+		{"bad port with userinfo", "http://user:pw-secret@host:notaport/v1?key=abc", placeholder, []string{"pw-secret", "user", "abc"}},
+		{"bad escape in the password and a query", "https://user:p%zz@api.example.com/v1?api_key=abc", placeholder, []string{"p%zz", "abc"}},
+		// These parse, with the front of the password as the port and the rest in
+		// the path, the query or the fragment, so the parse alone cannot be trusted.
+		{"digits then slash", "postgres://perf:12345/secret@127.0.0.1:5432/perf", placeholder, []string{"12345", "secret"}},
+		{"digits then hash", "postgres://perf:12345#secret@127.0.0.1:5432/perf", placeholder, []string{"12345", "secret"}},
+		{"digits then question mark", "postgres://perf:12345?secret@127.0.0.1:5432/perf", placeholder, []string{"12345", "secret"}},
+		{"no userinfo, bad port", "http://host:notaport/v1?key=abc", "http://host", []string{"notaport", "abc", "v1"}},
+		{"no userinfo, bad escape in the path", "https://api.example.com:8443/%zz/key-abcdef?x=1", "https://api.example.com:8443", []string{"zz", "abcdef", "x=1"}},
+		{"no userinfo, bad escape and a fragment", "https://api.example.com/%zz#frag-abcdef", "https://api.example.com", []string{"abcdef"}},
+		{"host that is not plain", "http://ho st:80/%zz", placeholder, []string{"ho st"}},
+		{"bracketed host is not recovered", "http://[::1]:99/%zz", placeholder, nil},
+		{"not a URL", "not a url %zz", placeholder, []string{"not a url"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := URL(tc.in)
+			if got != tc.want {
+				t.Errorf("URL(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+			for _, leak := range tc.leaks {
+				if strings.Contains(got, leak) {
+					t.Errorf("URL(%q) = %q still carries %q", tc.in, got, leak)
+				}
+			}
+		})
 	}
 }

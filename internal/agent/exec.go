@@ -311,22 +311,6 @@ func (p ExecProvider) childEnvironment() (env, secrets []string, err error) {
 	return append(env, p.Env...), secrets, nil
 }
 
-// maskSecrets hides each secret in s, both as written and as it appears inside
-// a JSON string, which is where an agent's answer carries it. The result is
-// still valid JSON: the replacement has no characters that need escaping.
-func maskSecrets(s string, secrets []string) string {
-	for _, secret := range secrets {
-		if len(secret) < 8 {
-			continue
-		}
-		s = redact.Secrets(s, secret)
-		if encoded, err := json.Marshal(secret); err == nil {
-			s = redact.Secrets(s, string(encoded[1:len(encoded)-1]))
-		}
-	}
-	return s
-}
-
 // stopProcessGroup ends a process group that has overrun, and reaps it.
 //
 // SIGTERM first, so a well-behaved agent can clean up; SIGKILL after the grace
