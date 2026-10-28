@@ -121,6 +121,63 @@ database written by a newer build is refused rather than downgraded.
   `go test`.
 - **A crash boundary table in `docs/distributed.md`.** For each of the seven
   points, what is durable at death and the test that proves recovery from it.
+- **Provider turns record the provider's own account of the response, and
+  `--max-output-tokens` sets the ceiling.** Each adapter stores the response ID,
+  the model the server says answered, the finish or stop reason and the HTTP
+  status on the turn (`response_id`, `server_model`, `finish_reason`,
+  `http_status`), so two runs can be compared field for field. All four are
+  omitted when empty, so a scripted run's ledger and the committed bench baseline
+  are unchanged. `--max-output-tokens` is accepted by every command that can reach
+  a provider: 0 keeps each provider's own default (no ceiling sent to an
+  OpenAI-compatible server, 4096 for Anthropic, whose API requires one) and a
+  negative value is refused. See ADR 0031.
+- **Provider cassettes: `run --record-cassette` and `replay --cassette`.** Replay
+  from the ledger reproduces a run's own bookkeeping but never runs the adapter
+  that produced the turns. `twinwright run ... --record-cassette PATH` appends
+  every HTTP exchange of the provider to a JSON-lines file, a header line naming
+  the provider, model and output ceiling and then one line per exchange, and
+  `twinwright replay <run> --cassette PATH` re-executes the run through the run's
+  own adapter, answered from that file, so response parsing, the recorded metadata
+  and the interruption classification are in the loop. Replay needs neither
+  `--base-url` nor an API key, and the cassette transport never dials
+  (`TestCassetteNeverDials`). A request is matched by method, URL path and request
+  hash, and a divergence names the exchange and the first field that differs.
+  Request headers are never recorded, a URL loses its userinfo and query, and both
+  bodies are masked with the configured key; the hash is taken over the bytes as
+  sent, so a replay with a placeholder key still matches. The flag exists on `run`
+  only and is refused for the scripted provider and with `--enqueue`. Limits: a
+  recorded per-attempt timeout replays as a `transport` interruption, so the
+  replay reports a divergence; a `Retry-After` given as an HTTP date is clock
+  relative and is not verified to replay identically; a response body that is not
+  valid UTF-8 is stored as a JSON string; cassettes for forked or resumed runs and
+  an Anthropic record and replay are not tested. See ADR 0031.
+- **A real model run: `scripts/live-model.sh`, `make live-model` and the
+  `real-model` job.** Every other test answers the provider adapters from a script
+  or a recording; this runs a small model that was not written for the test.
+  `scripts/live-model.sh [BASE_URL] [MODEL]` (Ollama's `http://127.0.0.1:11434/v1`
+  and `$TW_LIVE_MODEL` by default) builds the CLI and the billing manifest, runs
+  `duplicate-charge` with `--agent openai-compatible --record-cassette` and
+  `--steps 12`, prints the evaluation verdict, replays the run from its ledger and
+  then from the cassette, and writes `live-model-report.json`: the model, the
+  server's host and port, whether the evaluation passed, model turns, tool calls,
+  both replay verdicts, the cassette's exchange count, per-step wall times and the
+  model's digest from Ollama's `/api/tags`. It exits non-zero when recording fails,
+  when the run does not reach `completed` (replay needs a completed run, and the
+  report is still written) or when either replay is not verified; the evaluation
+  verdict is reported and never gates. The `real-model` job in `integration.yml`
+  starts the pinned `ollama/ollama:0.40.11`, pulls `qwen2.5:1.5b`, runs the script,
+  stops the container, replays from the cassette with the server gone, and uploads
+  the report and the cassette as artifacts. The script ran against that image on a
+  developer machine and the job's steps were run in order there; the job had not
+  run on GitHub Actions when this was written. See ADR 0031.
+- **Opt-in live provider tests.** `TestLiveOpenAIToolCall`
+  (`TWINWRIGHT_TEST_LIVE_OPENAI=1`, `OPENAI_API_KEY`, `TW_LIVE_OPENAI_MODEL`) and
+  `TestLiveAnthropicToolCall` (`TWINWRIGHT_TEST_LIVE_ANTHROPIC=1`,
+  `ANTHROPIC_API_KEY`, `TW_LIVE_ANTHROPIC_MODEL`) each make one real call offering
+  `getCustomer` and require a model turn with a response ID, a 200 status and
+  a `getCustomer` call carrying a call ID and an `id` argument. Each skips with a
+  message naming what is not set. Nothing runs them in CI, and neither had been
+  run against a vendor when this was written.
 
 ### Fixed
 
@@ -165,6 +222,20 @@ database written by a newer build is refused rather than downgraded.
   request. A test pins the behaviour and ADR 0029 lists it under remaining
   limits.
 
+- **A key echoed by a model, and a base URL that carries credentials, no longer
+  reach the ledger or an error message.** Error bodies were masked but a
+  successful response was not, so a model that repeated the configured key in its
+  content or in a tool argument had it written to the ledger and the stored
+  transcript. Every adapter now masks the key in each output item before the item
+  is interpreted, so the content, the tool arguments and the raw items kept for
+  replay all derive from the masked text (`TestSuccessfulOutputIsRedacted`). A
+  failed request returned the standard library's error, which prints the full
+  request URL with its userinfo and query; transport errors now go through
+  `redact.URL` and their cause text is masked
+  (`TestTransportErrorHidesURLQueryAndUserinfo`). Only the configured key is
+  masked on the success path, and `redact.Secrets` ignores a secret shorter than 8
+  characters. See ADR 0031.
+
 ### Changed
 
 - **The Go directive is 1.27.3 to take the fix for GO-2026-6809.** The advisory
@@ -188,6 +259,28 @@ database written by a newer build is refused rather than downgraded.
   without a fence, the real-process test kills one
   process at a time, and the matrix covers three scenarios. The README's
   distributed semantics and limitations were updated to match.
+
+- **A response over 4 MiB is an error, and a 429, a 5xx or a dropped connection
+  is retried once.** The adapters read a body through a silent 4 MiB limit, so a
+  longer body reached the decoder cut in half. It is now `ErrResponseTooLarge`,
+  which is not retried, and one byte past the limit is read so a body exactly at
+  it is accepted (`TestResponseAtTheLimitIsStillAccepted`,
+  `TestReadBodyStopsReadingOneBytePastTheLimit`). A 429, a 500, 502, 503 or 504,
+  and a request that failed before any response arrived, used to fail the run on
+  the first attempt. They are now interruptions of kind `rate_limited`,
+  `server_error` or `transport`, retried once like a timeout or a truncated
+  completion, and recorded as `provider.interrupted` events that also carry the
+  HTTP status and the server's `Retry-After` in milliseconds as `status` and
+  `retry_after_ms`. The wait before the second attempt is the server's
+  `Retry-After` (whole seconds or an HTTP date) capped at 30 seconds, or one second
+  when none was sent or it was unusable; timeouts and truncations still retry at
+  once. Cancelling the run during the wait returns the context error with no second
+  attempt. Replay never waits: a replayed turn carries its interruptions, and a
+  replay through a cassette skips the wait (`TestRetriedRunStillReplays`,
+  `TestCassetteReplayDoesNotWaitOutARecordedRateLimit`). Every other non-2xx status,
+  501, 505 and 529 included, stays an ordinary error and is not retried. Limit:
+  `twinwright trace` copies an interruption's kind, attempt, reason and deadline
+  into the span but not its `status` or `retry_after_ms`. See ADR 0031.
 
 ## v0.1.0 - 2026-09-30
 

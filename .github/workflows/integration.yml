@@ -4,8 +4,10 @@ name: Integration
 # separate from CI so an infrastructure hiccup here cannot block a merge on
 # work it has nothing to do with, and so the fast lane stays fast.
 #
-# Nothing in this workflow calls a model provider. Live-provider tests are
-# opt-in and only run where credentials exist, which is not here.
+# Only the real-model job calls a model, and it calls one served from a local
+# Ollama container: no hosted provider is called, and no key is configured in
+# this workflow. The hosted-provider live tests (TestLiveOpenAIToolCall and
+# TestLiveAnthropicToolCall) are opt-in and run nowhere in CI.
 
 on:
   push:
@@ -110,3 +112,112 @@ jobs:
           ./twinwright container start --config examples/container/http-echo.yaml
           ./twinwright container status --config examples/container/http-echo.yaml
           ./twinwright container stop --config examples/container/http-echo.yaml
+
+  real-model:
+    name: a real small model on a local Ollama server, recorded and replayed
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # Every other test answers the provider adapters from a script or a recording.
+    # This job is the one place a model nobody wrote for the test makes the
+    # decisions, and it proves two things about it: that a run against a real
+    # server can be recorded, and that the recording reconstructs the run with the
+    # server stopped. It does not gate on the model getting the scenario right: the
+    # evaluation verdict is reported, because a small model failing a scenario is a
+    # result and not a broken build. It does fail when the run cannot be recorded,
+    # does not complete, or does not replay.
+    #
+    # The model runs on CPU, so the first call includes loading it and the script
+    # gives each provider attempt 300 seconds instead of the CLI's 90.
+    env:
+      OPENAI_API_KEY: ""
+      ANTHROPIC_API_KEY: ""
+      TW_LIVE_MODEL: qwen2.5:1.5b
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: choose where the run's files go
+        # The runner context is not available in a job-level env, so the
+        # directory is exported from a step. It is outside the checkout, so
+        # nothing the script writes can be committed from here.
+        run: echo "TW_LIVE_OUT=$RUNNER_TEMP/live" >> "$GITHUB_ENV"
+
+      - name: start ollama
+        # A pinned tag, not latest: the server version is part of what the report
+        # describes.
+        run: docker run -d --name ollama -p 11434:11434 ollama/ollama:0.40.11
+
+      - name: wait for the server
+        run: |
+          for _ in $(seq 1 60); do
+            if curl -fsS --max-time 5 http://127.0.0.1:11434/api/tags > /dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs ollama
+          echo "ollama did not answer on 127.0.0.1:11434" >&2
+          exit 1
+
+      - name: pull the model
+        # Pulling up front keeps the download out of the first call's deadline. A
+        # failed pull is tried again twice before the job fails.
+        run: |
+          for attempt in 1 2 3; do
+            if docker exec ollama ollama pull "$TW_LIVE_MODEL"; then
+              exit 0
+            fi
+            echo "pull attempt $attempt failed" >&2
+            sleep 10
+          done
+          exit 1
+
+      - name: record a run with the model and replay it from the ledger and the cassette
+        run: ./scripts/live-model.sh
+
+      - name: stop the server and replay from the cassette alone
+        # The script already replayed from the cassette while the server was up.
+        # This replay runs after the container is stopped and the port is shown to
+        # be closed, so a verdict here cannot have come from the server.
+        run: |
+          set -euo pipefail
+          docker stop ollama
+          if curl -fsS --max-time 5 http://127.0.0.1:11434/api/tags > /dev/null 2>&1; then
+            echo "the server still answers after docker stop" >&2
+            exit 1
+          fi
+          run_id="$(jq -r .run_id "$TW_LIVE_OUT/live-model-report.json")"
+          env -u OPENAI_API_KEY -u OPENAI_BASE_URL "$TW_LIVE_OUT/twinwright" replay "$run_id" \
+            --manifest "$TW_LIVE_OUT/billing.manifest.json" --db "$TW_LIVE_OUT/live.db" \
+            --cassette "$TW_LIVE_OUT/live.cassette.jsonl" | tee "$TW_LIVE_OUT/replay-server-stopped.json"
+          jq -e '.verified == true' "$TW_LIVE_OUT/replay-server-stopped.json"
+          # The digest is what ties the report to specific weights, so a report
+          # without one is not a report this job accepts.
+          jq -e '.model_digest | length > 0' "$TW_LIVE_OUT/live-model-report.json"
+
+      - name: show the report
+        if: always()
+        run: |
+          if [ -f "$TW_LIVE_OUT/live-model-report.json" ]; then
+            jq . "$TW_LIVE_OUT/live-model-report.json"
+          else
+            echo "the script wrote no report" >&2
+          fi
+
+      - name: server log
+        if: failure()
+        run: docker logs --tail 100 ollama
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: live-model-run
+          path: |
+            ${{ runner.temp }}/live/live-model-report.json
+            ${{ runner.temp }}/live/live.cassette.jsonl
+          if-no-files-found: warn
+          retention-days: 30
+

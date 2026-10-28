@@ -66,6 +66,10 @@ gate: build ## bench the scripted suite and gate it against the approved baselin
 	./twinwright bench --suite standard --agent scripted --examples examples --out bench-candidate.json > /dev/null
 	./twinwright gate --baseline examples/bench/baselines/standard-scripted.json --candidate bench-candidate.json
 
+.PHONY: live-model
+live-model: ## run a local Ollama model on the billing world and replay it (needs TW_LIVE_MODEL; LIVE_BASE_URL optional)
+	./scripts/live-model.sh "$(LIVE_BASE_URL)" "$(TW_LIVE_MODEL)"
+
 .PHONY: up
 up: ## start PostgreSQL and an OpenTelemetry collector
 	docker compose up -d
