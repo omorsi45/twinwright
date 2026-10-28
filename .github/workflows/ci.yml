@@ -114,11 +114,10 @@ jobs:
       # exits non-zero. It covers ground e2e.sh does not - the four-service
       # incident, a crashed worker recovered by another, a deliberate failure and
       # its counterfactual - so a regression in those shows up as a red build
-      # instead of as a reader discovering it.
+      # instead of as a reader discovering it. It runs through `make demo`, the
+      # command a reader types, so the Makefile target is held to the same bar.
       - name: the narrated walkthrough verifies every step
-        run: |
-          go build -o /tmp/twinwright ./cmd/twinwright
-          /tmp/twinwright demo --dir "$(mktemp -d)/demo"
+        run: make demo
 
   regression-gate:
     name: bench regression gate

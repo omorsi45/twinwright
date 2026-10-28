@@ -13,6 +13,33 @@ database written by a newer build is refused rather than downgraded.
 
 ### Added
 
+- **Two one-command demos: `make demo` and `make demo-stack`.** `make demo` builds the
+  CLI and runs the 12-step scripted `twinwright demo` in a temporary directory, with no
+  network and no key; the CI end-to-end job now runs the walkthrough through it.
+  `make demo-stack` runs `scripts/demo-stack.sh`. It starts the Compose PostgreSQL,
+  OpenTelemetry Collector, Jaeger and Prometheus, recreates two databases of its own
+  (`twinwright_demo_company` and `twinwright_demo_billing`, never `twinwright`), queues
+  six company-incident runs and two duplicate-charge runs, and runs three workers on the
+  host with `--otlp-endpoint`. Worker A is killed with SIGKILL while it holds a run and
+  worker B takes the run over after the 5 second lease lapses; a PostgreSQL `SHARE` lock
+  on the ledger table holds A's run in place, so the kill does not race a run that takes
+  milliseconds. The script exits non-zero unless six checks hold: all 8 runs completed;
+  the ownership log shows B taking over A's lease; Prometheus counts the takeover in
+  `twinwright_worker_takeovers_total`; Prometheus scraped both workers (A's target is
+  down after its kill, which is expected); every run's trace is queryable in Jaeger by its
+  trace ID; and the benchmark gate passes against the approved baseline. In three local
+  runs on WSL2 with Docker (a fresh stack, a re-run against the running stack, and a
+  re-run against a Prometheus still holding the old one-target configuration) all six
+  checks held; a copy pointed at a missing baseline failed check 6 and exited 1, and a
+  SIGTERM during the lock phase left no worker process and no lock session behind. The
+  stack is left running and `make down` stops it. While it runs, the two metrics
+  endpoints (ports 9095 and 9096) listen on all interfaces with no authentication,
+  because the Prometheus container reaches the host through the bridge gateway.
+  `deploy/prometheus.yml` now scrapes both ports. Delivery is still at-least-once: the
+  takeover re-executes the run from the ledger, and the demo adds nothing to the ledger
+  beyond normal runs. A new Integration job, `demo-stack`, runs `make demo-stack` on
+  every Integration trigger; its CI result is not recorded here.
+
 - **Measured platform results, a methodology, and ADR 0034.** Two `twinwright perf`
   reports are committed unchanged in `docs/benchmarks/`, one for SQLite on a Windows
   PC under WSL2 and one for PostgreSQL 17 on a GitHub runner, each with three trials.

@@ -12,8 +12,10 @@ name: Integration
 # Jobs: postgres (storage and the distributed runtime on two PostgreSQL majors),
 # docker (the container executor against a real daemon), observability (spans
 # read back from Jaeger and a worker's metrics scraped by Prometheus),
-# real-model (a small model, recorded and replayed) and perf (the platform
-# benchmarks on PostgreSQL 17, run only from a manual dispatch).
+# real-model (a small model, recorded and replayed), perf (the platform
+# benchmarks on PostgreSQL 17, run only from a manual dispatch) and demo-stack
+# (the one-command demo: two workers, a takeover, the collector, Jaeger and
+# Prometheus, all checked by queries).
 
 on:
   push:
@@ -390,4 +392,58 @@ jobs:
             perf.json
             runner.txt
           if-no-files-found: warn
+
+  demo-stack:
+    name: one-command demo stack (PostgreSQL, two workers, collector, Jaeger, Prometheus)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # The other jobs each prove one claim against one service. This one runs the
+    # whole platform the way a person runs it, `make demo-stack`, and fails when any
+    # of its six checks is missing: eight runs completed on a Compose PostgreSQL
+    # server by three workers started on the host, a worker killed with SIGKILL
+    # while it holds a run and the run taken over by another worker, the takeover
+    # counted by Prometheus, both workers scraped by Prometheus, every run's trace
+    # read back from Jaeger by trace ID, and the benchmark gate passing against the
+    # approved baseline. It calls no model.
+    #
+    # The script holds the killed worker's run in place with a PostgreSQL lock, so
+    # the kill lands while the lease is held instead of racing a run that takes
+    # milliseconds. Its two metrics endpoints listen on all interfaces, because the
+    # Prometheus container reaches the host through the bridge gateway, and have no
+    # authentication; the runner is discarded with the job.
+    env:
+      OPENAI_API_KEY: ""
+      ANTHROPIC_API_KEY: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: choose where the failure logs go
+        # The runner context is not available in a job-level env, so the
+        # directory is exported from a step. The script copies its worker logs
+        # here on exit, with any DSN password masked.
+        run: echo "TW_DEMO_LOGS=$RUNNER_TEMP/demo-logs" >> "$GITHUB_ENV"
+
+      - name: make demo-stack
+        run: make demo-stack
+
+      - name: stack logs and worker logs
+        if: failure()
+        run: |
+          docker compose ps
+          docker compose logs
+          for f in "$TW_DEMO_LOGS"/worker-*.log "$TW_DEMO_LOGS"/lock-session.log; do
+            if [ -f "$f" ]; then
+              echo "::group::$(basename "$f")"
+              cat "$f"
+              echo "::endgroup::"
+            fi
+          done
+
+      - name: stop the stack
+        if: always()
+        run: docker compose down -v
 
