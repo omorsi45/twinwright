@@ -48,14 +48,48 @@ identifier is interpolated is the PostgreSQL `search_path` schema name in
 `CREATE SCHEMA`, which cannot be a bind parameter; it is validated against a
 plain-identifier pattern first.
 
+**Agent processes.** `--agent exec` starts a program of yours once per turn. That
+program is not trusted: it can only propose tool calls, and the dispatcher
+authorizes and executes them, so the run's policy holds whatever it proposes. Its
+environment is `PATH`, `HOME` and the variables named with `--agent-env`, so it
+never receives the database address or a provider key unless you name that
+variable, and `NAME=value` is refused so no secret is typed on a command line.
+Without `--agent-container` it runs with your privileges and Twinwright does not
+stop it reading files or opening connections. With `--agent-container IMAGE` it
+runs under a read-only root, with all capabilities dropped, no-new-privileges, a
+non-root user, resource caps and no network by default. The limits of that mode:
+the Docker daemon is trusted, there is no custom seccomp profile, a network you
+allow is unrestricted, on macOS and Windows the boundary is the Docker Desktop VM,
+and the container of an agent that timed out can keep running after the docker
+client that started it has gone. Section 7 of `docs/security-review.md` has the
+test behind each claim, and ADR 0033 records the decision.
+
+**Recordings.** `run --record-cassette` writes the provider's HTTP exchanges to a
+file. Request headers are never written, a URL loses its userinfo and query, and
+the configured key is masked in both bodies. The file still holds the prompts and
+the model's answers in full, and only the key you configured is masked, so
+**do not commit a cassette or a live-model report**. `*.cassette.jsonl` and
+`live-model-report.json` are in `.gitignore`. ADR 0031 records the decision.
+
 ## Deployment notes
 
 - **The metrics endpoint is unauthenticated** and off by default. It exposes
   queue depth, run counts and ownership topology. Bind it to loopback, or put it
   behind something that authenticates.
-- **Container execution is experimental.** It runs a sidecar for a world and is
-  not a sandbox for untrusted code. Do not rely on it to contain a hostile
-  workload.
+- **The observability stack has no TLS and no authentication.** The collector,
+  Jaeger and Prometheus in `docker-compose.yml` are for development: Compose
+  publishes every port on loopback only, so they are not reachable from other
+  machines. Do not expose them. Trace export is best effort and its failures are
+  logged with credentials scrubbed. ADR 0032 records the decision.
+- **`make demo-stack` opens two listeners on all interfaces while it runs.** Its
+  workers serve metrics on `0.0.0.0:9095` and `0.0.0.0:9096`, without
+  authentication, because the Prometheus container reaches the host through the
+  bridge gateway and a loopback listener does not answer there. They exist only
+  while the demo runs. Do not run it on a machine whose network you do not trust.
+- **Container execution of world sidecars is experimental.** It runs a sidecar for
+  a world and is not a sandbox for untrusted code. Do not rely on it to contain a
+  hostile workload. Agent containers (`--agent-container`) are covered under
+  "Agent processes" above.
 - **The PostgreSQL DSN carries credentials.** Pass it through the environment or
   a secret manager, not a shell history.
 - **Provider API keys** are only needed for live-provider runs. Every

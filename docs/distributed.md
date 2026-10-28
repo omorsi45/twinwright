@@ -239,6 +239,38 @@ on exit, including on Ctrl-C and `SIGTERM`. A run leased by a live fleet worker 
 refused with the owner and expiry named. After `kill -9` the lease stays until it
 expires, so `resume` is refused for up to 15 seconds.
 
+#### Ctrl-C, a second Ctrl-C, and what is left behind
+
+The release at the end of a local run deliberately ignores the command's
+cancellation, because Ctrl-C is the case the release exists for. A release with no
+deadline of its own would let a stalled database hold the process open after
+Ctrl-C, so it is bounded: `releaseTimeout` in `internal/worker/local.go` is 5
+seconds. `TestReleaseContextSurvivesCancellationButIsBounded` in
+`internal/worker/local_test.go` holds both halves, that cancelling the command does
+not reach the release and that its deadline is about 5 seconds away.
+
+A second Ctrl-C ends the process without waiting for the release.
+`executeLocally` in `cmd/twinwright/distributed.go` calls
+`context.AfterFunc(signalCtx, stop)`, which stops the signal handler as soon as the
+first signal arrives, so a later signal reaches the default handler and the process
+exits. **No test covers this.** Showing it needs a real process that receives two
+signals, and none has been written.
+
+If the release is cut short, skipped by that second Ctrl-C or fails, the lease is
+left to lapse on its own TTL, 15 seconds for a local run
+(`TestExecuteLocalDefaultsToTheShortLocalTTL`), after which `resume` is accepted. A
+failed release is reported next to the cancellation, never swallowed
+(`TestExecuteLocalReportsAFailedReleaseAfterCancellation`), and the takeover of an
+expired lease is held for every lease by `TestClaimRunStillTakesOverAnExpiredLease`.
+No test interrupts a local run twice, waits out the TTL and then resumes it, so the
+whole sequence is covered in pieces only.
+
+An interrupted run tells you what to do. The error reads
+`run R-1 interrupted; resume it with `twinwright resume R-1``, followed by the
+cause, and it is not worded as a failure, because the run is intact and `resume`
+picks it up. `TestLocalRunErrorSaysWhatActuallyHappened` in
+`cmd/twinwright/main_test.go` pins the wording.
+
 ### Limits
 
 `fork`, `counterfactual` and the non-distributed `bench` modes execute their own
@@ -246,6 +278,19 @@ new runs without a fence, and so does the shadow simulation. `bench` distributed
 mode runs through the fenced `crashmatrix` harness. The real-process test kills
 processes one at a time and does not show concurrent multi-process contention on
 one SQLite file. The matrix covers three scenarios.
+
+### Scraping a fleet
+
+The gauges read from the database at scrape time (queue depth, run statuses, tool
+calls, retries, authorization denials, chaos injections, ownership transitions, the
+age of the oldest runnable entry) are served by every worker for the database it
+points at. With several workers on one database each of them reports the same
+numbers. Scrape one worker, or aggregate with `max`, never `sum`: a sum multiplies
+every one of those gauges by the number of workers. The counters that are
+in-process (claims, dispositions, takeovers, fencing rejections, lease renewals,
+execution seconds) belong to one worker each and are the ones to sum.
+`TestRenderReportsQueueRunAndLedgerState` holds what the gauges report. Serving them
+once for the fleet was left out, and ADR 0032 lists this among its limits.
 
 ## Seeing it happen
 
