@@ -746,3 +746,118 @@ func TestWorkerExportsARunSettledPastTheDeliveryLimit(t *testing.T) {
 		t.Fatalf("outcome=%+v exported=%v", outcome, exported)
 	}
 }
+
+// TestRenewalsAreCounted holds a run across several renewals and checks that
+// each successful one is reported through OnRenew with the lease the store
+// returned. Renewal is the only liveness signal a long run gives, and before
+// this hook the renewals counter could never move.
+func TestRenewalsAreCounted(t *testing.T) {
+	ctx := context.Background()
+	manifest := billingManifest(t)
+	s := openStore(ctx, t)
+	clock := newClock()
+	run := seedRun(ctx, t, s, manifest, "")
+	if err := s.Enqueue(ctx, run.ID, 10, clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var renewed []store.RunLease
+	enough := make(chan struct{})
+	record := func(lease store.RunLease) {
+		mu.Lock()
+		defer mu.Unlock()
+		renewed = append(renewed, lease)
+		switch len(renewed) {
+		case 1:
+			// Move the manual clock so the next renewal visibly extends the lease.
+			clock.Advance(10 * time.Second)
+		case 2:
+			close(enough)
+		}
+	}
+	execute := realExecutor(s, manifest, clock.Clock())
+	hold := func(execCtx context.Context, lease store.RunLease, entry store.QueueEntry) (store.Run, error) {
+		select {
+		case <-enough:
+		case <-execCtx.Done():
+			return store.Run{}, execCtx.Err()
+		case <-time.After(10 * time.Second):
+			return store.Run{}, errors.New("the lease was not renewed twice while the run was held")
+		}
+		return execute(execCtx, lease, entry)
+	}
+	w := New(s, hold, Config{
+		ID: "worker-a", LeaseTTL: time.Minute, RenewEvery: 10 * time.Millisecond,
+		Clock: clock.Clock(), Logger: quietLogger(), OnRenew: record,
+	})
+	if err := w.Register(ctx); err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := w.ClaimAndRun(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.Disposition != Finished {
+		t.Fatalf("outcome=%+v", outcome)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(renewed) < 2 {
+		t.Fatalf("renewals reported=%d want at least 2", len(renewed))
+	}
+	for _, lease := range renewed {
+		if lease.RunID != run.ID || lease.Owner != "worker-a" || lease.Token != outcome.Fence {
+			t.Fatalf("OnRenew got %+v, want the claim's own lease (run %s, fence %d)", lease, run.ID, outcome.Fence)
+		}
+	}
+	if !renewed[1].ExpiresAt.After(renewed[0].ExpiresAt) {
+		t.Fatalf("OnRenew did not get the renewed lease: expiry %v then %v", renewed[0].ExpiresAt, renewed[1].ExpiresAt)
+	}
+}
+
+// TestFailedRenewalIsNotCounted: a renewal the store refuses means the run
+// moved on, and counting it would report liveness the worker does not have.
+func TestFailedRenewalIsNotCounted(t *testing.T) {
+	ctx := context.Background()
+	manifest := billingManifest(t)
+	s := openStore(ctx, t)
+	clock := newClock()
+	run := seedRun(ctx, t, s, manifest, "")
+	if err := s.Enqueue(ctx, run.ID, 10, clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	calls := 0
+	stolen := func(execCtx context.Context, lease store.RunLease, entry store.QueueEntry) (store.Run, error) {
+		// Another worker takes the run before the first renewal is due.
+		clock.Advance(2 * time.Minute)
+		if _, err := s.AcquireRunLease(ctx, lease.RunID, "worker-b", time.Minute, clock.Now()); err != nil {
+			return store.Run{}, err
+		}
+		select {
+		case <-execCtx.Done():
+			return store.Run{}, execCtx.Err()
+		case <-time.After(10 * time.Second):
+			return store.Run{}, errors.New("execution was never cancelled after the lease was lost")
+		}
+	}
+	w := New(s, stolen, Config{
+		ID: "worker-a", LeaseTTL: time.Minute, RenewEvery: 250 * time.Millisecond, Clock: clock.Clock(), Logger: quietLogger(),
+		OnRenew: func(store.RunLease) { mu.Lock(); calls++; mu.Unlock() },
+	})
+	if err := w.Register(ctx); err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := w.ClaimAndRun(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.Disposition != Fenced {
+		t.Fatalf("outcome=%+v want fenced", outcome)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 0 {
+		t.Fatalf("OnRenew was called %d times for renewals the store refused", calls)
+	}
+}

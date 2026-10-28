@@ -11,11 +11,14 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,6 +29,7 @@ import (
 	"twinwright/internal/behavior"
 	"twinwright/internal/bench"
 	"twinwright/internal/compiler"
+	"twinwright/internal/metrics"
 	"twinwright/internal/store"
 	"twinwright/internal/trace"
 	"twinwright/internal/worker"
@@ -2504,5 +2508,175 @@ func TestTraceCommandExportSendsTheHeaderAndReportsTheTraceID(t *testing.T) {
 	err := runCLI([]string{"trace", runID, "--format", "otlp", "--db", db, "--otlp-endpoint", collector.URL, "--otlp-header", "no-colon"}, &out)
 	if err == nil || err.Error() != `--otlp-header must be "Name: value"` {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+// The metrics package declares the disposition label values so it can render
+// them at zero before the first claim. It cannot import the worker package, so
+// this is the one place a renamed or added disposition is caught.
+func TestMetricsDispositionLabelsMatchTheWorkerDispositions(t *testing.T) {
+	want := []string{
+		string(worker.Failed), string(worker.Fenced), string(worker.Finished), string(worker.Requeued),
+	}
+	sort.Strings(want)
+	if got := metrics.DispositionLabels(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("metrics.DispositionLabels()=%v, worker dispositions=%v", got, want)
+	}
+}
+
+// The worker command wires renewals and claim durations into the same counters
+// the endpoint serves. The run is held until the first renewal has been counted,
+// so the test sees the wiring work without depending on sleeps.
+func TestInstrumentedWorkerCountsRenewalsAndTimesEveryClaim(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "metrics.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	world, err := s.Seed(ctx, 42, "digest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var runIDs []string
+	base := time.Now().UTC().Add(-time.Minute)
+	for i := 0; i < 2; i++ {
+		run, err := s.CreateRun(ctx, world.ID, "duplicate-charge", "scripted", "fixture-v1", "task", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = s.Enqueue(ctx, run.ID, 10, base.Add(time.Duration(i)*time.Millisecond)); err != nil {
+			t.Fatal(err)
+		}
+		runIDs = append(runIDs, run.ID)
+	}
+	failing := runIDs[1]
+	renewed := make(chan struct{}, 1)
+	execute := func(execCtx context.Context, lease store.RunLease, _ store.QueueEntry) (store.Run, error) {
+		if lease.RunID == failing {
+			return store.Run{}, errors.New("provider unavailable")
+		}
+		select {
+		case <-renewed:
+			return store.Run{ID: lease.RunID, Status: "completed"}, nil
+		case <-execCtx.Done():
+			return store.Run{}, execCtx.Err()
+		case <-time.After(10 * time.Second):
+			return store.Run{}, errors.New("no renewal was counted while the run was held")
+		}
+	}
+	w := worker.New(s, execute, worker.Config{ID: "w", LeaseTTL: time.Minute, RenewEvery: 10 * time.Millisecond, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	counters := metrics.NewCounters()
+	instrumentWorker(w, counters)
+	counted := w.Config.OnRenew
+	w.Config.OnRenew = func(lease store.RunLease) {
+		counted(lease)
+		select {
+		case renewed <- struct{}{}:
+		default:
+		}
+	}
+	if err = w.Register(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []worker.Disposition{worker.Finished, worker.Requeued} {
+		outcome, err := w.ClaimAndRun(ctx)
+		if err != nil || outcome.Disposition != want {
+			t.Fatalf("outcome=%+v err=%v want %s", outcome, err, want)
+		}
+	}
+
+	body, err := metrics.Collector{Counters: counters, WorkerID: "w"}.Render(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	match := regexp.MustCompile(`twinwright_worker_lease_renewals_total\{worker="w"\} (\d+)`).FindStringSubmatch(body)
+	if match == nil {
+		t.Fatalf("no renewals sample\n%s", body)
+	}
+	if n, _ := strconv.Atoi(match[1]); n < 1 {
+		t.Fatalf("renewals=%s, want the worker's renewals to be counted\n%s", match[1], body)
+	}
+	for _, want := range []string{
+		`twinwright_worker_claims_total{worker="w"} 2`,
+		`twinwright_worker_claim_disposition_total{disposition="finished",worker="w"} 1`,
+		`twinwright_worker_claim_disposition_total{disposition="requeued",worker="w"} 1`,
+		`twinwright_worker_claim_disposition_total{disposition="failed",worker="w"} 0`,
+		`twinwright_worker_claim_disposition_total{disposition="fenced",worker="w"} 0`,
+		// Every disposition is timed, so the failed attempt counts too.
+		`twinwright_worker_run_duration_seconds_count{worker="w"} 2`,
+		`twinwright_worker_run_duration_seconds_bucket{le="+Inf",worker="w"} 2`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("metrics lack %q\n%s", want, body)
+		}
+	}
+}
+
+// The wiring test above covers the pieces; this one runs the command itself and
+// scrapes the endpoint it serves.
+func TestWorkerMetricsEndpointServesTheCompleteSet(t *testing.T) {
+	dir := t.TempDir()
+	manifestPath := buildBillingManifest(t, dir)
+	db := filepath.Join(dir, "world.db")
+	enqueueBillingRun(t, manifestPath, db)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := listener.Addr().String()
+	if err = listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	var out bytes.Buffer
+	go func() {
+		done <- workerCommand(ctx, []string{"worker", "--manifest", manifestPath, "--db", db, "--id", "metrics-worker",
+			"--poll", "20ms", "--lease-ttl", "60s", "--metrics-addr", addr}, &out)
+	}()
+	defer func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(15 * time.Second):
+			t.Error("the worker did not stop after its context was cancelled")
+		}
+	}()
+
+	scrape := func() string {
+		response, err := http.Get("http://" + addr + "/metrics")
+		if err != nil {
+			return ""
+		}
+		defer response.Body.Close()
+		body, _ := io.ReadAll(response.Body)
+		return string(body)
+	}
+	const finished = `twinwright_worker_claim_disposition_total{disposition="finished",worker="metrics-worker"} 1`
+	var body string
+	for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+		if body = scrape(); strings.Contains(body, finished) {
+			break
+		}
+	}
+	for _, want := range []string{
+		finished,
+		`twinwright_worker_claim_disposition_total{disposition="failed",worker="metrics-worker"} 0`,
+		`twinwright_worker_claim_disposition_total{disposition="fenced",worker="metrics-worker"} 0`,
+		`twinwright_worker_claim_disposition_total{disposition="requeued",worker="metrics-worker"} 0`,
+		`twinwright_worker_claims_total{worker="metrics-worker"} 1`,
+		`twinwright_worker_lease_renewals_total{worker="metrics-worker"} `,
+		`twinwright_worker_run_duration_seconds_bucket{le="+Inf",worker="metrics-worker"} 1`,
+		`twinwright_worker_run_duration_seconds_count{worker="metrics-worker"} 1`,
+		"# TYPE twinwright_worker_run_duration_seconds histogram",
+		"twinwright_queue_oldest_runnable_age_seconds 0",
+		`twinwright_worker_last_seen_age_seconds{worker="metrics-worker"} `,
+		`twinwright_queue_entries{state="finished"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("scrape lacks %q\n%s", want, body)
+		}
 	}
 }

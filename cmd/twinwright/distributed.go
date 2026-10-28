@@ -239,17 +239,7 @@ func workerCommand(ctx context.Context, args []string, out io.Writer) error {
 	// ledger-derived gauges are read from the database at scrape time instead,
 	// so they cannot drift from the ledger.
 	counters := metrics.NewCounters()
-	w.Observer = func(outcome worker.Outcome) {
-		counters.Add(metrics.WorkerClaims, "", 1)
-		counters.Add(metrics.WorkerDispositions, string(outcome.Disposition), 1)
-		counters.Add(metrics.WorkerRunSeconds, "", outcome.Duration.Seconds())
-		if outcome.Takeover {
-			counters.Add(metrics.WorkerTakeovers, "", 1)
-		}
-		if outcome.Disposition == worker.Fenced {
-			counters.Add(metrics.WorkerFencingRejections, "", 1)
-		}
-	}
+	instrumentWorker(w, counters)
 
 	// Ctrl-C and SIGTERM cancel the context. An in-flight run is abandoned
 	// rather than force-committed; its lease lapses and another worker picks it
@@ -303,6 +293,27 @@ func workerCommand(ctx context.Context, args []string, out io.Writer) error {
 		"delivery": "at_least_once",
 		"backend":  string(s.Dialect),
 	})
+}
+
+// instrumentWorker connects a worker's events to the in-process counters the
+// metrics endpoint serves: every claim is counted and timed whatever its
+// disposition, and every successful lease renewal is counted.
+func instrumentWorker(w *worker.Worker, counters *metrics.Counters) {
+	w.Observer = func(outcome worker.Outcome) {
+		counters.Add(metrics.WorkerClaims, "", 1)
+		counters.Add(metrics.WorkerDispositions, string(outcome.Disposition), 1)
+		counters.Add(metrics.WorkerRunSeconds, "", outcome.Duration.Seconds())
+		counters.Observe(metrics.WorkerRunDuration, outcome.Duration.Seconds())
+		if outcome.Takeover {
+			counters.Add(metrics.WorkerTakeovers, "", 1)
+		}
+		if outcome.Disposition == worker.Fenced {
+			counters.Add(metrics.WorkerFencingRejections, "", 1)
+		}
+	}
+	w.Config.OnRenew = func(store.RunLease) {
+		counters.Add(metrics.WorkerLeaseRenewals, "", 1)
+	}
 }
 
 // traceExporter returns the worker's ExportTrace hook for a collector, or nil

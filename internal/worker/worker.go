@@ -80,6 +80,12 @@ type Config struct {
 	// writes nothing to the ledger. Its error text reaches the log, so the hook
 	// is responsible for keeping credentials out of it.
 	ExportTrace func(ctx context.Context, runID string) error
+	// OnRenew, when set, is called with the renewed lease after each successful
+	// lease renewal. A renewal the store refuses does not call it. It runs on
+	// the renewal goroutine while the run executes, so it must be quick and safe
+	// for concurrent use; the metrics counters are. It observes liveness only and
+	// must not write to the ledger: lease renewals are ownership bookkeeping.
+	OnRenew func(store.RunLease)
 }
 
 func (c Config) withDefaults() Config {
@@ -344,6 +350,9 @@ func (w *Worker) renew(ctx context.Context, lease store.RunLease, cancel context
 				return
 			}
 			current = renewed
+			if w.Config.OnRenew != nil {
+				w.Config.OnRenew(renewed)
+			}
 			if err = w.Store.TouchWorker(ctx, w.Config.ID, w.Config.Clock.Now()); err != nil && ctx.Err() == nil {
 				w.Config.Logger.Warn("worker heartbeat failed", "worker", w.Config.ID, "error", err)
 			}
