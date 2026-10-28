@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -25,6 +27,7 @@ import (
 	"twinwright/internal/bench"
 	"twinwright/internal/compiler"
 	"twinwright/internal/store"
+	"twinwright/internal/trace"
 	"twinwright/internal/worker"
 )
 
@@ -2104,5 +2107,402 @@ func TestSelectProviderDoesNotOpenARecording(t *testing.T) {
 	}
 	if _, statErr := os.Stat(path); statErr == nil {
 		t.Fatal("the refused recording still created its file")
+	}
+}
+
+// collectedPost is one request a test collector received.
+type collectedPost struct {
+	Path   string
+	Header http.Header
+	Body   []byte
+}
+
+// testCollector is an OTLP/HTTP collector that records what it is sent and
+// answers every request with status.
+type testCollector struct {
+	*httptest.Server
+	mu    sync.Mutex
+	posts []collectedPost
+}
+
+func newTestCollector(t *testing.T, status int) *testCollector {
+	t.Helper()
+	c := &testCollector{}
+	c.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		c.mu.Lock()
+		c.posts = append(c.posts, collectedPost{Path: r.URL.Path, Header: r.Header.Clone(), Body: body})
+		c.mu.Unlock()
+		w.WriteHeader(status)
+	}))
+	t.Cleanup(c.Close)
+	return c
+}
+
+func (c *testCollector) received() []collectedPost {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]collectedPost(nil), c.posts...)
+}
+
+// traceIDs returns the distinct trace IDs across every span in a posted OTLP
+// document.
+func traceIDs(t *testing.T, post collectedPost) []string {
+	t.Helper()
+	var doc struct {
+		ResourceSpans []struct {
+			ScopeSpans []struct {
+				Spans []struct {
+					TraceID string `json:"traceId"`
+				} `json:"spans"`
+			} `json:"scopeSpans"`
+		} `json:"resourceSpans"`
+	}
+	if err := json.Unmarshal(post.Body, &doc); err != nil {
+		t.Fatalf("collector received invalid OTLP JSON: %v\n%s", err, post.Body)
+	}
+	seen := map[string]bool{}
+	var ids []string
+	for _, resource := range doc.ResourceSpans {
+		for _, scope := range resource.ScopeSpans {
+			for _, span := range scope.Spans {
+				if !seen[span.TraceID] {
+					seen[span.TraceID] = true
+					ids = append(ids, span.TraceID)
+				}
+			}
+		}
+	}
+	return ids
+}
+
+// workerOutcome mirrors the fields of worker.Outcome these tests read, so the
+// test decodes the JSON the operator sees rather than the Go struct.
+type workerOutcome struct {
+	WorkerID      string `json:"worker_id"`
+	RunID         string `json:"run_id"`
+	Disposition   string `json:"disposition"`
+	RunStatus     string `json:"run_status"`
+	TraceID       string `json:"trace_id"`
+	TraceExported bool   `json:"trace_exported"`
+}
+
+// enqueueBillingRun creates a duplicate-charge run on the queue without
+// executing it and returns its ID.
+func enqueueBillingRun(t *testing.T, manifestPath, db string) string {
+	t.Helper()
+	var out bytes.Buffer
+	if err := runCLI([]string{
+		"run", "duplicate-charge", "--manifest", manifestPath, "--db", db,
+		"--agent", "scripted", "--enqueue", "--steps", "10",
+	}, &out); err != nil {
+		t.Fatalf("run --enqueue: %v\n%s", err, out.String())
+	}
+	var created struct {
+		RunID string `json:"run_id"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &created); err != nil || created.RunID == "" {
+		t.Fatalf("enqueue output: %v\n%s", err, out.String())
+	}
+	return created.RunID
+}
+
+// drainWorker runs one worker to completion over the queue and returns its
+// outcomes.
+func drainWorker(t *testing.T, manifestPath, db string, extra ...string) []workerOutcome {
+	t.Helper()
+	args := append([]string{"worker", "--manifest", manifestPath, "--db", db, "--id", "export-worker", "--drain", "--lease-ttl", "60s"}, extra...)
+	var out bytes.Buffer
+	if err := runCLI(args, &out); err != nil {
+		t.Fatalf("worker: %v\n%s", err, out.String())
+	}
+	var result struct {
+		Outcomes []workerOutcome `json:"outcomes"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+		t.Fatalf("decode worker output: %v\n%s", err, out.String())
+	}
+	return result.Outcomes
+}
+
+func TestWorkerExportsACompletedRunsTrace(t *testing.T) {
+	dir := t.TempDir()
+	manifestPath := buildBillingManifest(t, dir)
+	db := filepath.Join(dir, "world.db")
+	collector := newTestCollector(t, http.StatusOK)
+	runID := enqueueBillingRun(t, manifestPath, db)
+
+	outcomes := drainWorker(t, manifestPath, db, "--otlp-endpoint", collector.URL, "--otlp-header", "X-Tenant: acme")
+	if len(outcomes) != 1 {
+		t.Fatalf("outcomes=%+v", outcomes)
+	}
+	outcome := outcomes[0]
+	if outcome.RunID != runID || outcome.Disposition != "finished" || outcome.RunStatus != "completed" {
+		t.Fatalf("outcome=%+v", outcome)
+	}
+	wantTraceID := trace.TraceIDFor(runID)
+	if outcome.TraceID != wantTraceID {
+		t.Fatalf("outcome trace id=%q want %q", outcome.TraceID, wantTraceID)
+	}
+	if !outcome.TraceExported {
+		t.Fatalf("outcome does not report the export: %+v", outcome)
+	}
+
+	posts := collector.received()
+	if len(posts) != 1 {
+		t.Fatalf("collector received %d posts, want 1", len(posts))
+	}
+	if posts[0].Path != "/v1/traces" || posts[0].Header.Get("X-Tenant") != "acme" {
+		t.Fatalf("post path=%q header X-Tenant=%q", posts[0].Path, posts[0].Header.Get("X-Tenant"))
+	}
+	if ids := traceIDs(t, posts[0]); len(ids) != 1 || ids[0] != wantTraceID {
+		t.Fatalf("posted trace ids=%v want [%s]", ids, wantTraceID)
+	}
+
+	// Export reads the run. Nothing about the worker or the export may reach
+	// the event ledger.
+	s, err := store.OpenDSN(context.Background(), db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	events, err := s.Events(context.Background(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		for _, banned := range []string{"export-worker", wantTraceID, "otlp", "trace_exported"} {
+			if strings.Contains(string(event.Payload), banned) || strings.Contains(event.Type, banned) {
+				t.Fatalf("ledger event %d (%s) mentions %q: %s", event.Seq, event.Type, banned, event.Payload)
+			}
+		}
+	}
+}
+
+func TestWorkerExportFailureDoesNotFailTheRun(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		endpoint    func(t *testing.T) (url string, posts func() int)
+		wantAttempt bool
+	}{
+		{"collector answers 500", func(t *testing.T) (string, func() int) {
+			c := newTestCollector(t, http.StatusInternalServerError)
+			return c.URL, func() int { return len(c.received()) }
+		}, true},
+		{"collector unreachable", func(t *testing.T) (string, func() int) {
+			closed := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+			url := closed.URL
+			closed.Close()
+			return url, func() int { return 0 }
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			manifestPath := buildBillingManifest(t, dir)
+			db := filepath.Join(dir, "world.db")
+			endpoint, posts := tc.endpoint(t)
+			runID := enqueueBillingRun(t, manifestPath, db)
+
+			outcomes := drainWorker(t, manifestPath, db, "--otlp-endpoint", endpoint)
+			if len(outcomes) != 1 {
+				t.Fatalf("outcomes=%+v", outcomes)
+			}
+			outcome := outcomes[0]
+			if outcome.Disposition != "finished" || outcome.RunStatus != "completed" {
+				t.Fatalf("a failed export changed the outcome: %+v", outcome)
+			}
+			if outcome.TraceExported {
+				t.Fatalf("outcome claims an export the collector refused: %+v", outcome)
+			}
+			if outcome.TraceID != trace.TraceIDFor(runID) {
+				t.Fatalf("trace id=%q want %q", outcome.TraceID, trace.TraceIDFor(runID))
+			}
+			if tc.wantAttempt && posts() != 1 {
+				t.Fatalf("collector received %d posts, want the one refused attempt", posts())
+			}
+
+			var queue bytes.Buffer
+			if err := runCLI([]string{"queue", "--db", db, "--run", runID}, &queue); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(queue.String(), `"state": "finished"`) {
+				t.Fatalf("the queue entry was not finished:\n%s", queue.String())
+			}
+		})
+	}
+}
+
+// A worker exporting traces is new behaviour, so it is opt-in by flag. The
+// environment variable that the trace command honours must not switch it on.
+func TestWorkerDoesNotExportWithoutTheFlag(t *testing.T) {
+	dir := t.TempDir()
+	manifestPath := buildBillingManifest(t, dir)
+	db := filepath.Join(dir, "world.db")
+	collector := newTestCollector(t, http.StatusOK)
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", collector.URL)
+	enqueueBillingRun(t, manifestPath, db)
+
+	outcomes := drainWorker(t, manifestPath, db)
+	if len(outcomes) != 1 || outcomes[0].Disposition != "finished" {
+		t.Fatalf("outcomes=%+v", outcomes)
+	}
+	if outcomes[0].TraceExported {
+		t.Fatalf("worker exported without --otlp-endpoint: %+v", outcomes[0])
+	}
+	if posts := collector.received(); len(posts) != 0 {
+		t.Fatalf("collector received %d posts from a worker with no --otlp-endpoint", len(posts))
+	}
+}
+
+// syncBuffer is a log sink that is safe to write from the worker's goroutines
+// and read from the test.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// A worker's warning is the only place an operator learns an export failed, so
+// it must name the trace and must not carry the credentials the export used.
+func TestWorkerExportFailureWarnsWithoutLeakingCredentials(t *testing.T) {
+	var logs syncBuffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	collector := newTestCollector(t, http.StatusForbidden)
+	const password = "endpoint-password-not-a-secret"
+	const token = "header-token-not-a-secret"
+	endpoint := strings.Replace(collector.URL, "http://", "http://collector:"+password+"@", 1)
+
+	dir := t.TempDir()
+	manifestPath := buildBillingManifest(t, dir)
+	db := filepath.Join(dir, "world.db")
+	runID := enqueueBillingRun(t, manifestPath, db)
+	outcomes := drainWorker(t, manifestPath, db, "--otlp-endpoint", endpoint, "--otlp-header", "X-Api-Key: "+token)
+	if len(outcomes) != 1 || outcomes[0].Disposition != "finished" || outcomes[0].TraceExported {
+		t.Fatalf("outcomes=%+v", outcomes)
+	}
+
+	text := logs.String()
+	warning := ""
+	for _, line := range strings.Split(text, "\n") {
+		if strings.Contains(line, "trace export failed") {
+			warning = line
+		}
+	}
+	if warning == "" {
+		t.Fatalf("no export warning was logged:\n%s", text)
+	}
+	for _, want := range []string{"level=WARN", "worker=export-worker", "run=" + runID, "trace_id=" + trace.TraceIDFor(runID), "HTTP 403"} {
+		if !strings.Contains(warning, want) {
+			t.Fatalf("warning lacks %q:\n%s", want, warning)
+		}
+	}
+	for _, secret := range []string{password, token} {
+		if strings.Contains(text, secret) {
+			t.Fatalf("a credential reached the worker log:\n%s", text)
+		}
+	}
+}
+
+// A malformed header is an operator mistake, so it fails before the worker
+// opens (and so creates) the database.
+func TestWorkerRejectsAMalformedOTLPHeaderBeforeAnyDatabaseWork(t *testing.T) {
+	dir := t.TempDir()
+	manifestPath := buildBillingManifest(t, dir)
+	db := filepath.Join(dir, "world.db")
+	var out bytes.Buffer
+	err := runCLI([]string{"worker", "--manifest", manifestPath, "--db", db, "--drain", "--otlp-endpoint", "http://127.0.0.1:1", "--otlp-header", "no-colon"}, &out)
+	if err == nil || err.Error() != `--otlp-header must be "Name: value"` {
+		t.Fatalf("err=%v", err)
+	}
+	if _, statErr := os.Stat(db); statErr == nil {
+		t.Fatal("a rejected header still created the database")
+	}
+}
+
+func TestParseOTLPHeader(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		raw     string
+		want    map[string]string
+		wantErr string
+	}{
+		{"empty means no header", "", nil, ""},
+		{"name and value", "Authorization: Bearer abc", map[string]string{"Authorization": "Bearer abc"}, ""},
+		{"whitespace is trimmed", "  X-Tenant :   acme  ", map[string]string{"X-Tenant": "acme"}, ""},
+		{"only the first colon splits", "X-Url: http://host:4318", map[string]string{"X-Url": "http://host:4318"}, ""},
+		{"no colon is rejected", "Authorization", nil, `--otlp-header must be "Name: value"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseOTLPHeader(tc.raw)
+			if tc.wantErr != "" {
+				if err == nil || err.Error() != tc.wantErr {
+					t.Fatalf("err=%v want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %v want %v", got, tc.want)
+			}
+			for key, value := range tc.want {
+				if got[key] != value {
+					t.Fatalf("got %v want %v", got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// The trace command shares the header helper with the worker. Its delivery
+// report now names the trace, and its header handling is unchanged.
+func TestTraceCommandExportSendsTheHeaderAndReportsTheTraceID(t *testing.T) {
+	dir := t.TempDir()
+	manifestPath := buildBillingManifest(t, dir)
+	db := filepath.Join(dir, "world.db")
+	runID := enqueueBillingRun(t, manifestPath, db)
+	if outcomes := drainWorker(t, manifestPath, db); len(outcomes) != 1 {
+		t.Fatalf("outcomes=%+v", outcomes)
+	}
+	collector := newTestCollector(t, http.StatusOK)
+
+	var out bytes.Buffer
+	if err := runCLI([]string{"trace", runID, "--format", "otlp", "--db", db, "--otlp-endpoint", collector.URL, "--otlp-header", "X-Tenant: acme"}, &out); err != nil {
+		t.Fatalf("trace export: %v\n%s", err, out.String())
+	}
+	var delivery struct {
+		Delivered bool   `json:"delivered"`
+		TraceID   string `json:"trace_id"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &delivery); err != nil {
+		t.Fatalf("decode delivery: %v\n%s", err, out.String())
+	}
+	if !delivery.Delivered || delivery.TraceID != trace.TraceIDFor(runID) {
+		t.Fatalf("delivery=%+v", delivery)
+	}
+	posts := collector.received()
+	if len(posts) != 1 || posts[0].Header.Get("X-Tenant") != "acme" {
+		t.Fatalf("posts=%+v", posts)
+	}
+
+	out.Reset()
+	err := runCLI([]string{"trace", runID, "--format", "otlp", "--db", db, "--otlp-endpoint", collector.URL, "--otlp-header", "no-colon"}, &out)
+	if err == nil || err.Error() != `--otlp-header must be "Name: value"` {
+		t.Fatalf("err=%v", err)
 	}
 }

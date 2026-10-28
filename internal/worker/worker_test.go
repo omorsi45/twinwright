@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -18,6 +20,7 @@ import (
 	"twinwright/internal/eval"
 	"twinwright/internal/pgtest"
 	"twinwright/internal/store"
+	"twinwright/internal/trace"
 )
 
 // testClock is a manually advanced clock. Lease expiry is the mechanism under
@@ -506,5 +509,240 @@ func TestConcurrentWorkersDoNotDoubleClaimOneRun(t *testing.T) {
 	wg.Wait()
 	if len(winners) != 1 {
 		t.Fatalf("%d workers claimed the same run: %v (fences %v)", len(winners), winners, fences)
+	}
+}
+
+// recordingLogger keeps every record so a test can assert what an operator
+// would have seen.
+func recordingLogger(buf *bytes.Buffer) *slog.Logger {
+	return slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+}
+
+// TestClaimFinishedCarriesTheTraceID lets an operator go from the worker's log
+// line to the collector's trace without recomputing the ID.
+func TestClaimFinishedCarriesTheTraceID(t *testing.T) {
+	ctx := context.Background()
+	manifest := billingManifest(t)
+	s := openStore(ctx, t)
+	clock := newClock()
+	run := seedRun(ctx, t, s, manifest, "")
+	if err := s.Enqueue(ctx, run.ID, 10, clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	w := New(s, realExecutor(s, manifest, clock.Clock()), Config{ID: "worker-a", LeaseTTL: time.Minute, Clock: clock.Clock(), Logger: recordingLogger(&logs)})
+	if err := w.Register(ctx); err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := w.ClaimAndRun(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := trace.TraceIDFor(run.ID)
+	if outcome.TraceID != want {
+		t.Fatalf("outcome trace id=%q want %q", outcome.TraceID, want)
+	}
+	if outcome.TraceExported {
+		t.Fatal("a worker with no ExportTrace reports an export")
+	}
+	if !strings.Contains(logs.String(), "msg=\"claim finished\"") || !strings.Contains(logs.String(), "trace_id="+want) {
+		t.Fatalf("the claim finished line does not carry trace_id=%s:\n%s", want, logs.String())
+	}
+}
+
+func TestWorkerExportsACompletedRunsTraceThroughTheHook(t *testing.T) {
+	ctx := context.Background()
+	manifest := billingManifest(t)
+	s := openStore(ctx, t)
+	clock := newClock()
+	run := seedRun(ctx, t, s, manifest, "")
+	if err := s.Enqueue(ctx, run.ID, 10, clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+	var exported []string
+	var deadline time.Time
+	var hasDeadline bool
+	var logs bytes.Buffer
+	w := New(s, realExecutor(s, manifest, clock.Clock()), Config{
+		ID: "worker-a", LeaseTTL: time.Minute, Clock: clock.Clock(), Logger: recordingLogger(&logs),
+		ExportTrace: func(exportCtx context.Context, runID string) error {
+			exported = append(exported, runID)
+			deadline, hasDeadline = exportCtx.Deadline()
+			return nil
+		},
+	})
+	var observed []Outcome
+	w.Observer = func(o Outcome) { observed = append(observed, o) }
+	if err := w.Register(ctx); err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := w.ClaimAndRun(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(exported) != 1 || exported[0] != run.ID {
+		t.Fatalf("exported=%v want [%s]", exported, run.ID)
+	}
+	if !hasDeadline {
+		t.Fatal("the export context has no deadline, so a stuck collector could hold the worker")
+	}
+	if remaining := time.Until(deadline); remaining <= 0 || remaining > trace.DefaultExportTimeout {
+		t.Fatalf("export deadline is %v away, want within (0, %v]", remaining, trace.DefaultExportTimeout)
+	}
+	if outcome.Disposition != Finished || !outcome.TraceExported || outcome.TraceID != trace.TraceIDFor(run.ID) {
+		t.Fatalf("outcome=%+v", outcome)
+	}
+	// Observers (the metrics endpoint, tests) must see the finished outcome,
+	// export result included, not a copy taken before the export ran.
+	if len(observed) != 1 || !observed[0].TraceExported {
+		t.Fatalf("observer saw %+v", observed)
+	}
+	if strings.Contains(logs.String(), "trace export failed") {
+		t.Fatalf("a successful export logged a failure:\n%s", logs.String())
+	}
+}
+
+// TestWorkerExportFailureKeepsTheDisposition: the export is best effort. The
+// run is done and recorded; a collector outage must not requeue or fail it.
+func TestWorkerExportFailureKeepsTheDisposition(t *testing.T) {
+	ctx := context.Background()
+	manifest := billingManifest(t)
+	s := openStore(ctx, t)
+	clock := newClock()
+	run := seedRun(ctx, t, s, manifest, "")
+	if err := s.Enqueue(ctx, run.ID, 10, clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	w := New(s, realExecutor(s, manifest, clock.Clock()), Config{
+		ID: "worker-a", LeaseTTL: time.Minute, Clock: clock.Clock(), Logger: recordingLogger(&logs),
+		ExportTrace: func(context.Context, string) error { return errors.New("collector down") },
+	})
+	if err := w.Register(ctx); err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := w.ClaimAndRun(ctx)
+	if err != nil {
+		t.Fatalf("a failed export surfaced as an error: %v", err)
+	}
+	if outcome.Disposition != Finished || outcome.RunStatus != "completed" || outcome.Err != "" {
+		t.Fatalf("outcome=%+v", outcome)
+	}
+	if outcome.TraceExported {
+		t.Fatal("outcome reports an export that failed")
+	}
+	entry, err := s.QueueEntryFor(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.State != store.QueueFinished {
+		t.Fatalf("queue state=%q want finished", entry.State)
+	}
+	warning := ""
+	for _, line := range strings.Split(logs.String(), "\n") {
+		if strings.Contains(line, "trace export failed") {
+			warning = line
+		}
+	}
+	if warning == "" {
+		t.Fatalf("no warning was logged:\n%s", logs.String())
+	}
+	for _, want := range []string{"level=WARN", "worker=worker-a", "run=" + run.ID, "trace_id=" + trace.TraceIDFor(run.ID), "collector down"} {
+		if !strings.Contains(warning, want) {
+			t.Fatalf("warning %q lacks %q", warning, want)
+		}
+	}
+}
+
+// TestWorkerExportsOnlyWhenTheClaimFinishedACompletedRun covers the claims that
+// must not export: a run paused at its step budget is not finished work, and a
+// failed attempt has no complete trace to send.
+func TestWorkerExportsOnlyWhenTheClaimFinishedACompletedRun(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		steps   int
+		execute func(*store.Store, compiler.Manifest, store.Clock) ExecuteFunc
+		want    Disposition
+		status  string
+	}{
+		{"paused at the step budget", 1, func(s *store.Store, m compiler.Manifest, c store.Clock) ExecuteFunc { return realExecutor(s, m, c) }, Finished, "paused"},
+		{"failed attempt is requeued", 10, func(*store.Store, compiler.Manifest, store.Clock) ExecuteFunc {
+			return func(context.Context, store.RunLease, store.QueueEntry) (store.Run, error) {
+				return store.Run{}, errors.New("provider unavailable")
+			}
+		}, Requeued, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			manifest := billingManifest(t)
+			s := openStore(ctx, t)
+			clock := newClock()
+			run := seedRun(ctx, t, s, manifest, "")
+			if err := s.Enqueue(ctx, run.ID, tc.steps, clock.Now()); err != nil {
+				t.Fatal(err)
+			}
+			calls := 0
+			w := New(s, tc.execute(s, manifest, clock.Clock()), Config{
+				ID: "worker-a", LeaseTTL: time.Minute, MaxAttempts: 5, Clock: clock.Clock(), Logger: quietLogger(),
+				ExportTrace: func(context.Context, string) error { calls++; return nil },
+			})
+			if err := w.Register(ctx); err != nil {
+				t.Fatal(err)
+			}
+			outcome, err := w.ClaimAndRun(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if outcome.Disposition != tc.want || outcome.RunStatus != tc.status {
+				t.Fatalf("outcome=%+v want %s/%q", outcome, tc.want, tc.status)
+			}
+			if calls != 0 || outcome.TraceExported {
+				t.Fatalf("exported %d times for a claim that did not complete the run: %+v", calls, outcome)
+			}
+			if outcome.TraceID != trace.TraceIDFor(run.ID) {
+				t.Fatalf("trace id=%q want %q: every outcome with a run carries it", outcome.TraceID, trace.TraceIDFor(run.ID))
+			}
+		})
+	}
+}
+
+// TestWorkerExportsARunSettledPastTheDeliveryLimit: the delivery-limit path
+// finishes a run whose work completed before a crash, and that run is still a
+// completed run whose trace has not necessarily been sent.
+func TestWorkerExportsARunSettledPastTheDeliveryLimit(t *testing.T) {
+	ctx := context.Background()
+	manifest := billingManifest(t)
+	s := openStore(ctx, t)
+	clock := newClock()
+	run := seedRun(ctx, t, s, manifest, "")
+	if err := s.Enqueue(ctx, run.ID, 10, clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+	const maxAttempts = 3
+	for i := 1; i <= maxAttempts; i++ {
+		lease := killDelivery(ctx, t, s, clock, i)
+		if i == maxAttempts {
+			completeUnderFence(ctx, t, s, manifest, clock, lease)
+		}
+		clock.Advance(2 * time.Minute)
+	}
+	var exported []string
+	neverRuns := func(context.Context, store.RunLease, store.QueueEntry) (store.Run, error) {
+		t.Fatal("a completed run was executed again")
+		return store.Run{}, nil
+	}
+	b := New(s, neverRuns, Config{
+		ID: "worker-b", LeaseTTL: time.Minute, MaxAttempts: maxAttempts, Clock: clock.Clock(), Logger: quietLogger(),
+		ExportTrace: func(_ context.Context, runID string) error { exported = append(exported, runID); return nil },
+	})
+	if err := b.Register(ctx); err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := b.ClaimAndRun(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.Disposition != Finished || !outcome.TraceExported || len(exported) != 1 || exported[0] != run.ID {
+		t.Fatalf("outcome=%+v exported=%v", outcome, exported)
 	}
 }

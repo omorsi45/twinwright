@@ -55,7 +55,7 @@ func writeSpan(b *strings.Builder, span *Span, depth int) {
 // OTLP encodes a trace as one OTLP JSON resource-span document.
 func OTLP(trace Trace) ([]byte, error) {
 	var spans []map[string]any
-	flatten(&spans, trace.TraceID, "", trace.Root)
+	flatten(&spans, trace.TraceID, trace.Summary.RunID, "", trace.Root)
 	document := map[string]any{
 		"resourceSpans": []any{map[string]any{
 			"resource": map[string]any{"attributes": otlpAttributes(map[string]any{
@@ -72,7 +72,7 @@ func OTLP(trace Trace) ([]byte, error) {
 	return json.Marshal(document)
 }
 
-func flatten(out *[]map[string]any, traceID, parentID string, span *Span) {
+func flatten(out *[]map[string]any, traceID, runID, parentID string, span *Span) {
 	encoded := map[string]any{
 		"traceId":           traceID,
 		"spanId":            span.SpanID,
@@ -80,7 +80,7 @@ func flatten(out *[]map[string]any, traceID, parentID string, span *Span) {
 		"kind":              1,
 		"startTimeUnixNano": unixNano(span.Start),
 		"endTimeUnixNano":   unixNano(span.End),
-		"attributes":        otlpAttributes(span.Attributes),
+		"attributes":        otlpAttributes(withLedgerCorrelation(span, runID)),
 		"status":            map[string]any{"code": statusCode(span.Status)},
 	}
 	if parentID != "" {
@@ -99,14 +99,31 @@ func flatten(out *[]map[string]any, traceID, parentID string, span *Span) {
 	}
 	if parent, ok := span.Attributes["parent.run_id"].(string); ok && parent != "" && span.Name == "run" {
 		encoded["links"] = []any{map[string]any{
-			"traceId": hashID("twinwright-trace:"+parent, 32),
+			"traceId": TraceIDFor(parent),
 			"spanId":  hashID(parent+":run:1", 16),
 		}}
 	}
 	*out = append(*out, encoded)
 	for _, child := range span.Children {
-		flatten(out, traceID, span.SpanID, child)
+		flatten(out, traceID, runID, span.SpanID, child)
 	}
+}
+
+// withLedgerCorrelation returns the span's attributes plus the three that tie
+// an exported span back to the event ledger: the first and last ledger event
+// it covers and the run it belongs to. They are added here, on a copy, because
+// they restate fields Span already has (StartSeq, EndSeq) and the run the
+// whole Trace is about, so the built trace and `trace --format json` keep
+// their existing attribute sets and only the OTLP projection grows.
+func withLedgerCorrelation(span *Span, runID string) map[string]any {
+	attributes := make(map[string]any, len(span.Attributes)+3)
+	for key, value := range span.Attributes {
+		attributes[key] = value
+	}
+	attributes["twinwright.event.start_seq"] = span.StartSeq
+	attributes["twinwright.event.end_seq"] = span.EndSeq
+	attributes["twinwright.run_id"] = runID
+	return attributes
 }
 
 func statusCode(status string) int {

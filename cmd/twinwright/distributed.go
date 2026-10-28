@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -16,7 +17,9 @@ import (
 	"twinwright/internal/compiler"
 	"twinwright/internal/dispatch"
 	"twinwright/internal/metrics"
+	"twinwright/internal/redact"
 	"twinwright/internal/store"
+	"twinwright/internal/trace"
 	"twinwright/internal/worker"
 )
 
@@ -172,9 +175,23 @@ func workerCommand(ctx context.Context, args []string, out io.Writer) error {
 	maxRuns := fs.Int("max-runs", 0, "exit after this many claims (0 means serve until interrupted)")
 	drain := fs.Bool("drain", false, "exit as soon as the queue is empty instead of polling")
 	metricsAddr := fs.String("metrics-addr", "", "serve Prometheus metrics on this address, for example 127.0.0.1:9095 (unauthenticated: bind loopback)")
+	// Unlike the trace command, the endpoint does not default to
+	// OTEL_EXPORTER_OTLP_ENDPOINT: a worker that exports every completed run's
+	// trace is new behaviour, so it must be asked for with the flag.
+	otlpEndpoint := fs.String("otlp-endpoint", "", "POST each completed run's trace to this OpenTelemetry collector (empty disables export)")
+	otlpHeader := fs.String("otlp-header", "", "extra request header for the collector, as Name: value")
 	providerCfg := providerFlags(fs)
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
+	}
+	// Checked before any file or database is touched, like a missing manifest.
+	var otlpHeaders map[string]string
+	if *otlpEndpoint != "" {
+		headers, err := parseOTLPHeader(*otlpHeader)
+		if err != nil {
+			return err
+		}
+		otlpHeaders = headers
 	}
 	manifest, err := readManifest(*manifestPath)
 	if err != nil {
@@ -215,6 +232,7 @@ func workerCommand(ctx context.Context, args []string, out io.Writer) error {
 		PollInterval: *poll,
 		Backoff:      *backoff,
 		MaxAttempts:  *attempts,
+		ExportTrace:  traceExporter(s, *otlpEndpoint, otlpHeaders),
 	})
 
 	// Per-process event counters. Queue depth, run statuses and the
@@ -285,6 +303,46 @@ func workerCommand(ctx context.Context, args []string, out io.Writer) error {
 		"delivery": "at_least_once",
 		"backend":  string(s.Dialect),
 	})
+}
+
+// traceExporter returns the worker's ExportTrace hook for a collector, or nil
+// when no endpoint is configured. The hook builds the run's trace from the
+// store and posts it. Both steps only read, so the ledger never learns that an
+// export happened.
+//
+// A response that is not a 2xx is an error, which the worker logs and
+// otherwise ignores. The error text goes to the worker's log, so it is scrubbed
+// first: the endpoint can carry userinfo or a query token, and the header value
+// and the configured provider keys must not appear in a log line.
+func traceExporter(s *store.Store, endpoint string, headers map[string]string) func(context.Context, string) error {
+	if endpoint == "" {
+		return nil
+	}
+	exporter := trace.Exporter{Endpoint: endpoint, Headers: headers}
+	secrets := configuredSecrets()
+	for _, value := range headers {
+		secrets = append(secrets, value)
+	}
+	rawEndpoint := strings.TrimRight(endpoint, "/")
+	safeEndpoint := strings.TrimRight(redact.URL(endpoint), "/")
+	scrub := func(err error) error {
+		text := redact.String(err.Error(), secrets...)
+		return errors.New(strings.ReplaceAll(text, rawEndpoint, safeEndpoint))
+	}
+	return func(ctx context.Context, runID string) error {
+		built, err := trace.Build(ctx, s, runID, secrets...)
+		if err != nil {
+			return scrub(err)
+		}
+		delivery, err := exporter.Export(ctx, built)
+		if err != nil {
+			return scrub(err)
+		}
+		if !delivery.Delivered {
+			return scrub(fmt.Errorf("collector at %s did not accept the trace: HTTP %d", delivery.Endpoint, delivery.Status))
+		}
+		return nil
+	}
 }
 
 func writeJSON(out io.Writer, payload any) error {

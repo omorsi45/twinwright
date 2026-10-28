@@ -923,15 +923,11 @@ func runCLI(args []string, out io.Writer) error {
 			if *otlpEndpoint != "" {
 				// Delivering the spans, not just formatting them: the
 				// collector's status code is what makes the export verifiable.
-				exporter := trace.Exporter{Endpoint: *otlpEndpoint}
-				if *otlpHeader != "" {
-					name, value, found := strings.Cut(*otlpHeader, ":")
-					if !found {
-						return fmt.Errorf("--otlp-header must be \"Name: value\"")
-					}
-					exporter.Headers = map[string]string{strings.TrimSpace(name): strings.TrimSpace(value)}
+				headers, err := parseOTLPHeader(*otlpHeader)
+				if err != nil {
+					return err
 				}
-				delivery, err := exporter.Export(ctx, built)
+				delivery, err := trace.Exporter{Endpoint: *otlpEndpoint, Headers: headers}.Export(ctx, built)
 				if err != nil {
 					return err
 				}
@@ -1111,6 +1107,20 @@ func configuredSecrets() []string {
 		secrets = append(secrets, key)
 	}
 	return secrets
+}
+
+// parseOTLPHeader parses the value of --otlp-header, one "Name: value" pair,
+// into the header map trace.Exporter sends. An empty value means no header.
+// The trace and worker commands share it so the flag means the same on both.
+func parseOTLPHeader(raw string) (map[string]string, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	name, value, found := strings.Cut(raw, ":")
+	if !found {
+		return nil, fmt.Errorf("--otlp-header must be \"Name: value\"")
+	}
+	return map[string]string{strings.TrimSpace(name): strings.TrimSpace(value)}, nil
 }
 
 // inspection keeps summary first. A map would sort keys and bury it under the raw ledger.
