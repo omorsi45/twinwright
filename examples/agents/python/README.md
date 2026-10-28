@@ -41,3 +41,24 @@ echo '{"protocol":"twinwright.agent.v1","task":"t","history":[],"operations":[]}
 
 `--echo-request` also writes the request it received to stderr, which is the
 quickest way to see what an agent is sent.
+
+## Run it in a container
+
+With Docker available, `--agent-container` runs the same agent behind a hardened
+`docker run`: read-only root, every capability dropped, a non-root user, and no
+network unless you choose one. The image must have the interpreter; the directory
+is mounted read-only at `/agent`.
+
+```sh
+twinwright run duplicate-charge \
+  --agent exec \
+  --model billing-agent@1 \
+  --agent-container python:3.12-alpine \
+  --agent-mount examples/agents/python \
+  --agent-command 'python3 /agent/billing_agent.py' \
+  --fail-on-eval
+```
+
+The container runs as user 65534, so the mounted files must be readable by it. See
+`docs/adr/0033-agent-protocol-and-isolation.md` for what the container does and
+does not protect against.

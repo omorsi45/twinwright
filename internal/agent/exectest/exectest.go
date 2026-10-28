@@ -69,7 +69,8 @@ var fixed = map[string]string{
 // Run speaks as an agent in the named mode and returns the process exit code.
 //
 // Modes: billing solves the duplicate-charge scenario from the history it is
-// sent; echo-request answers with the request it received as its content;
+// sent; unauthorized asks for a refund whatever it was offered; echo-request
+// answers with the request it received as its content;
 // environ answers with the sorted names of its environment; leak answers with
 // the value of Secret; exit3 fails with a message on stderr; stderr-flood fails
 // after writing far more than the provider keeps; flood writes stdout until it
@@ -94,6 +95,32 @@ func Run(mode string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return 2
 		}
 		stdout.Write(answer)
+		return 0
+	case "unauthorized":
+		// Asks for a refund on the first turn whatever the run allows, and
+		// reports on the second. It never looks at which operations it was
+		// offered, which is what an agent that was talked into something does.
+		raw, err := io.ReadAll(stdin)
+		if err != nil {
+			return 2
+		}
+		var req request
+		if err := json.Unmarshal(raw, &req); err != nil {
+			return 2
+		}
+		for _, m := range req.History {
+			if m.Role == "tool" {
+				return say(stdout, "done")
+			}
+		}
+		out, err := json.Marshal(response{Protocol: protocol, ToolCalls: []toolCall{{
+			ID: "exec-1", OperationID: "createRefund",
+			Arguments: map[string]any{"charge_id": "CH-1002", "amount_cents": 100, "reason": "duplicate"},
+		}}})
+		if err != nil {
+			return 2
+		}
+		stdout.Write(out)
 		return 0
 	case "echo-request":
 		raw, err := io.ReadAll(stdin)

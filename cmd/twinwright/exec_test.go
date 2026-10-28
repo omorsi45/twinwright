@@ -214,3 +214,113 @@ func TestResumeOfExecRunNeedsTheCommand(t *testing.T) {
 		t.Fatalf("worker-style selection without the command: err = %v", err)
 	}
 }
+
+func TestProviderFlagsRegisterTheContainerFlags(t *testing.T) {
+	fs := flag.NewFlagSet("t", flag.ContinueOnError)
+	cfg := providerFlags(fs)
+	if err := fs.Parse(nil); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AgentContainer != "" || cfg.AgentNetwork != "none" || cfg.AgentMemory != "512m" || cfg.AgentCPUs != "1" || cfg.AgentPIDs != 128 || cfg.AgentMount != "" {
+		t.Fatalf("defaults = %+v", *cfg)
+	}
+	for _, name := range []string{"agent-network", "agent-memory", "agent-cpus", "agent-pids", "agent-mount"} {
+		if usage := fs.Lookup(name).Usage; !strings.Contains(usage, "--agent-container") {
+			t.Errorf("--%s help %q does not say it applies with --agent-container", name, usage)
+		}
+	}
+	fs = flag.NewFlagSet("t", flag.ContinueOnError)
+	cfg = providerFlags(fs)
+	args := []string{"--agent-container", "python:3.12-alpine", "--agent-network", "bridge", "--agent-memory", "1g", "--agent-cpus", "2", "--agent-pids", "64", "--agent-mount", "some/dir"}
+	if err := fs.Parse(args); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AgentContainer != "python:3.12-alpine" || cfg.AgentNetwork != "bridge" || cfg.AgentMemory != "1g" || cfg.AgentCPUs != "2" || cfg.AgentPIDs != 64 || cfg.AgentMount != "some/dir" {
+		t.Fatalf("parsed = %+v", *cfg)
+	}
+}
+
+// containerConfig is what the flags give for an exec agent in a container.
+func containerConfig(t *testing.T, args ...string) providerConfig {
+	t.Helper()
+	fs := flag.NewFlagSet("t", flag.ContinueOnError)
+	cfg := providerFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		t.Fatal(err)
+	}
+	return cfg.with("exec", "my-agent@1", "duplicate-charge")
+}
+
+func TestSelectProviderWrapsTheAgentInAContainer(t *testing.T) {
+	t.Setenv("TW_AGENT_TOKEN", "token-value-for-test")
+	relative := filepath.Join("..", "..", "examples", "agents", "python")
+	absolute, err := filepath.Abs(relative)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider, err := selectProvider(containerConfig(t,
+		"--agent-command", "python3 /agent/billing_agent.py", "--agent-env", "TW_AGENT_TOKEN",
+		"--agent-container", "python:3.12-alpine", "--agent-mount", relative))
+	if err != nil {
+		t.Fatal(err)
+	}
+	exec, ok := provider.(agent.ExecProvider)
+	if !ok || exec.Wrap == nil {
+		t.Fatalf("provider = %#v, want an ExecProvider with a wrapper", provider)
+	}
+	got := exec.Wrap(exec.Command)
+	want := []string{
+		"docker", "run", "--rm", "-i", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+		"--user", "65534:65534", "--network", "none", "--memory", "512m", "--cpus", "1", "--pids-limit", "128",
+		"--tmpfs", "/tmp:rw,size=16m", "-v", absolute + ":/agent:ro", "-e", "TW_AGENT_TOKEN",
+		"python:3.12-alpine", "python3", "/agent/billing_agent.py",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("argv =\n%q\nwant\n%q", got, want)
+	}
+	if !slices.Equal(exec.Env, []string{"TW_AGENT_TOKEN=token-value-for-test"}) {
+		t.Fatalf("the docker client's environment = %q", exec.Env)
+	}
+
+	// Without --agent-container the process runs directly.
+	direct, err := selectProvider(containerConfig(t, "--agent-command", "python3 a.py"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if direct.(agent.ExecProvider).Wrap != nil {
+		t.Fatal("a wrapper was installed without --agent-container")
+	}
+}
+
+func TestSelectProviderRefusesBadContainerConfigurations(t *testing.T) {
+	existing := t.TempDir()
+	cases := []struct {
+		name string
+		cfg  providerConfig
+		want []string
+	}{
+		{"a container for scripted", func() providerConfig {
+			cfg := containerConfig(t, "--agent-container", "python:3.12-alpine")
+			cfg.Name, cfg.Model = "scripted", ""
+			return cfg
+		}(), []string{"--agent-container", "exec"}},
+		{"a mount without a container", containerConfig(t, "--agent-command", "agent", "--agent-mount", existing), []string{"--agent-mount", "--agent-container"}},
+		{"host networking", containerConfig(t, "--agent-command", "agent", "--agent-container", "img", "--agent-network", "host"), []string{"host", "isolation"}},
+		{"a bad memory limit", containerConfig(t, "--agent-command", "agent", "--agent-container", "img", "--agent-memory", "lots"), []string{"memory"}},
+		{"a mount that does not exist", containerConfig(t, "--agent-command", "agent", "--agent-container", "img", "--agent-mount", filepath.Join(existing, "missing")), []string{"mount"}},
+		{"zero pids", containerConfig(t, "--agent-command", "agent", "--agent-container", "img", "--agent-pids", "0"), []string{"pids"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := selectProvider(tc.cfg)
+			if err == nil {
+				t.Fatal("accepted")
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not mention %q", err, want)
+				}
+			}
+		})
+	}
+}

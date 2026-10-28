@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"twinwright/internal/agent/exectest"
+	"twinwright/internal/authz"
 	"twinwright/internal/compiler"
 	"twinwright/internal/dispatch"
 	"twinwright/internal/eval"
@@ -371,6 +372,71 @@ func TestExecProviderRecordsUsageTheAgentReports(t *testing.T) {
 	}
 	if message.Content != "counted" || message.Usage == nil || *message.Usage != (Usage{InputTokens: 3, OutputTokens: 4, TotalTokens: 7}) {
 		t.Fatalf("message = %+v", message)
+	}
+}
+
+// An agent proposes and the dispatcher decides. A process that asks for a refund
+// its principal may not make, and that was never offered the operation, is
+// refused exactly as a model would be: the call is answered 403 and nothing is
+// written.
+func TestExecAgentCannotExceedThePrincipalsPolicy(t *testing.T) {
+	ctx := context.Background()
+	manifest := execBillingManifest(t)
+	policy, err := authz.Parse([]byte("version: 1\nprincipal: {id: support}\npermissions: {allow: [customers.read, charges.read]}\n"), manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := policy.CanonicalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := store.Open(filepath.Join(t.TempDir(), "world.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	world, err := s.Seed(ctx, 42, manifest.Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := s.CreateRunConfigured(ctx, world.ID, "duplicate-charge", "exec", "unauthorized@test", "task", store.RunOptions{AuthJSON: encoded, AuthDigest: policy.Digest()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := Runner{Store: s, Dispatch: &dispatch.Dispatcher{Store: s, Manifest: manifest}, Manifest: manifest, Provider: helperProvider(t, "unauthorized")}
+	done, err := runner.Execute(ctx, run.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done.Status != "completed" {
+		t.Fatalf("status = %s", done.Status)
+	}
+	var status, refunds int
+	if err := s.DB.QueryRow("SELECT status FROM tool_results WHERE run_id=? AND call_id='exec-1'", run.ID).Scan(&status); err != nil || status != 403 {
+		t.Fatalf("the unauthorized call was answered %d, err = %v, want 403", status, err)
+	}
+	if err := s.DB.QueryRow("SELECT count(*) FROM refunds").Scan(&refunds); err != nil || refunds != 0 {
+		t.Fatalf("the unauthorized call wrote %d refunds, err = %v", refunds, err)
+	}
+	events, err := s.Events(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		if event.Type != "model.request" {
+			continue
+		}
+		var request struct {
+			Operations []compiler.Operation `json:"operations"`
+		}
+		if err := json.Unmarshal(event.Payload, &request); err != nil {
+			t.Fatal(err)
+		}
+		for _, op := range request.Operations {
+			if op.ID == "createRefund" {
+				t.Fatal("the agent was offered an operation its principal may not call")
+			}
+		}
 	}
 }
 

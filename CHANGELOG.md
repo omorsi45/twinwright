@@ -13,6 +13,30 @@ database written by a newer build is refused rather than downgraded.
 
 ### Added
 
+- **A hardened container for an exec agent, and ADR 0033 for the protocol and the
+  isolation.** `--agent-container IMAGE` runs the agent command behind `docker run
+  --rm -i --read-only --cap-drop ALL --security-opt no-new-privileges --user
+  65534:65534` with `--network none` by default, a 16 MiB `/tmp`, and memory, CPU and
+  process caps (`--agent-network`, `--agent-memory`, `--agent-cpus`, `--agent-pids`,
+  defaults `none`, `512m`, `1`, `128`). `--agent-mount DIR` makes a host directory
+  visible read-only at `/agent`, and the variables named with `--agent-env` are
+  passed by name, never as values. Options are validated before anything starts:
+  `host` networking is refused by name, an image that could be read as a docker
+  option is refused, memory, CPU and network values are held to the patterns a
+  sidecar config uses (now exported from `internal/container`), and a mount must be
+  an absolute existing directory with no colon. `TestContainerWrapIsHardened` asserts
+  the whole argv. `TestPythonAgentInHardenedContainer` runs the reference agent
+  through it against a real daemon and has an agent in `--network none` try an
+  outbound connection; it is skipped without `TWINWRIGHT_TEST_DOCKER=1`, and the
+  `docker` job of the Integration workflow now pulls `python:3.12-alpine` and runs
+  it. ADR 0033 records the protocol, the bounds, the trust boundary and the limits:
+  the Docker daemon is trusted, there is no custom seccomp profile, an allowed
+  network is unrestricted, on macOS and Windows the boundary is the Docker Desktop
+  VM, and a timed out agent's container can outlive the docker client that started
+  it. `docs/security-review.md` gains a section for agent processes with every test
+  cited, and its line about live model runs now says that a local Ollama run is
+  recorded in `docs/live-model-run.md` while hosted providers remain unverified.
+
 - **An `exec` agent protocol: your own program makes the decisions.** `--agent exec`
   starts a command of your choice once per turn, writes one JSON request to its
   stdin (the task, the history as the ledger records it, and the operations the run

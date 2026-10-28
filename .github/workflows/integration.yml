@@ -107,9 +107,16 @@ jobs:
         run: |
           docker pull hashicorp/http-echo:1.0
           docker pull busybox:1.36
+          docker pull python:3.12-alpine
 
       - name: container integration tests
         run: go test -count=1 -v -run 'Docker' ./internal/container/
+
+      - name: the exec agent runs in a hardened container
+        # The reference agent completes the billing run behind the hardened
+        # docker run, and an agent in --network none cannot open a connection.
+        # Without this step the argv is only asserted, never accepted by a daemon.
+        run: go test -count=1 -v -run 'TestPythonAgentInHardenedContainer' ./internal/agent/
 
       - name: the shipped example config starts and stops through the CLI
         run: |

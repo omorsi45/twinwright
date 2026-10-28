@@ -763,7 +763,9 @@ every turn. It proposes tool calls; the dispatcher still authorizes and executes
 them. The command line is not stored with the run, so resuming an exec run or
 serving it from a worker needs `--agent-command` again. The protocol, its limits
 and a Python reference agent are in `docs/protocol/agent-v1.md` and
-`examples/agents/python/`.
+`examples/agents/python/`. `--agent-container IMAGE` runs the agent in a hardened
+docker container with no network by default; what that does and does not protect
+against is in `docs/adr/0033-agent-protocol-and-isolation.md`.
 
 Twinwright's world state, tool execution, recorded decisions, and deterministic evaluators provide the reproducible boundary around it. When a provider reports token usage, the assistant turn stores it. Error bodies are redacted before they reach the ledger. No live OpenAI, Anthropic, or local-server run has been verified in this repository; scripted fixtures are the tested path. See `docs/adr/0013-agent-providers.md`.
 

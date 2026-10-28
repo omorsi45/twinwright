@@ -151,8 +151,45 @@ content of a simulated service, gets the same denial a model would.
 The agent never receives the database address or any provider key unless the
 operator names it with `--agent-env`. It reads and writes only its own stdin,
 stdout and stderr, and whatever the operating system lets its process reach: by
-itself `exec` is not a sandbox. Container mode (separate flags) puts the process
-in a hardened container.
+itself `exec` is not a sandbox. Container mode puts the process in a hardened
+container.
+
+## Container mode
+
+`--agent-container IMAGE` runs the agent command inside a hardened `docker run`
+instead of directly. The image must already contain what the command needs; the
+command line is then the command inside the container.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--agent-container IMAGE` | none | run the agent in this image |
+| `--agent-network` | `none` | docker network; `host` is refused |
+| `--agent-memory` | `512m` | memory limit |
+| `--agent-cpus` | `1` | CPU limit |
+| `--agent-pids` | `128` | process count limit |
+| `--agent-mount DIR` | none | host directory mounted read-only at `/agent`; made absolute by the CLI |
+
+The network, memory, CPU and process flags apply only with `--agent-container`;
+`--agent-container` with a provider other than `exec` is refused, and so is
+`--agent-mount` without a container. Variables named with `--agent-env` are passed
+into the container by name.
+
+```sh
+twinwright run duplicate-charge --agent exec --model billing-agent@1 \
+  --agent-container python:3.12-alpine \
+  --agent-mount examples/agents/python \
+  --agent-command 'python3 /agent/billing_agent.py' \
+  --fail-on-eval
+```
+
+The container runs with a read-only root filesystem (plus a 16 MiB `/tmp`), every
+capability dropped, privilege gain off and the user `65534`. The files you mount
+must be readable by that user. What this does not do: the Docker daemon is trusted,
+there is no custom seccomp profile, a network other than `none` is unrestricted, on
+macOS and Windows the boundary is the Docker Desktop VM, and a timeout kills the
+docker client but Docker does not stop a container when its client dies, so a hung
+agent's container can keep running until its process exits. See
+`docs/adr/0033-agent-protocol-and-isolation.md`.
 
 ## What a run records
 

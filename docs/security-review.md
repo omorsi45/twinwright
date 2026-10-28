@@ -353,7 +353,116 @@ matters is where the pieces come from:
 `internal/store/postgres_test.go` are skipped without a server DSN, so a default
 run exercises the rewrite logic but not a real server's parser.
 
-## 7. What this review deliberately does not cover
+## 7. Agent processes (exec and container mode)
+
+Added 2026-10-28, with the exec provider (`docs/protocol/agent-v1.md`) and ADR
+`docs/adr/0033-agent-protocol-and-isolation.md`.
+
+**Examined.** `internal/agent/exec.go`, `internal/agent/exec_unix.go`,
+`internal/agent/execcontainer.go`, and the flag handling in
+`cmd/twinwright/providers.go`.
+
+**Found.** An exec agent is a separate program the operator chose, so the question
+is what it is trusted with, and the answer is deliberately small.
+
+- It *proposes* tool calls. The runner and the dispatcher treat them exactly as a
+  hosted model's, so the principal's policy decides what executes, and an
+  operation the policy hides is not even offered.
+- It starts with an environment of only `PATH`, `HOME` and the variables the
+  operator named with `--agent-env`. A `NAME=value` is refused, so no value is
+  typed on a command line, and the refusal does not repeat the value.
+- Its stdout is read through a 1 MiB limit and strictly: an unknown field, a
+  missing or different `protocol`, a missing `content` or `tool_calls`, and data
+  after the object are all errors. Its stderr is kept to the last 4 KiB, and that
+  tail, every other error text and the agent's own stdout are masked with the
+  passed values.
+- A turn that overruns its deadline gets SIGTERM, then SIGKILL after 500 ms, to the
+  whole process group, and the child is always waited for.
+- The command line and the environment names are not part of the run, so the
+  ledger records nothing about how the agent was started.
+
+Container mode (`--agent-container`) puts the same process behind
+`docker run --rm -i --read-only --cap-drop ALL --security-opt no-new-privileges
+--user 65534:65534 --network <none by default> --memory --cpus --pids-limit
+--tmpfs /tmp:rw,size=16m`, with an optional read-only mount at `/agent`.
+`Validate` refuses `host` networking by name, an image that is not an image
+reference (so `--privileged` cannot ride in as one), network, memory and CPU
+values that fail the patterns a sidecar config is held to (shared through
+`internal/container/limits.go`), fewer than one process, an environment entry that
+is not a bare name, and a mount that is relative, missing, not a directory or
+contains a colon.
+
+**Evidence.**
+
+- `internal/agent/exec_test.go` - `TestExecProviderRejectsMisbehavingAgents` runs
+  a real child in fourteen misbehaving modes: not JSON, no output, exit 3 (the
+  error carries the stderr tail with the passed secret masked), an unknown
+  response field, a different and a missing protocol, a missing `tool_calls` and
+  `content`, no content and no calls, data after the object, a stdout flood past
+  1 MiB, a hang, a hang that ignores SIGTERM, and a hang whose child ignores
+  SIGTERM and holds the output pipes. The last four assert the process is gone
+  afterwards, including the grandchild, and that the timeout is an interruption
+  while every other failure is an ordinary error. `TestExecChildEnvironmentIsMinimal`
+  sets `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` and `DATABASE_URL` in the parent and
+  requires the child's environment names to be exactly `HOME`, `PATH` and the
+  passed ones. `TestExecProviderMasksPassedSecretsInTheAnswer` and
+  `TestExecProviderKeepsOnlyTheTailOfStderr` hold the masking and the 4 KiB bound,
+  and `TestExecProviderDoesNotBlockOnAnAgentThatNeverReads` holds that a 4 MiB
+  request to an agent that never reads does not stall the turn.
+  `TestExecAgentCannotExceedThePrincipalsPolicy` has an agent ask for a refund its
+  principal may not make: the call is answered 403, no refund row exists, and the
+  operation was never offered.
+- `internal/replay/exec_test.go` - `TestExecProviderCompletesTheBillingRun` drives
+  a separate process through the billing scenario across a pause and a resume,
+  passes the evaluation, verifies the replay, and asserts the executable path and
+  the helper's environment variable name appear nowhere in the transcript or the
+  ledger events.
+- `cmd/twinwright/exec_test.go` - `TestSelectProviderRefusesBadAgentConfigurations`
+  holds the `NAME=value` refusal without the value in the message, an unset
+  variable, and the flags refused for another provider. `TestSplitAgentCommand`
+  holds that `$HOME`, `*.py`, `$(id)` and `a;b|c` stay literal words.
+  `TestResumeOfExecRunNeedsTheCommand` runs the CLI end to end and requires the
+  resume without the command to fail naming `--agent-command`.
+  `TestSelectProviderRefusesBadContainerConfigurations` and
+  `TestSelectProviderWrapsTheAgentInAContainer` hold the container flags through
+  the CLI, including that the mount is made absolute.
+- `internal/agent/execcontainer_test.go` - `TestContainerWrapIsHardened` asserts
+  the whole argv in order, with and without a mount and with passed names (names
+  only, never values), so adding or reordering a flag changes a test.
+  `TestContainerOptionsRejectBadValues` is twenty-three named refusals, including
+  `host` by name, `container:abc`, an image of `--privileged` and a mount of
+  `<dir>:/etc:rw`.
+- `internal/agent/execcontainer_integration_test.go` - `TestPythonAgentInHardenedContainer`
+  runs the reference agent through the hardened command line against a real daemon
+  and requires the billing run to pass evaluation, and has an agent inside
+  `--network none` try an outbound TCP connection and requires that it did not
+  connect.
+
+**Known limits.**
+
+- `exec` on its own is not a sandbox. The agent runs with the operator's privileges
+  and can read what that user can read, reach the network that user can reach and
+  start any process. The environment is minimal; the filesystem and the network
+  are not.
+- Masking replaces the passed values as exact strings, as written and as escaped
+  in a JSON string. An agent that transforms a value first (encodes it, splits it)
+  is not caught.
+- The Docker daemon is trusted. There is no custom seccomp or AppArmor profile,
+  so Docker's defaults apply. A network other than `none` is unrestricted, and
+  network access for the agent's own model calls is not limited by Twinwright
+  unless the operator chooses `--agent-network none`. On macOS and Windows the
+  boundary is the Docker Desktop VM, not the host kernel.
+- A timeout kills the docker client's process group, but Docker does not stop a
+  container when its client dies, and a Python agent running as PID 1 ignores
+  SIGTERM, so a hung containerized agent can keep running until its own process
+  exits. No test covers this; it is stated as a limit, not fixed.
+- `TestPythonAgentInHardenedContainer` is skipped without
+  `TWINWRIGHT_TEST_DOCKER=1` and the image, so a default `go test ./...` proves the
+  argv and the validation but not that a daemon accepts the command line. That
+  evidence is the `docker` job of `.github/workflows/integration.yml`.
+- The process group is a unix feature. Elsewhere the agent alone is killed.
+
+## 8. What this review deliberately does not cover
 
 These are stated absences rather than untested properties, and none of them is a
 finding:
@@ -367,14 +476,17 @@ finding:
   `docs/adr/0021-otlp-and-metrics.md` records the decision. No test asserts that
   nothing listens without the flag.
 - **Container execution is experimental** and is not a sandbox, as section 4 sets
-  out in detail.
+  out in detail. The hardened container an exec agent can run in is section 7.
 - **No webhook or event-stream shadow transport exists.** A listening socket
   accepting unauthenticated input is a different security posture from reading a
   file, and ADR `docs/adr/0022-shadow-connectors.md` says it needs its own threat
   model rather than a fourth registry entry.
-- **No live provider call has ever been verified.** There is no API key on the
-  development host, so every provider behaviour in this repository is held against
-  an `httptest` server.
+- **No hosted-provider call has ever been verified.** A run of a local Ollama model
+  is recorded in `docs/live-model-run.md` and is what the Integration workflow's
+  `real-model` job runs (`.github/workflows/integration.yml`); that document does
+  not record the job's own result. There is no OpenAI or Anthropic API key on the
+  development host, so every hosted-provider behaviour in this repository is held
+  against an `httptest` server.
 - **Ownership history is deliberately not in the run ledger**, so this review makes
   no claim that the ledger records which worker executed a run; see
   `internal/store/ownership.go`.

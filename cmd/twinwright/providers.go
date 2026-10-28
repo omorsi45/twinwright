@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -40,6 +41,14 @@ type providerConfig struct {
 	// whenever an exec run is continued.
 	AgentCommand string
 	AgentEnv     []string
+	// AgentContainer, when set, runs the exec agent behind a hardened `docker run`
+	// of this image. The network, memory, CPU and process limits and the mount
+	// apply only then; a mount without a container is refused.
+	AgentContainer            string
+	AgentNetwork, AgentMemory string
+	AgentCPUs                 string
+	AgentPIDs                 int
+	AgentMount                string
 }
 
 // cassetteKeyPlaceholder stands in for the API key when a cassette is replayed.
@@ -64,6 +73,12 @@ func providerFlags(fs *flag.FlagSet) *providerConfig {
 	fs.DurationVar(&cfg.Timeout, "provider-timeout", agent.DefaultCallTimeout, "per-attempt provider call deadline")
 	fs.IntVar(&cfg.MaxOutputTokens, "max-output-tokens", 0, "output token ceiling per model call; 0 keeps each provider's own default")
 	fs.StringVar(&cfg.AgentCommand, "agent-command", "", "command line of the agent process for --agent exec, split on blanks with quotes grouping words and no shell; needed again to resume or serve an exec run")
+	fs.StringVar(&cfg.AgentContainer, "agent-container", "", "run the exec agent in a hardened docker container of this image (read-only root, no capabilities, non-root user); the agent command then runs inside it")
+	fs.StringVar(&cfg.AgentNetwork, "agent-network", "none", "docker network for the exec agent container; applies with --agent-container, and host is refused")
+	fs.StringVar(&cfg.AgentMemory, "agent-memory", "512m", "memory limit for the exec agent container; applies with --agent-container")
+	fs.StringVar(&cfg.AgentCPUs, "agent-cpus", "1", "CPU limit for the exec agent container; applies with --agent-container")
+	fs.IntVar(&cfg.AgentPIDs, "agent-pids", 128, "process count limit for the exec agent container; applies with --agent-container")
+	fs.StringVar(&cfg.AgentMount, "agent-mount", "", "host directory to mount read-only at /agent in the exec agent container; requires --agent-container")
 	fs.Var((*stringList)(&cfg.AgentEnv), "agent-env", "NAME of an environment variable to pass to the exec agent, with this process's value; repeatable. The agent otherwise gets only PATH and HOME")
 	return cfg
 }
@@ -140,6 +155,12 @@ func openProvider(cfg providerConfig) (agent.Provider, io.Closer, error) {
 	}
 	if len(cfg.AgentEnv) > 0 {
 		return nil, nil, fmt.Errorf("--agent-env only applies to --agent exec; this run uses %s", cfg.Name)
+	}
+	if cfg.AgentContainer != "" {
+		return nil, nil, fmt.Errorf("--agent-container only applies to --agent exec; this run uses %s", cfg.Name)
+	}
+	if cfg.AgentMount != "" {
+		return nil, nil, fmt.Errorf("--agent-mount only applies to --agent exec with --agent-container; this run uses %s", cfg.Name)
 	}
 	if cfg.Name == "scripted" {
 		// A scripted provider makes no HTTP calls, so there is nothing to record
@@ -262,7 +283,44 @@ func openExecProvider(cfg providerConfig) (agent.Provider, io.Closer, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	return agent.ExecProvider{Command: command, Env: env, Timeout: cfg.Timeout}, closerFunc(noClose), nil
+	provider := agent.ExecProvider{Command: command, Env: env, Timeout: cfg.Timeout}
+	if cfg.AgentContainer == "" {
+		if cfg.AgentMount != "" {
+			return nil, nil, errors.New("--agent-mount needs --agent-container: without a container the agent runs on the host and there is nothing to mount into")
+		}
+		return provider, closerFunc(noClose), nil
+	}
+	// The mount is made absolute here, once, because docker reads a relative
+	// host path as a volume name and the working directory is this process's.
+	mount := cfg.AgentMount
+	if mount != "" {
+		abs, err := filepath.Abs(mount)
+		if err != nil {
+			return nil, nil, fmt.Errorf("--agent-mount: %w", err)
+		}
+		mount = abs
+	}
+	options := agent.ContainerOptions{
+		Image: cfg.AgentContainer, Network: cfg.AgentNetwork, Memory: cfg.AgentMemory, CPUs: cfg.AgentCPUs,
+		PIDs: cfg.AgentPIDs, Mount: mount, EnvNames: agentEnvNames(env),
+	}
+	if err := options.Validate(); err != nil {
+		return nil, nil, fmt.Errorf("--agent-container: %w", err)
+	}
+	provider.Wrap = options.Wrap
+	return provider, closerFunc(noClose), nil
+}
+
+// agentEnvNames lists the variable names of NAME=value pairs. The container gets
+// the names only; the values reach docker through the environment it is started
+// with.
+func agentEnvNames(pairs []string) []string {
+	names := make([]string, 0, len(pairs))
+	for _, pair := range pairs {
+		name, _, _ := strings.Cut(pair, "=")
+		names = append(names, name)
+	}
+	return names
 }
 
 // splitAgentCommand splits a command line into arguments the way an operator
