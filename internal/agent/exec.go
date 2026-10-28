@@ -46,9 +46,13 @@ const execKillGrace = 500 * time.Millisecond
 // dispatcher still authorizes and executes them, so what a run is allowed to do
 // does not depend on the agent being well behaved.
 //
-// The process is started once per turn so that nothing survives between turns
-// except the history it is sent. That is what makes a run resumable on another
-// machine, and what keeps a crashed agent from taking the run's state with it.
+// The process is started once per turn so that the agent carries nothing between
+// turns except the history it is sent. That is what makes a run resumable on
+// another machine, and what keeps a crashed agent from taking the run's state
+// with it. Every turn ends by killing the agent's whole process group (unix), so
+// a process the agent started and left in its group does not outlive the turn,
+// and on Linux the agent is also killed if Twinwright dies mid-turn. A process
+// that left the group (setsid, a daemon) is not reached.
 type ExecProvider struct {
 	// Command is the argv of the agent. It is never passed to a shell.
 	Command []string
@@ -224,6 +228,9 @@ func (p ExecProvider) Next(ctx context.Context, task string, history []Message, 
 	// Bounds how long Wait lingers on output pipes that a process the agent
 	// started is still holding after the agent itself has gone.
 	cmd.WaitDelay = execKillGrace
+	// The kernel's parent-death signal belongs to the thread that starts the
+	// child, so the thread is held until the turn is over.
+	defer holdThread()()
 	setProcessGroup(cmd)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -245,6 +252,11 @@ func (p ExecProvider) Next(ctx context.Context, task string, history []Message, 
 	var waitErr error
 	select {
 	case waitErr = <-waited:
+		// The agent has been reaped, but what it started may not have gone. The
+		// group outlives its leader while any member runs, so this reaches a
+		// helper left behind by a turn that succeeded and one that holds the
+		// output open (the ErrWaitDelay failure below) alike.
+		killProcessGroup(cmd)
 	case <-stdout.exceeded:
 		stopProcessGroup(cmd, waited)
 		return Message{}, fail("agent output exceeded %d bytes", MaxAgentOutputBytes)

@@ -378,7 +378,11 @@ is what it is trusted with, and the answer is deliberately small.
   passed values. In the tail the values are masked as written, as a JSON string
   and as a Go quoted string, before the tail is quoted and before it is cut.
 - A turn that overruns its deadline gets SIGTERM, then SIGKILL after 500 ms, to the
-  whole process group, and the child is always waited for.
+  whole process group, and the child is always waited for. Every other turn ends
+  with SIGKILL to the group too, so what the agent started and left in its group
+  does not outlive the turn; on Linux the agent is also killed if Twinwright dies
+  mid-turn. A process that left the group, grandchildren of a killed Twinwright
+  and platforms other than unix are not covered.
 - The command line and the environment names are not part of the run, so the
   ledger records nothing about how the agent was started.
 
@@ -415,6 +419,11 @@ contains a colon.
   event read back from SQLite after a real run, and
   `TestExecChildEnvironmentStaysEmptyWithoutPathAndHome` holds that a parent with no
   `PATH` and no `HOME` gives the agent an empty environment, not its own,
+  `TestExecProviderKillsTheGroupAfterACleanExit` and
+  `TestExecProviderKillsTheGroupOnWaitDelay` hold that a process the agent left in its
+  group is gone when the turn returns, and `TestExecAgentDiesWithTheProcessThatStartedIt`
+  holds that on Linux an agent is gone after the Twinwright that started it is killed
+  with SIGKILL,
   and `TestExecProviderDoesNotBlockOnAnAgentThatNeverReads` holds that a 4 MiB
   request to an agent that never reads does not stall the turn.
   `TestExecAgentCannotExceedThePrincipalsPolicy` has an agent ask for a refund its

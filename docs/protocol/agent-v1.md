@@ -36,7 +36,7 @@ word. There are no escapes, variables, globs, substitutions or operators, and th
 result is executed directly, never through a shell. An unterminated quote or an
 empty command is an error.
 
-The agent is started once per turn and nothing survives between turns except the
+The agent is started once per turn and carries nothing between turns except the
 history it is sent. Its environment is exactly `PATH` and `HOME` from the
 Twinwright process, plus the variables named with `--agent-env`. Provider keys,
 database addresses and the rest of the operator's environment are not passed. If
@@ -133,9 +133,19 @@ A timeout is the only failure the runner retries: it makes up to two attempts at
 a turn and records each interrupted one. Every other failure ends the run as
 `failed`, with the error in the ledger.
 
-On unix the agent runs in a process group of its own, so a timeout ends the agent
-and anything it started, and the child is always waited for, so no zombie is left.
-On other platforms the agent alone is killed.
+On unix the agent runs in a process group of its own, and every turn ends by
+killing that group, whether the turn succeeded, failed or timed out (a timeout
+sends SIGTERM first). A process the agent started and left in its group does not
+outlive the turn, and the child is always waited for, so no zombie is left. What
+this does not reach: a process that left the group (`setsid`, a daemon, a double
+fork into a new session), and on platforms other than unix anything the agent
+started, since there only the agent itself is killed.
+
+If Twinwright itself dies mid-turn, the agent is killed too on Linux, where the
+kernel is asked to send it SIGKILL when its parent goes. That covers the agent
+process only: what the agent started is not reached when Twinwright is killed
+rather than stopped, and on other platforms a hung agent outlives a dead
+Twinwright.
 
 stderr is kept to its last 4 KiB. The error text, including that tail, is
 redacted: the values of the variables passed with `--agent-env` are masked, as are

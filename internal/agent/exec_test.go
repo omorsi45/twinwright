@@ -27,9 +27,35 @@ import (
 // TestMain turns this test binary into the agent process when the exec provider
 // starts it with exectest.Mode set. Without the variable it is an ordinary
 // test run.
+//
+// It is also the Twinwright that the parent-death test kills: with
+// parentPIDFile set it runs one turn against a hanging agent and waits.
 func TestMain(m *testing.M) {
 	exectest.MaybeRun()
+	if file := os.Getenv(parentPIDFile); file != "" {
+		runAsParent(file)
+	}
 	os.Exit(m.Run())
+}
+
+// parentPIDFile names the file the hanging agent of runAsParent writes its pid
+// to; setting it turns this test binary into a Twinwright mid-turn.
+const parentPIDFile = "TW_EXEC_TEST_PARENT_PIDFILE"
+
+// runAsParent runs one turn against an agent that never answers, and never
+// returns normally: the test kills this process while the turn is running.
+func runAsParent(pidFile string) {
+	exe, err := os.Executable()
+	if err != nil {
+		os.Exit(2)
+	}
+	provider := ExecProvider{
+		Command: []string{exe},
+		Env:     []string{exectest.Mode + "=hang", exectest.PIDFile + "=" + pidFile},
+		Timeout: time.Minute,
+	}
+	provider.Next(context.Background(), "task", nil, nil)
+	os.Exit(3)
 }
 
 // helperProvider is an ExecProvider whose agent is this test binary in the
@@ -182,7 +208,7 @@ func requireGone(t *testing.T, file string, patience time.Duration) {
 	if err != nil {
 		t.Fatalf("the process never wrote its pid, so its exit cannot be checked: %v", err)
 	}
-	pid, err := strconv.Atoi(string(raw))
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -41,8 +41,8 @@ The flags are registered by the same helper as the other provider flags, so `run
 so are `--record-cassette` and `--cassette` with `exec`: it makes no HTTP calls, so
 there is nothing to record or serve.
 
-The agent process is started once per turn. Nothing survives between turns except
-the history it is sent, so a run can be resumed by a different process on a
+The agent process is started once per turn. It carries nothing between turns
+except the history it is sent, so a run can be resumed by a different process on a
 different machine, and nothing of the run lives in the agent.
 
 ### The wire protocol, version 1
@@ -87,6 +87,19 @@ files for both documents.
   same program the same question is not expected to change the answer.
 - The process-group calls live in `internal/agent/exec_unix.go`, with a plain kill
   in `internal/agent/exec_other.go`, so the module still builds for Windows.
+- Every turn ends by sending SIGKILL to the agent's process group once the agent
+  has been waited for, on success and on every failure, so a process the agent
+  started and left in its group does not outlive the turn. The group outlives its
+  reaped leader while any member runs, which is why this reaches a helper the
+  agent left behind. A process that left the group (`setsid`, a daemon) is not
+  reached.
+- On Linux the agent is started with a parent-death signal of SIGKILL, so it dies
+  if Twinwright is killed or crashes mid-turn. The kernel ties that signal to the
+  thread that started the child, so the starting goroutine is pinned to its
+  thread for the length of the turn. This covers the direct child on Linux only:
+  grandchildren of a SIGKILLed Twinwright, and every other platform, are not
+  covered. `TestExecAgentDiesWithTheProcessThatStartedIt` kills a Twinwright
+  mid-turn with SIGKILL and requires the agent to be gone.
 
 ### Environment, secrets, and what is stored
 
@@ -172,7 +185,11 @@ By tests that run on every `go test ./...`:
 - The fourteen misbehaviours in `TestExecProviderRejectsMisbehavingAgents` are
   errors, a hang is killed within its deadline with its process reaped, a child that
   ignores SIGTERM is killed with the group, and the stdout limit holds.
-- The environment is exactly `HOME`, `PATH` and the passed names.
+- The environment is exactly `HOME`, `PATH` and the passed names, and empty when
+  there are none to pass.
+- A process the agent leaves running in its group is killed when the turn ends,
+  after a clean exit and after the failure where it holds the output open; on
+  Linux a Twinwright killed mid-turn takes the agent with it.
 - An agent that asks for an operation its principal may not call is refused by the
   dispatcher.
 - The container argv is exactly the one above, and each bad option is refused.
@@ -207,7 +224,9 @@ test, printed `connected` for the same probe on the default bridge network.
 - **Masking is literal.** A secret that an agent encodes, splits or hashes before
   printing is not recognised.
 - **Process groups are unix only.** Elsewhere the agent alone is killed, and
-  anything it started is left to the operating system.
+  anything it started is left to the operating system. On unix a process that
+  leaves the agent's group is not killed with it, and the parent-death signal is
+  Linux only and covers the direct child.
 - **The hardening flags are asserted, not each observed.** The argv test holds that
   they are passed; the daemon test shows it accepts the command and that the
   network is off. Read-only root, dropped capabilities and the unprivileged user
@@ -251,3 +270,4 @@ more.
 
 - 2026-10-28: the stderr tail was quoted before it was masked and cut to 4 KiB before it was masked, so a passed value holding a quote, a backslash or a control character, and the end of a value that the window cut in two, reached the error text and the ledger (EXEC-1); the tail is now masked, in the value's raw, JSON-escaped and Go-quoted spellings, before it is quoted and before it is cut, and the first partial line of a cut tail is dropped.
 - 2026-10-28: a child environment with neither `PATH` nor `HOME` and no passed variable was a nil slice, which `os/exec` reads as "inherit the parent's environment", so the stated "exactly `PATH` and `HOME` plus the named variables" did not hold (EXEC-2); it is now an empty slice that stays empty.
+- 2026-10-28: "nothing survives between turns" was false for what an agent started: the process group was signalled only on a timeout or an output overflow, so a helper left running by a turn that succeeded, or by one that failed because it held the output open, outlived it (EXEC-3). Every turn now ends by killing the group (unix), and on Linux the agent also gets a parent-death SIGKILL so it does not outlive a Twinwright that dies mid-turn (EXEC-12); the claim is now stated as "carries nothing between turns except the history", and the cases it does not cover (a process that left the group, grandchildren of a killed Twinwright, non-Linux platforms) are listed under Bounds and Limits.

@@ -97,6 +97,16 @@ database written by a newer build is refused rather than downgraded.
   environment.** With nothing to pass, the child environment was a nil slice, which
   `os/exec` reads as "use mine", so every provider key and database address went to the
   agent. It is now an empty environment (`TestExecChildEnvironmentStaysEmptyWithoutPathAndHome`).
+- **A process an exec agent started no longer outlives the turn.** The agent's process
+  group was signalled only on a timeout or an output overflow, so a helper left running by
+  a turn that succeeded, or by one that failed because it held the output open, kept
+  running, and the guide's "nothing survives between turns" was false. Every turn now ends
+  by killing the group on unix (`TestExecProviderKillsTheGroupAfterACleanExit`,
+  `TestExecProviderKillsTheGroupOnWaitDelay`). On Linux the agent is also killed if
+  Twinwright dies mid-turn, where a hung agent used to be left running for ever
+  (`TestExecAgentDiesWithTheProcessThatStartedIt`); this covers the direct child only, and
+  a process that left the group, grandchildren of a killed Twinwright and other platforms
+  are not covered, which the guide and ADR 0033 now say.
 
 ### Added
 

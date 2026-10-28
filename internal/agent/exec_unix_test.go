@@ -6,6 +6,9 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -24,6 +27,52 @@ func processAlive(pid int) bool {
 // processes of its own.
 func shAgent(script string, env ...string) ExecProvider {
 	return ExecProvider{Command: []string{"/bin/sh", "-c", script}, Env: env, Timeout: 10 * time.Second}
+}
+
+// okResponse is a final answer, for scripts to print.
+const okResponse = `{"protocol":"twinwright.agent.v1","content":"done","tool_calls":[]}`
+
+// killOnCleanup ends the process whose pid is in file when the test is over, so
+// a test that finds a leak does not leave it running.
+func killOnCleanup(t *testing.T, file string) {
+	t.Helper()
+	t.Cleanup(func() {
+		if raw, err := os.ReadFile(file); err == nil {
+			if pid, err := strconv.Atoi(strings.TrimSpace(string(raw))); err == nil {
+				syscall.Kill(pid, syscall.SIGKILL)
+			}
+		}
+	})
+}
+
+// A turn that ends normally still ends whatever the agent left running in its
+// process group: nothing the agent started survives the turn.
+func TestExecProviderKillsTheGroupAfterACleanExit(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "pid")
+	killOnCleanup(t, pidFile)
+	// The descendant lets go of every pipe, so the agent's exit is the whole turn.
+	script := `sleep 60 </dev/null >/dev/null 2>&1 & echo $! > "$PIDF"; printf '%s' '` + okResponse + `'`
+	message, err := shAgent(script, "PIDF="+pidFile).Next(context.Background(), "task", nil, nil)
+	if err != nil {
+		t.Fatalf("turn failed: %v", err)
+	}
+	if message.Content != "done" {
+		t.Fatalf("message = %+v", message)
+	}
+	requireGone(t, pidFile, 3*time.Second)
+}
+
+// A descendant that keeps stdout open makes the turn fail once Wait gives up on
+// the pipe, and it is ended too: a failed turn leaves nothing behind either.
+func TestExecProviderKillsTheGroupOnWaitDelay(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "pid")
+	killOnCleanup(t, pidFile)
+	script := `sleep 60 & echo $! > "$PIDF"; printf '%s' '` + okResponse + `'`
+	_, err := shAgent(script, "PIDF="+pidFile).Next(context.Background(), "task", nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "kept its output open") {
+		t.Fatalf("err = %v, want the output-held failure", err)
+	}
+	requireGone(t, pidFile, 3*time.Second)
 }
 
 // With neither PATH nor HOME to pass and nothing named, the environment is empty,
