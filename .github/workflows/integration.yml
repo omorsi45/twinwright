@@ -147,8 +147,9 @@ jobs:
 
       - name: start ollama
         # A pinned tag, not latest: the server version is part of what the report
-        # describes.
-        run: docker run -d --name ollama -p 11434:11434 ollama/ollama:0.40.11
+        # describes. The port is published on loopback only, so the runner does
+        # not expose an unauthenticated model server on its external interface.
+        run: docker run -d --name ollama -p 127.0.0.1:11434:11434 ollama/ollama:0.40.11
 
       - name: wait for the server
         run: |

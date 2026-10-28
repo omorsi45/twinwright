@@ -169,7 +169,9 @@ database written by a newer build is refused rather than downgraded.
   stops the container, replays from the cassette with the server gone, and uploads
   the report and the cassette as artifacts. The script ran against that image on a
   developer machine and the job's steps were run in order there; the job had not
-  run on GitHub Actions when this was written. See ADR 0031.
+  run on GitHub Actions when this was written. The local run of the script is
+  recorded in `docs/live-model-run.md`: the evaluation failed and both replays
+  verified. See ADR 0031.
 - **Opt-in live provider tests.** `TestLiveOpenAIToolCall`
   (`TWINWRIGHT_TEST_LIVE_OPENAI=1`, `OPENAI_API_KEY`, `TW_LIVE_OPENAI_MODEL`) and
   `TestLiveAnthropicToolCall` (`TWINWRIGHT_TEST_LIVE_ANTHROPIC=1`,

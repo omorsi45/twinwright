@@ -199,8 +199,8 @@ where `qwen2.5:0.5b` answered in text; that probe says the model can call a tool
 not how often.
 
 The local run's result, with the model, digest, machine and timings, is recorded in
-`docs/live-model-run.md`, which is written after the run. No figure from it is
-quoted here.
+[`docs/live-model-run.md`](../live-model-run.md). No figure from it is quoted
+here.
 
 ### Live provider tests
 
