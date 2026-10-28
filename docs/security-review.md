@@ -375,7 +375,8 @@ is what it is trusted with, and the answer is deliberately small.
   missing or different `protocol`, a missing `content` or `tool_calls`, and data
   after the object are all errors. Its stderr is kept to the last 4 KiB, and that
   tail, every other error text and the agent's own stdout are masked with the
-  passed values.
+  passed values. In the tail the values are masked as written, as a JSON string
+  and as a Go quoted string, before the tail is quoted and before it is cut.
 - A turn that overruns its deadline gets SIGTERM, then SIGKILL after 500 ms, to the
   whole process group, and the child is always waited for.
 - The command line and the environment names are not part of the run, so the
@@ -407,6 +408,13 @@ contains a colon.
   requires the child's environment names to be exactly `HOME`, `PATH` and the
   passed ones. `TestExecProviderMasksPassedSecretsInTheAnswer` and
   `TestExecProviderKeepsOnlyTheTailOfStderr` hold the masking and the 4 KiB bound,
+  `TestExecStderrMasksValuesWithEscapedCharacters`, `TestExecStderrMasksAValueCutByTheTail`
+  and `TestExecStderrSecretsNeverReachTheLedger` hold that a passed value holding a
+  quote, a backslash, a newline or a non-ASCII character, written raw, Go-quoted or
+  as JSON and cut or not by the window, is in neither the error text nor the `error`
+  event read back from SQLite after a real run, and
+  `TestExecChildEnvironmentStaysEmptyWithoutPathAndHome` holds that a parent with no
+  `PATH` and no `HOME` gives the agent an empty environment, not its own,
   and `TestExecProviderDoesNotBlockOnAnAgentThatNeverReads` holds that a 4 MiB
   request to an agent that never reads does not stall the turn.
   `TestExecAgentCannotExceedThePrincipalsPolicy` has an agent ask for a refund its

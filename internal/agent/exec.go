@@ -202,16 +202,20 @@ func (p ExecProvider) Next(ctx context.Context, task string, history []Message, 
 	defer cancel()
 
 	stdout := &boundedBuffer{limit: MaxAgentOutputBytes, exceeded: make(chan struct{})}
-	stderr := &tailBuffer{max: maxAgentStderrBytes}
+	spellings := secretSpellings(secrets)
+	stderr := newTailBuffer(maxAgentStderrBytes, spellings)
 	// fail renders an error the way it may be stored: with the tail of stderr,
 	// which is where an agent's own diagnosis is, and with every passed secret
 	// and key-like token masked, since both end up in the ledger and the logs.
+	// The tail is masked before it is quoted, because quoting rewrites a quote, a
+	// backslash and a control character and so turns the value into text the mask
+	// no longer matches; the whole text is masked again at the end.
 	fail := func(format string, args ...any) error {
 		text := fmt.Sprintf(format, args...)
-		if tail := stderr.String(); tail != "" {
+		if tail := stderr.Tail(); tail != "" {
 			text += "; stderr (last " + strconv.Itoa(maxAgentStderrBytes) + " bytes): " + strconv.Quote(tail)
 		}
-		return errors.New(redact.String(text, secrets...))
+		return errors.New(redact.String(maskSpellings(text, spellings)))
 	}
 
 	cmd := exec.Command(argv[0], argv[1:]...)
@@ -289,7 +293,13 @@ func (p ExecProvider) Next(ctx context.Context, task string, history []Message, 
 }
 
 // childEnvironment builds the agent's environment and the values to mask.
+//
+// The environment is never nil. os/exec reads a nil Env as "use this process's
+// environment", so a process with neither PATH nor HOME and nothing passed would
+// hand the agent every provider key and database address it holds. An empty,
+// non-nil slice is how an empty environment is asked for.
 func (p ExecProvider) childEnvironment() (env, secrets []string, err error) {
+	env = []string{}
 	passed := map[string]bool{}
 	for _, pair := range p.Env {
 		name, value, ok := strings.Cut(pair, "=")
@@ -372,31 +382,101 @@ func (b *boundedBuffer) Bytes() []byte {
 	return slices.Clone(b.buf.Bytes())
 }
 
-// tailBuffer keeps the last max bytes written to it.
+// tailBuffer keeps the end of what is written to it, for the error text of a
+// failed turn.
+//
+// What is reported is the last window bytes, but masking has to see a passed
+// value whole, so it keeps the longest spelling of a secret beyond the window and
+// masks before it cuts. A value that straddles the start of the window is then
+// still a whole value to the mask, and what is cut away is only ever masked
+// text. The value that straddles the start of what is kept is the one case the
+// mask cannot see whole, and it ends before the window begins, because it is no
+// longer than the extra that is kept.
 type tailBuffer struct {
-	mu  sync.Mutex
-	max int
-	buf []byte
+	mu       sync.Mutex
+	window   int
+	keep     int
+	spelling []string
+	buf      []byte
+}
+
+// newTailBuffer keeps the last window bytes, masking the given spellings (see
+// secretSpellings) of the values that must not appear in them.
+func newTailBuffer(window int, spellings []string) *tailBuffer {
+	extra := 0
+	for _, spelling := range spellings {
+		extra = max(extra, len(spelling))
+	}
+	return &tailBuffer{window: window, keep: window + extra, spelling: spellings}
 }
 
 func (b *tailBuffer) Write(p []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	written := len(p)
-	if len(p) > b.max {
-		p = p[len(p)-b.max:]
+	if len(p) > b.keep {
+		p = p[len(p)-b.keep:]
 	}
 	b.buf = append(b.buf, p...)
-	if len(b.buf) > b.max {
-		b.buf = append(b.buf[:0], b.buf[len(b.buf)-b.max:]...)
+	if len(b.buf) > b.keep {
+		b.buf = append(b.buf[:0], b.buf[len(b.buf)-b.keep:]...)
 	}
 	return written, nil
 }
 
-// String returns the kept tail as text. A cut that fell inside a multi-byte
-// character is replaced rather than printed as invalid UTF-8.
-func (b *tailBuffer) String() string {
+// Tail returns the end of what was written, as text that is safe to quote:
+// every spelling of a passed value is masked in what is kept, and only then is
+// the last window bytes taken.
+//
+// Where the window begins inside a masked value, it takes the whole mask, so a
+// value is never shown in part. Where it begins part way through a line, the
+// first, partial line is dropped, so the text starts where a line starts. A cut
+// that fell inside a multi-byte character is replaced rather than printed as
+// invalid UTF-8.
+func (b *tailBuffer) Tail() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return strings.TrimSpace(strings.ToValidUTF8(string(b.buf), "?"))
+	// Masking overwrites a spelling with zero bytes of the same length, so the
+	// window can be chosen in the original offsets and each run of zeros is made
+	// into one mask afterwards. A zero byte the agent really wrote is not one.
+	text := slices.Clone(b.buf)
+	for i, c := range text {
+		if c == 0 {
+			text[i] = '?'
+		}
+	}
+	for _, spelling := range b.spelling {
+		needle := []byte(spelling)
+		for from := 0; ; {
+			i := bytes.Index(text[from:], needle)
+			if i < 0 {
+				break
+			}
+			clear(text[from+i : from+i+len(needle)])
+			from += i + len(needle)
+		}
+	}
+	start := max(0, len(text)-b.window)
+	for start > 0 && text[start] == 0 && text[start-1] == 0 {
+		start--
+	}
+	partial := start > 0 && text[start-1] != '\n'
+
+	var out strings.Builder
+	for i := start; i < len(text); {
+		if text[i] != 0 {
+			out.WriteByte(text[i])
+			i++
+			continue
+		}
+		out.WriteString(redacted)
+		for i < len(text) && text[i] == 0 {
+			i++
+		}
+	}
+	tail := out.String()
+	if newline := strings.IndexByte(tail, '\n'); partial && newline >= 0 {
+		tail = tail[newline+1:]
+	}
+	return strings.TrimSpace(strings.ToValidUTF8(tail, "?"))
 }

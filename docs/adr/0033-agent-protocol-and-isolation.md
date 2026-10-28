@@ -100,7 +100,9 @@ exists to avoid. A name this process does not have is an error, not a silent gap
 The passed values are masked in the stderr tail, in every error text, and in the
 agent's own stdout before it is read, so an agent that echoes one back does not put
 it in the ledger. This matches a literal value and its JSON-string form; it does
-not match a transformed one.
+not match a transformed one. In the stderr tail the match is made on the text the
+agent wrote, before the tail is quoted and before it is cut to 4 KiB, and it also
+covers the Go quoted form.
 
 The command line and the environment names are not stored. The ledger records the
 provider name `exec` and the `--model`, and the turns, as for any provider. That
@@ -244,3 +246,8 @@ more.
 - The protocol is versioned by its `protocol` string. A change that an agent written
   for version 1 would misread gets a new string, and a runner that does not know the
   string an agent answers with refuses the response.
+
+## Corrections
+
+- 2026-10-28: the stderr tail was quoted before it was masked and cut to 4 KiB before it was masked, so a passed value holding a quote, a backslash or a control character, and the end of a value that the window cut in two, reached the error text and the ledger (EXEC-1); the tail is now masked, in the value's raw, JSON-escaped and Go-quoted spellings, before it is quoted and before it is cut, and the first partial line of a cut tail is dropped.
+- 2026-10-28: a child environment with neither `PATH` nor `HOME` and no passed variable was a nil slice, which `os/exec` reads as "inherit the parent's environment", so the stated "exactly `PATH` and `HOME` plus the named variables" did not hold (EXEC-2); it is now an empty slice that stays empty.

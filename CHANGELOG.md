@@ -85,6 +85,18 @@ database written by a newer build is refused rather than downgraded.
   a short key with a message (`TestLiveModelScriptNeverPrintsTheBaseURL`,
   `TestLiveModelScriptSkipsTheKeyCheckForAKeyTheMasksIgnore`,
   `TestLiveModelScriptChecksTheDatabaseForTheKey`).
+- **A passed value no longer reaches the ledger through an exec agent's stderr.** The error
+  for an agent that failed quoted the end of its stderr and masked it afterwards, and
+  quoting rewrites a quote, a backslash or a newline, so a `--agent-env` value holding one
+  was no longer the text the mask looked for; a value that the 4 KiB window cut in two kept
+  its end. The tail is now masked before it is quoted and before it is cut, in the value's
+  raw, JSON-escaped and Go-quoted spellings, and starts at a line boundary
+  (`TestExecStderrMasksValuesWithEscapedCharacters`, `TestExecStderrMasksAValueCutByTheTail`,
+  `TestExecStderrSecretsNeverReachTheLedger`, `TestTailBufferNeverShowsTheEndOfAValueItCutOff`).
+- **An exec agent started with no `PATH` and no `HOME` no longer inherits Twinwright's
+  environment.** With nothing to pass, the child environment was a nil slice, which
+  `os/exec` reads as "use mine", so every provider key and database address went to the
+  agent. It is now an empty environment (`TestExecChildEnvironmentStaysEmptyWithoutPathAndHome`).
 
 ### Added
 

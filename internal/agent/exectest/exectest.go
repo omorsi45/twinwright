@@ -40,6 +40,9 @@ const ChildSuffix = ".child"
 // Secret is read by the modes that echo it, so a test can prove it is masked.
 const Secret = "TW_TEST_SECRET"
 
+// Pad is read by the exit3-padded mode: how many filler bytes follow the secret.
+const Pad = "TW_EXEC_PAD"
+
 const protocol = "twinwright.agent.v1"
 
 // MaybeRun runs the agent and exits when Mode is set, and returns otherwise.
@@ -72,7 +75,9 @@ var fixed = map[string]string{
 // sent; unauthorized asks for a refund whatever it was offered; echo-request
 // answers with the request it received as its content;
 // environ answers with the sorted names of its environment; leak answers with
-// the value of Secret; exit3 fails with a message on stderr; stderr-flood fails
+// the value of Secret; exit3 fails with a message on stderr; exit3-spellings
+// fails after writing Secret to stderr in several spellings; exit3-padded fails
+// after writing Secret and then Pad filler bytes; stderr-flood fails
 // after writing far more than the provider keeps; flood writes stdout until it
 // is stopped; hang and hang-ignore-term never answer; spawn-hang hangs with a
 // child that ignores SIGTERM; every key of fixed is a malformed or odd
@@ -142,6 +147,25 @@ func Run(mode string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return say(stdout, "the secret is "+os.Getenv(Secret))
 	case "exit3":
 		fmt.Fprintf(stderr, "agent exploded: %s\n", os.Getenv(Secret))
+		return 3
+	case "exit3-spellings":
+		// The secret as an agent's own logging may spell it: as it is, Go-quoted,
+		// and as a JSON string.
+		quoted := strconv.Quote(os.Getenv(Secret))
+		encoded, _ := json.Marshal(os.Getenv(Secret))
+		fmt.Fprintf(stderr, "raw: %s\n", os.Getenv(Secret))
+		fmt.Fprintf(stderr, "go: %s\n", quoted)
+		fmt.Fprintf(stderr, "json: %s\n", encoded)
+		fmt.Fprintf(stderr, "go inner: %s\n", quoted[1:len(quoted)-1])
+		fmt.Fprintf(stderr, "json inner: %s\n", encoded[1:len(encoded)-1])
+		return 3
+	case "exit3-padded":
+		// The secret, a newline, Pad filler bytes and a newline, so that the end
+		// of stderr is a known distance from the secret.
+		pad, _ := strconv.Atoi(os.Getenv(Pad))
+		io.WriteString(stderr, os.Getenv(Secret)+"\n")
+		io.WriteString(stderr, strings.Repeat("x", pad))
+		io.WriteString(stderr, "\n")
 		return 3
 	case "stderr-flood":
 		line := strings.Repeat("e", 1023) + "\n"

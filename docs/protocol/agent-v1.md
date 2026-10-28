@@ -39,7 +39,9 @@ empty command is an error.
 The agent is started once per turn and nothing survives between turns except the
 history it is sent. Its environment is exactly `PATH` and `HOME` from the
 Twinwright process, plus the variables named with `--agent-env`. Provider keys,
-database addresses and the rest of the operator's environment are not passed.
+database addresses and the rest of the operator's environment are not passed. If
+Twinwright has neither `PATH` nor `HOME` and nothing is named, the environment is
+empty, not inherited.
 Its working directory is the one Twinwright was started in.
 
 ## Framing
@@ -137,7 +139,12 @@ On other platforms the agent alone is killed.
 
 stderr is kept to its last 4 KiB. The error text, including that tail, is
 redacted: the values of the variables passed with `--agent-env` are masked, as are
-key-like tokens. Passed values are also masked in the agent's own stdout before it
+key-like tokens. A passed value is masked in the tail as the agent wrote it, as a
+JSON string and as a Go quoted string, before the tail is quoted for the error text
+and before it is cut to 4 KiB, so a value holding a quote, a backslash or a newline
+is masked, and so is one that the 4 KiB window would have cut in two. When stderr is
+longer than the window, the tail starts at a line boundary: the first, partial line
+is dropped. Passed values are also masked in the agent's own stdout before it
 is read, so an agent that echoes one back does not put it in the ledger.
 
 ## Trust boundary
