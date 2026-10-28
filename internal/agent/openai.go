@@ -91,7 +91,7 @@ func (p OpenAIProvider) Next(ctx context.Context, task string, history []Message
 	req.Header.Set("Content-Type", "application/json")
 	res, err := client.Do(req)
 	if err != nil {
-		return Message{}, interrupted(ctx, attemptCtx, deadline, safeTransportError(err, p.APIKey))
+		return Message{}, requestFailed(ctx, attemptCtx, deadline, safeTransportError(err, p.APIKey))
 	}
 	defer res.Body.Close()
 	body, err := readBody(res)
@@ -100,7 +100,11 @@ func (p OpenAIProvider) Next(ctx context.Context, task string, history []Message
 	}
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		text := redact.String(string(body), p.APIKey)
-		return Message{RawBody: text}, fmt.Errorf("OpenAI response HTTP %d: %s", res.StatusCode, text)
+		failure := fmt.Errorf("OpenAI response HTTP %d: %s", res.StatusCode, text)
+		if interrupt := statusInterruption(res, failure); interrupt != nil {
+			return Message{RawBody: text}, interrupt
+		}
+		return Message{RawBody: text}, failure
 	}
 	var wire struct {
 		ID     string            `json:"id"`

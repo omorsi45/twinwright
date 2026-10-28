@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"time"
 
 	"twinwright/internal/authz"
 	"twinwright/internal/compiler"
@@ -69,6 +70,20 @@ type Runner struct {
 	// returns the crash at once and writes nothing more, as a dead process
 	// would.
 	Crash crashpoint.Hook
+	// Sleep pauses between two attempts at one model turn after a rate limit, a
+	// server error or a transport failure. It must return the context's error if
+	// the context ends first. Nil means a context-aware timer; a test supplies
+	// one so a retry costs no time. Replay never reaches it: a replayed turn
+	// carries its interruptions already and arrives without an error.
+	Sleep func(ctx context.Context, d time.Duration) error
+}
+
+// sleep waits through the configured Sleep, or a timer when none is set.
+func (r Runner) sleep(ctx context.Context, d time.Duration) error {
+	if r.Sleep != nil {
+		return r.Sleep(ctx, d)
+	}
+	return sleepContext(ctx, d)
 }
 
 func (r Runner) Execute(ctx context.Context, runID string, maxSteps int) (store.Run, error) {
@@ -207,25 +222,30 @@ func (r Runner) validateCalls(history []Message, next Message) error {
 
 // providerAttempts is how many times one model turn is attempted.
 //
-// Two, not more. An attempt that passed its deadline or came back cut short is
-// routinely transient, and killing a long run over the first one is the wrong
-// trade. The second failure is a different signal: whatever is wrong is not
-// something waiting again will fix, and a third attempt only delays the report
-// while spending another call. Nothing escalates silently either way, because
-// every attempt is recorded.
+// Two, not more. An attempt that passed its deadline, came back cut short, was
+// rate limited, hit a server error or lost its connection is routinely transient,
+// and killing a long run over the first one is the wrong trade. The second
+// failure is a different signal: whatever is wrong is not something waiting again
+// will fix, and a third attempt only delays the report while spending another
+// call. Nothing escalates silently either way, because every attempt is recorded.
 const providerAttempts = 2
 
 // callProvider makes up to providerAttempts attempts at one model turn and
 // returns the turn together with the attempts that produced nothing.
 //
 // Only an interrupted attempt is retried. An ordinary provider error - a rejected
-// key, a malformed request, a 500 - is returned as it always was, because a retry
+// key, a malformed request, a 400 - is returned as it always was, because a retry
 // cannot fix it and two identical failures are worse evidence than one.
+//
+// A rate limit, a server error or a transport failure is retried after a wait:
+// the server's Retry-After up to MaxRetryAfter, or one second when it named none.
+// A timeout or a truncation is retried at once. The wait goes through r.Sleep and
+// ends early, with the context's error, if the run is cancelled during it.
 //
 // A replayed turn arrives with its interruptions already on it and no error, so
 // the recorded list is what gets appended in both cases. That is what lets a run
 // that was interrupted once replay from its own ledger without the provider
-// having to be made to fail again.
+// having to be made to fail again, and without waiting out a recorded Retry-After.
 func (r Runner) callProvider(ctx context.Context, task string, history []Message, ops []compiler.Operation) (Message, error) {
 	var recorded []Interruption
 	for attempt := 1; ; attempt++ {
@@ -239,6 +259,12 @@ func (r Runner) callProvider(ctx context.Context, task string, history []Message
 		if attempt >= providerAttempts {
 			next.Interruptions = recorded
 			return next, fmt.Errorf("provider interrupted on %d of %d attempts: %w", len(recorded), providerAttempts, err)
+		}
+		if wait := interrupt.wait(); wait > 0 {
+			if sleepErr := r.sleep(ctx, wait); sleepErr != nil {
+				next.Interruptions = recorded
+				return next, sleepErr
+			}
 		}
 	}
 }
