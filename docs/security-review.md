@@ -398,7 +398,8 @@ Container mode (`--agent-container`) puts the same process behind
 `Validate` refuses `host` networking by name, an image that is not an image
 reference (so `--privileged` cannot ride in as one), network, memory and CPU
 values that fail the patterns a sidecar config is held to (shared through
-`internal/container/limits.go`), fewer than one process, an environment entry that
+`internal/container/limits.go`) and a memory or CPU of zero, which docker reads as
+no limit, fewer than one process, an environment entry that
 is not a bare name, and a mount that is relative, missing, not a directory or
 contains a colon.
 
@@ -464,15 +465,32 @@ contains a colon.
   the CLI, including that the mount is made absolute.
 - `internal/agent/execcontainer_test.go` - `TestContainerWrapIsHardened` asserts
   the whole argv in order, with and without a mount and with passed names (names
-  only, never values), so adding or reordering a flag changes a test.
-  `TestContainerOptionsRejectBadValues` is twenty-three named refusals, including
-  `host` by name, `container:abc`, an image of `--privileged` and a mount of
-  `<dir>:/etc:rw`.
+  only, never values), so adding or reordering a flag changes a test; the random
+  `--name` is checked for its shape and taken out first, and
+  `TestContainerWrapNamesEachTurnsContainer` holds that two turns never share one.
+  `TestContainerWrapNeverCarriesTheDockerConnectionVariables` holds that none of
+  the daemon connection variables or their values is in the argv.
+  `TestContainerOptionsRejectBadValues` is thirty named refusals, including
+  `host` by name, `container:abc`, an image of `--privileged`, a mount of
+  `<dir>:/etc:rw`, and memory and CPU values of zero in seven spellings (docker
+  reads zero as no limit).
+- `internal/agent/execcontainer_unix_test.go` - a fake docker client on `PATH`
+  records what it is asked. `TestContainerIsRemovedWhenTheTurnIsCutShort` holds that
+  a timeout, an output overflow and a cancellation each end with `docker rm -f` on
+  the name the container was given, `TestContainerIsLeftAloneAfterANormalTurn` that a
+  turn that ends by itself does not, `TestContainerRemovalFailureIsLoggedNotReturned`
+  that a failed removal is logged and the turn's own error stands, and
+  `TestExecContainerClientGetsTheDockerConnectionVariables` that the client's
+  environment has `DOCKER_HOST` and the others while the command line has none.
 - `internal/agent/execcontainer_integration_test.go` - `TestPythonAgentInHardenedContainer`
   runs the reference agent through the hardened command line against a real daemon
   and requires the billing run to pass evaluation, and has an agent inside
-  `--network none` try an outbound TCP connection and requires that it did not
-  connect.
+  `--network none` try an outbound TCP connection and requires that it was blocked
+  with errno 101; a control subtest requires the same probe to connect on the bridge
+  network (it skips with a logged reason on a runner without outbound network).
+  `TestHardenedContainerIsGoneAfterOverflowAndTimeout` requires the container to be
+  gone after a timeout and after an output flood, with a control that shows it still
+  running when the removal is not done. The `docker` job requires the passes by name.
 
 **Known limits.**
 
@@ -488,14 +506,23 @@ contains a colon.
   network access for the agent's own model calls is not limited by Twinwright
   unless the operator chooses `--agent-network none`. On macOS and Windows the
   boundary is the Docker Desktop VM, not the host kernel.
-- A timeout kills the docker client's process group, but Docker does not stop a
-  container when its client dies, and a Python agent running as PID 1 ignores
-  SIGTERM, so a hung containerized agent can keep running until its own process
-  exits. No test covers this; it is stated as a limit, not fixed.
-- `TestPythonAgentInHardenedContainer` is skipped without
+- A turn that ends by a timeout, a cancellation or an output overflow kills the docker
+  client's process group and then runs `docker rm -f` on the turn's container, which
+  has a name of its own (`tw-agent-` and 16 hexadecimal digits), because Docker does not
+  stop a container when its client dies and a Python agent running as PID 1 ignores
+  SIGTERM. The removal is best effort and bounded to 10 seconds, and its failure is
+  logged. A Twinwright that is killed mid-turn leaves the container running until its
+  own process exits.
+- The docker client is given `DOCKER_HOST`, `DOCKER_CONTEXT`, `DOCKER_CONFIG`,
+  `DOCKER_CERT_PATH` and `DOCKER_TLS_VERIFY` when they are set, and the container never
+  gets them. `--agent-memory 0` and `--agent-cpus 0`, which docker reads as no limit, are
+  refused.
+- `TestPythonAgentInHardenedContainer` and `TestHardenedContainerIsGoneAfterOverflowAndTimeout`
+  are skipped without
   `TWINWRIGHT_TEST_DOCKER=1` and the image, so a default `go test ./...` proves the
   argv and the validation but not that a daemon accepts the command line. That
-  evidence is the `docker` job of `.github/workflows/integration.yml`.
+  evidence is the `docker` job of `.github/workflows/integration.yml`, which fails
+  if either test does not report its passes by name.
 - The process group is a unix feature. Elsewhere the agent alone is killed.
 
 ## 8. What this review deliberately does not cover

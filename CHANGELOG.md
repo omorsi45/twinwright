@@ -135,6 +135,33 @@ database written by a newer build is refused rather than downgraded.
   `TestResumeOfAScriptedRunIgnoresTheAgentFlags`,
   `TestForkAndCounterfactualOnAScriptedRunIgnoreTheAgentFlags`,
   `TestForRunAppliesTheAgentFlagsOnlyToExecRuns`, `TestRunRefusesAgentFlagsForANonExecProvider`).
+- **An exec agent's container is removed when its turn is cut short.** On a timeout, a
+  cancellation or an output overflow only the docker client was killed, and Docker does not
+  stop a container when its client dies, so the container kept running and writing, and the
+  guide and ADR 0033 said the process was killed. Each turn's container now has a name of its own
+  (`tw-agent-` and 16 random hexadecimal digits) and `docker rm -f` is run for it, bounded
+  to 10 seconds and best effort with a logged failure (`TestContainerIsRemovedWhenTheTurnIsCutShort`,
+  `TestContainerWrapNamesEachTurnsContainer`, `TestContainerRemovalFailureIsLoggedNotReturned`,
+  and against a real daemon `TestHardenedContainerIsGoneAfterOverflowAndTimeout`, whose control
+  shows the container still running without the removal). A Twinwright that is killed
+  mid-turn still leaves the container running, which the guide and ADR 0033 say.
+- **`--agent-memory 0` and `--agent-cpus 0` are refused.** They passed validation and docker
+  reads them as no limit (checked on Docker Engine 29.9.2: the cgroup limit stays `max`), so a
+  zero removed the memory or CPU cap (`TestContainerOptionsRejectBadValues`).
+- **The docker client can reach a daemon configured through the environment, and the container
+  never sees it.** The client got only `PATH` and `HOME`, so `DOCKER_HOST`, `DOCKER_CONTEXT`,
+  `DOCKER_CONFIG`, `DOCKER_CERT_PATH` and `DOCKER_TLS_VERIFY` did not reach it, and the only
+  workaround, `--agent-env DOCKER_HOST`, also put the daemon address in the untrusted
+  container. They now go to the client alone, and their values are masked in error text
+  (`TestExecContainerClientGetsTheDockerConnectionVariables`,
+  `TestContainerWrapNeverCarriesTheDockerConnectionVariables`,
+  `TestExecAgentDoesNotGetTheDockerConnectionVariables`).
+- **The Docker CI step can no longer pass without running its tests.** A renamed test matched
+  nothing, a failed image check skipped, and the network probe accepted any `blocked` answer,
+  each leaving a green step. The step now requires the passes by name in the `-v` output, the
+  isolation test requires errno 101 (network unreachable), and a bridge-network control shows
+  that the same probe connects; the step's shell was run against the real daemon, against a
+  skipped run and against a renamed test, and failed on the last two.
 
 ### Added
 
@@ -244,8 +271,9 @@ database written by a newer build is refused rather than downgraded.
   it. ADR 0033 records the protocol, the bounds, the trust boundary and the limits:
   the Docker daemon is trusted, there is no custom seccomp profile, an allowed
   network is unrestricted, on macOS and Windows the boundary is the Docker Desktop
-  VM, and a timed out agent's container can outlive the docker client that started
-  it. `docs/security-review.md` gains a section for agent processes with every test
+  VM, and a container is left running if Twinwright is killed mid-turn (a turn that
+  times out, is cancelled or floods its output has its container removed, and each
+  container is named `tw-agent-` and 16 hexadecimal digits). `docs/security-review.md` gains a section for agent processes with every test
   cited, and its line about live model runs now says that a local Ollama run is
   recorded in `docs/live-model-run.md` while hosted providers remain unverified.
 - **An `exec` agent protocol: your own program makes the decisions.** `--agent exec`

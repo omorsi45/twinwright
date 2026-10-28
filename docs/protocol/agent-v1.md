@@ -131,7 +131,7 @@ All of these are enforced by the provider and covered by tests in
 | Exit status other than 0 | provider error naming the status, with the last 4 KiB of stderr |
 | stdout is empty, is not one JSON object, has data after the object, has an unknown field, or lacks `protocol`, `content` or `tool_calls` | provider error |
 | `protocol` is missing or is not `twinwright.agent.v1` | provider error (protocol mismatch) |
-| stdout over 1 MiB (1,048,576 bytes) | provider error, and the process is killed |
+| stdout over 1 MiB (1,048,576 bytes) | provider error, and the process is killed; in container mode the container is removed as well (below) |
 | No answer within the turn deadline | the process group gets SIGTERM, then SIGKILL after 500 ms, and the turn is recorded as an interrupted attempt of kind `timeout` |
 | The command cannot be started | provider error |
 
@@ -220,11 +220,28 @@ twinwright run duplicate-charge --agent exec --model billing-agent@1 \
 
 The container runs with a read-only root filesystem (plus a 16 MiB `/tmp`), every
 capability dropped, privilege gain off and the user `65534`. The files you mount
-must be readable by that user. What this does not do: the Docker daemon is trusted,
-there is no custom seccomp profile, a network other than `none` is unrestricted, on
-macOS and Windows the boundary is the Docker Desktop VM, and a timeout kills the
-docker client but Docker does not stop a container when its client dies, so a hung
-agent's container can keep running until its process exits. See
+must be readable by that user. `--agent-memory` and `--agent-cpus` of zero are
+refused, because docker reads zero as no limit.
+
+Each turn's container is named `tw-agent-` and 16 random hexadecimal digits. When a
+turn ends by a timeout, a cancellation or an output flood, Twinwright kills the
+docker client and then runs `docker rm -f` on that name (10 seconds at most, best
+effort: a failure is logged and the turn's own error is the one reported), because
+Docker does not stop a container when its client dies. It does not run for a turn
+that ended by itself, where `--rm` removes the container, and it cannot run if
+Twinwright is killed mid-turn: the container is then left until its own process
+exits.
+
+The docker client is started with `PATH`, `HOME` and, when they are set in
+Twinwright's environment, `DOCKER_HOST`, `DOCKER_CONTEXT`, `DOCKER_CONFIG`,
+`DOCKER_CERT_PATH` and `DOCKER_TLS_VERIFY`, so a daemon that is configured that way
+is reachable. Those go to the client only; the container gets just the names given
+with `--agent-env`, so the daemon's address does not enter the container. Their
+values are masked in error text like the passed ones.
+
+What this does not do: the Docker daemon is trusted, there is no custom seccomp
+profile, a network other than `none` is unrestricted, and on macOS and Windows the
+boundary is the Docker Desktop VM. See
 `docs/adr/0033-agent-protocol-and-isolation.md`.
 
 ## What a run records

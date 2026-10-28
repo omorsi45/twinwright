@@ -3,6 +3,7 @@ package agent
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -10,6 +11,43 @@ import (
 
 func sampleContainer(mount string) ContainerOptions {
 	return ContainerOptions{Image: "python:3.12-alpine", Network: "none", Memory: "512m", CPUs: "1", PIDs: 128, Mount: mount}
+}
+
+// containerNamePattern is the name given to each turn's container: unique, so
+// that it can be removed without touching any other container.
+var containerNamePattern = regexp.MustCompile(`^tw-agent-[0-9a-f]{16}$`)
+
+// withoutName returns the argv without its --name pair, and the name that was
+// there. The name is random, so the rest of the argv is what is compared whole.
+func withoutName(t *testing.T, argv []string) ([]string, string) {
+	t.Helper()
+	i := slices.Index(argv, "--name")
+	if i < 0 || i+1 >= len(argv) {
+		t.Fatalf("argv has no --name: %q", argv)
+	}
+	name := argv[i+1]
+	if !containerNamePattern.MatchString(name) {
+		t.Fatalf("container name %q does not match %s", name, containerNamePattern)
+	}
+	return slices.Concat(argv[:i], argv[i+2:]), name
+}
+
+// Each turn's container has a name of its own, so that Cleanup can remove it
+// after a timeout without a pattern that could match somebody else's.
+func TestContainerWrapNamesEachTurnsContainer(t *testing.T) {
+	opts := sampleContainer("")
+	first, firstName := withoutName(t, opts.Wrap([]string{"agent"}))
+	_, secondName := withoutName(t, opts.Wrap([]string{"agent"}))
+	if firstName == secondName {
+		t.Fatalf("two turns share the container name %q", firstName)
+	}
+	wrapped := opts.Wrap([]string{"agent"})
+	if !slices.Equal(wrapped[:5], []string{"docker", "run", "--rm", "-i", "--name"}) {
+		t.Fatalf("the name is not among the first options: %q", wrapped[:6])
+	}
+	if first[len(first)-1] != "agent" {
+		t.Fatalf("the agent argv moved: %q", first)
+	}
 }
 
 // The argv is the isolation. It is asserted whole, in order, so a flag cannot be
@@ -24,14 +62,14 @@ func TestContainerWrapIsHardened(t *testing.T) {
 	agentArgv := []string{"python3", "/agent/billing_agent.py"}
 
 	t.Run("with a mount", func(t *testing.T) {
-		got := sampleContainer("/work/agent dir").Wrap(agentArgv)
+		got, _ := withoutName(t, sampleContainer("/work/agent dir").Wrap(agentArgv))
 		want := slices.Concat(head, []string{"-v", "/work/agent dir:/agent:ro", "python:3.12-alpine"}, agentArgv)
 		if !slices.Equal(got, want) {
 			t.Fatalf("argv =\n%q\nwant\n%q", got, want)
 		}
 	})
 	t.Run("without a mount", func(t *testing.T) {
-		got := sampleContainer("").Wrap(agentArgv)
+		got, _ := withoutName(t, sampleContainer("").Wrap(agentArgv))
 		want := slices.Concat(head, []string{"python:3.12-alpine"}, agentArgv)
 		if !slices.Equal(got, want) {
 			t.Fatalf("argv =\n%q\nwant\n%q", got, want)
@@ -40,7 +78,8 @@ func TestContainerWrapIsHardened(t *testing.T) {
 	t.Run("with environment names", func(t *testing.T) {
 		opts := sampleContainer("/work/agent")
 		opts.EnvNames = []string{"MY_TOKEN", "OTHER"}
-		got := opts.Wrap(agentArgv)
+		wrapped := opts.Wrap(agentArgv)
+		got, _ := withoutName(t, wrapped)
 		// -e NAME only: the value is inherited from the docker client's own
 		// environment, so it is never an argument anyone can read.
 		want := slices.Concat(head, []string{"-v", "/work/agent:/agent:ro", "-e", "MY_TOKEN", "-e", "OTHER", "python:3.12-alpine"}, agentArgv)
@@ -61,6 +100,24 @@ func TestContainerWrapIsHardened(t *testing.T) {
 			t.Fatalf("Wrap shares memory with its argument: %q", argv)
 		}
 	})
+}
+
+// The docker client's connection variables belong to the client process. The
+// container gets the names Wrap was given and nothing else, so none of them, and
+// none of their values, can be in the command line.
+func TestContainerWrapNeverCarriesTheDockerConnectionVariables(t *testing.T) {
+	for _, name := range DockerClientEnv {
+		t.Setenv(name, "value-of-"+name)
+	}
+	opts := sampleContainer("")
+	opts.EnvNames = []string{"MY_TOKEN"}
+	for _, arg := range opts.Wrap([]string{"agent"}) {
+		for _, name := range DockerClientEnv {
+			if strings.Contains(arg, name) || strings.Contains(arg, "value-of-"+name) {
+				t.Errorf("the docker command line carries %s: %q", name, arg)
+			}
+		}
+	}
 }
 
 func TestContainerOptionsRejectBadValues(t *testing.T) {
@@ -94,6 +151,14 @@ func TestContainerOptionsRejectBadValues(t *testing.T) {
 		want []string
 	}{
 		{"memory lots", func(o *ContainerOptions) { o.Memory = "lots" }, []string{"memory", "lots"}},
+		// Docker reads zero as "no limit", so each of these would remove the cap.
+		{"zero memory", func(o *ContainerOptions) { o.Memory = "0" }, []string{"memory", "no limit"}},
+		{"zero memory with a unit", func(o *ContainerOptions) { o.Memory = "0m" }, []string{"memory", "no limit"}},
+		{"zero memory in bytes", func(o *ContainerOptions) { o.Memory = "0b" }, []string{"memory", "no limit"}},
+		{"zero memory written long", func(o *ContainerOptions) { o.Memory = "000G" }, []string{"memory", "no limit"}},
+		{"zero cpus", func(o *ContainerOptions) { o.CPUs = "0" }, []string{"cpus", "no limit"}},
+		{"zero cpus with a fraction", func(o *ContainerOptions) { o.CPUs = "0.0" }, []string{"cpus", "no limit"}},
+		{"zero cpus written long", func(o *ContainerOptions) { o.CPUs = "00.000" }, []string{"cpus", "no limit"}},
 		{"memory as a shell fragment", func(o *ContainerOptions) { o.Memory = "256m; rm -rf /" }, []string{"memory"}},
 		{"no memory", func(o *ContainerOptions) { o.Memory = "" }, []string{"memory"}},
 		{"cpus many", func(o *ContainerOptions) { o.CPUs = "many" }, []string{"cpus"}},

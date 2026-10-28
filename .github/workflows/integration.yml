@@ -117,9 +117,39 @@ jobs:
 
       - name: the exec agent runs in a hardened container
         # The reference agent completes the billing run behind the hardened
-        # docker run, and an agent in --network none cannot open a connection.
-        # Without this step the argv is only asserted, never accepted by a daemon.
-        run: go test -count=1 -v -run 'TestPythonAgentInHardenedContainer' ./internal/agent/
+        # docker run, an agent in --network none cannot open a connection (and the
+        # same probe does connect on a bridge network), and a container is gone
+        # after its turn is cut short by a timeout or an output flood. Without this
+        # step the argv is only asserted, never accepted by a daemon.
+        #
+        # go test exits 0 when the pattern matches no test and when a test skips,
+        # and neither is evidence, so the passes are required by name in the -v
+        # output: a renamed test, a missing image or a daemon that did not answer
+        # the image check fails the step. The bridge control may skip with a logged
+        # reason on a runner that has no outbound network; it must still have run.
+        run: |
+          set -euo pipefail
+          go test -count=1 -v -run 'TestPythonAgentInHardenedContainer|TestHardenedContainerIsGoneAfterOverflowAndTimeout' ./internal/agent/ | tee exec-container.log
+          missing=0
+          for want in \
+            '--- PASS: TestPythonAgentInHardenedContainer (' \
+            '--- PASS: TestPythonAgentInHardenedContainer/the_reference_agent_completes_the_billing_run (' \
+            '--- PASS: TestPythonAgentInHardenedContainer/network_none_leaves_the_agent_without_a_network (' \
+            '--- PASS: TestHardenedContainerIsGoneAfterOverflowAndTimeout (' \
+            '--- PASS: TestHardenedContainerIsGoneAfterOverflowAndTimeout/timeout:_the_container_is_removed (' \
+            '--- PASS: TestHardenedContainerIsGoneAfterOverflowAndTimeout/timeout:_without_the_removal_the_container_outlives_its_client (' \
+            '--- PASS: TestHardenedContainerIsGoneAfterOverflowAndTimeout/stdout_overflow:_the_container_is_removed (' \
+            '--- PASS: TestHardenedContainerIsGoneAfterOverflowAndTimeout/stdout_overflow:_without_the_removal_the_container_outlives_its_client ('; do
+            if ! grep -qF -- "$want" exec-container.log; then
+              echo "::error::missing from the test output: $want"
+              missing=1
+            fi
+          done
+          if ! grep -qE -- '--- (PASS|SKIP): TestPythonAgentInHardenedContainer/the_probe_does_connect_on_a_bridge_network \(' exec-container.log; then
+            echo "::error::the bridge control subtest did not run"
+            missing=1
+          fi
+          exit "$missing"
 
       - name: the shipped example config starts and stops through the CLI
         run: |

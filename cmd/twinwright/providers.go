@@ -337,6 +337,10 @@ func openExecProvider(cfg providerConfig) (agent.Provider, io.Closer, error) {
 		return nil, nil, fmt.Errorf("--agent-container: %w", err)
 	}
 	provider.Wrap = options.Wrap
+	provider.Cleanup = options.Cleanup
+	// The docker client finds its daemon through its own environment. The
+	// variables go to the client and never into the container.
+	provider.ClientEnv = agent.DockerClientEnv
 	return provider, closerFunc(noClose), nil
 }
 

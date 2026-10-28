@@ -57,15 +57,25 @@ type ExecProvider struct {
 	// Command is the argv of the agent. It is never passed to a shell.
 	Command []string
 	// Env holds NAME=value pairs for the child. The child environment is exactly
-	// these plus PATH and HOME from this process, so provider keys, database
-	// addresses and anything else in the operator's environment stay behind
-	// unless they were named on purpose.
+	// these plus PATH and HOME from this process (and ClientEnv, when set), so
+	// provider keys, database addresses and anything else in the operator's
+	// environment stay behind unless they were named on purpose.
 	Env []string
 	// Timeout is the deadline of one turn. Zero means DefaultCallTimeout.
 	Timeout time.Duration
 	// Wrap, when set, rewrites the argv before it is run. Container mode uses it
 	// to put the agent behind `docker run`; nil runs Command directly.
 	Wrap func(argv []string) []string
+	// Cleanup, when set, is called with the argv that Wrap returned after a turn
+	// was ended by a timeout, a cancellation or an output overflow and the process
+	// group was killed. Container mode uses it to remove the container, which
+	// Docker does not stop when its client dies.
+	Cleanup func(ctx context.Context, wrapped []string)
+	// ClientEnv names variables of this process that are passed to the wrapped
+	// process (the docker client in container mode) and to nothing else: the agent
+	// inside the container gets only what Wrap passes it by name. Names that are
+	// not set are skipped. The values are masked like the passed ones.
+	ClientEnv []string
 }
 
 // execRequest is the document an agent reads from stdin.
@@ -259,9 +269,11 @@ func (p ExecProvider) Next(ctx context.Context, task string, history []Message, 
 		killProcessGroup(cmd)
 	case <-stdout.exceeded:
 		stopProcessGroup(cmd, waited)
+		p.removeContainer(ctx, argv)
 		return Message{}, fail("agent output exceeded %d bytes", MaxAgentOutputBytes)
 	case <-attemptCtx.Done():
 		stopProcessGroup(cmd, waited)
+		p.removeContainer(ctx, argv)
 		if err = ctx.Err(); err != nil {
 			return Message{}, err
 		}
@@ -340,7 +352,38 @@ func (p ExecProvider) childEnvironment() (env, secrets []string, err error) {
 			env = append(env, name+"="+value)
 		}
 	}
+	// The wrapped process, the docker client in container mode, finds its daemon
+	// through its own environment. These reach it and nothing else, and are masked
+	// like the passed values, since a daemon's address is not the agent's to print.
+	for _, pair := range parentEnv(p.ClientEnv...) {
+		name, value, _ := strings.Cut(pair, "=")
+		if !passed[name] {
+			env = append(env, pair)
+			secrets = append(secrets, value)
+		}
+	}
 	return append(env, p.Env...), secrets, nil
+}
+
+// parentEnv returns NAME=value for each of the given names that is set in this
+// process's environment, in the order given.
+func parentEnv(names ...string) []string {
+	var pairs []string
+	for _, name := range names {
+		if value, ok := os.LookupEnv(name); ok {
+			pairs = append(pairs, name+"="+value)
+		}
+	}
+	return pairs
+}
+
+// removeContainer runs the provider's Cleanup, if it has one, for a turn that was
+// cut short and whose process group has been killed. wrapped is the argv that
+// was run.
+func (p ExecProvider) removeContainer(ctx context.Context, wrapped []string) {
+	if p.Cleanup != nil {
+		p.Cleanup(ctx, wrapped)
+	}
 }
 
 // stopProcessGroup ends a process group that has overrun, and reaps it.

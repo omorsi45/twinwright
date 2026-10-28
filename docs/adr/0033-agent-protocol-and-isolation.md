@@ -79,7 +79,8 @@ files for both documents.
 ### Bounds and process lifetime
 
 - stdout is read through a 1 MiB limit. Past it the turn fails and the process is
-  killed.
+  killed. In container mode "the process" is the docker client, and the container
+  is removed as well (see Container mode).
 - stderr keeps its last 4 KiB. That tail goes into error text, which is what makes
   a crashed agent diagnosable, and it is bounded because an agent that logs without
   end must be harmless.
@@ -150,7 +151,8 @@ database address or any provider key unless the operator names that variable wit
 `ContainerOptions.Wrap` and asserted whole by a test:
 
 ```
-docker run --rm -i --read-only --cap-drop ALL --security-opt no-new-privileges
+docker run --rm -i --name <tw-agent-random> --read-only --cap-drop ALL
+  --security-opt no-new-privileges
   --user 65534:65534 --network <net> --memory <m> --cpus <c> --pids-limit <p>
   --tmpfs /tmp:rw,size=16m [-v <mount>:/agent:ro] [-e NAME ...] <image> <argv...>
 ```
@@ -164,12 +166,33 @@ relative host path as a volume name. `-e NAME` passes a variable from `--agent-e
 by name, and docker takes the value from the environment of the docker client,
 which `ExecProvider.Env` supplies, so a value is never an argument.
 
+Each turn's container is named `tw-agent-` and 16 random hexadecimal digits, fresh
+on every `Wrap` call. Docker does not stop a container when its client dies, so
+when a turn is ended by a timeout, a cancellation or an output overflow, and the
+docker client's process group has been killed, `ContainerOptions.Cleanup` runs
+`docker rm -f <name>`. It accepts only a name of that shape, so it can only remove
+a container this package named. It is best effort and bounded to 10 seconds: a
+failure is logged and the turn's own error is the one returned, and a container
+that is already gone is not a failure. It does not run for a turn that ended by
+itself, where `--rm` removes the container, and it cannot run if Twinwright is
+killed mid-turn. The name does not include the run or the turn: a provider is not
+told either.
+
+The docker client finds its daemon through its own environment, so it is given
+`DOCKER_HOST`, `DOCKER_CONTEXT`, `DOCKER_CONFIG`, `DOCKER_CERT_PATH` and
+`DOCKER_TLS_VERIFY` from the Twinwright process when they are set
+(`ExecProvider.ClientEnv`). Those go to the client and never into the container:
+the container gets only the names `--agent-env` gave. Their values are masked in
+error text like the passed values.
+
 `Validate` runs before anything starts. It refuses an empty image and anything that
 is not an image reference, because the image sits among docker's own options and a
 value of `--privileged` would otherwise become one; `host` as a network, by name,
 because it removes the isolation this mode exists for; any other invalid network
 name (the pattern already refuses `container:...`); a memory or CPU value that fails
-the patterns a sidecar config is held to; fewer than one process; an environment
+the patterns a sidecar config is held to, or that is zero, which docker reads as no
+limit (checked on Docker Engine 29.9.2: `--memory 0`, `0b`, `0m`, `00` and `--cpus 0`,
+`0.0` all leave the cgroup limit at `max`); fewer than one process; an environment
 entry that is not a bare name; and a mount that is relative, missing, not a
 directory, or contains a colon, which would end the host path early and let the
 rest be read as the container path or the mode. The memory, CPU and network
@@ -208,13 +231,23 @@ By tests that run on every `go test ./...`:
 By tests that run only with `TWINWRIGHT_TEST_DOCKER=1` and `python:3.12-alpine`:
 `TestPythonAgentInHardenedContainer` runs the reference agent through the hardened
 command against a real daemon and requires the billing run to pass, and has an
-agent in `--network none` try an outbound connection and requires that it did not
-connect. This is CI evidence: the `docker` job of `.github/workflows/integration.yml`
-pulls the image and runs it, and the coordinator records that run. It was also run
-once on the development machine, against Docker Engine 29.9.2 in WSL2: both
-subtests passed, the billing run in about 2.8 s and the probe answering `blocked:
-[Errno 101] Network unreachable`. A control run by hand, which is not part of the
-test, printed `connected` for the same probe on the default bridge network.
+agent in `--network none` try an outbound connection and requires that it was
+blocked with errno 101 (network unreachable), which a firewall that drops or
+refuses packets would not give. A third subtest is the control: the same probe on
+the `bridge` network must connect, and it skips with a logged reason on a runner
+with no outbound network, since the isolation test then has nothing to be compared
+with. `TestHardenedContainerIsGoneAfterOverflowAndTimeout` runs a hanging agent and
+a flooding agent through the hardened command, requires the container to be gone
+when the turn returns, and has a control without the removal showing that the
+container is still running after its client was killed. This is CI evidence: the
+`docker` job of `.github/workflows/integration.yml` pulls the image and runs them,
+and the coordinator records that run. The job requires the passes by name in the
+`-v` output, so a renamed test, a missing image or an image check that failed does
+not leave a green step. They were also run on the development machine, against
+Docker Engine 29.9.2 in WSL2: every subtest passed, the billing run in about 3 s,
+the isolation probe answering `blocked: [Errno 101] Network unreachable`, the same
+probe answering `connected` on the bridge network, and both containers running after
+their client was killed without the removal and absent with it.
 
 ## Limits
 
@@ -227,11 +260,14 @@ test, printed `connected` for the same probe on the default bridge network.
   needs for its own model calls unless the operator chooses `--agent-network none`.
 - **On macOS and Windows the boundary is the Docker Desktop VM**, not the host
   kernel.
-- **A timeout may leave a container running.** On a timeout the docker client's
-  process group is killed. Docker does not stop a container when its client dies,
-  and a Python agent running as PID 1 ignores SIGTERM, so a hung containerized agent
-  can keep running until its own process exits. No test covers this and it is not
-  fixed here.
+- **A container is removed only if Twinwright is alive to remove it.** On a timeout,
+  a cancellation or an output overflow the docker client's process group is killed
+  and then `docker rm -f` is run for the turn's container, because Docker does not
+  stop a container when its client dies and a Python agent running as PID 1 ignores
+  the SIGTERM the client proxies. If Twinwright is killed mid-turn, the client dies
+  with it and the container is left running until its own process exits; the
+  parent-death signal covers the client, not the container. The removal is best
+  effort and its failure is only logged.
 - **Masking is literal.** A secret that an agent encodes, splits or hashes before
   printing is not recognised. A value of fewer than eight characters is not masked
   at all.
@@ -285,3 +321,7 @@ more.
 - 2026-10-28: "nothing survives between turns" was false for what an agent started: the process group was signalled only on a timeout or an output overflow, so a helper left running by a turn that succeeded, or by one that failed because it held the output open, outlived it (EXEC-3). Every turn now ends by killing the group (unix), and on Linux the agent also gets a parent-death SIGKILL so it does not outlive a Twinwright that dies mid-turn (EXEC-12); the claim is now stated as "carries nothing between turns except the history", and the cases it does not cover (a process that left the group, grandchildren of a killed Twinwright, non-Linux platforms) are listed under Bounds and Limits.
 - 2026-10-28: the passed values were masked in the agent's stdout bytes before the response was decoded, so a value that occurs as the digits of a number made a valid response invalid and blamed the agent, one inside an argument rewrote the call, and a value the agent encoded its own way (`\u00e4` as Python writes it, a raw `&`) was not recognised although this ADR said the JSON-string form was matched (EXEC-4, EXEC-8); the response is now decoded first and only its decoded strings are masked, and the sentences above state what is matched, the 8-character floor and the effect on arguments.
 - 2026-10-28: "`--agent-command` or `--agent-env` with any other provider is refused" made a worker started with the agent flags fail every scripted or hosted run it claimed, so one fleet could not serve exec runs and others from one queue (EXEC-5); the refusal now holds where the operator names the provider (`run`, `bench`, `shadow`, `fork --agent`), and where the provider comes from the run's record (`worker`, `resume`, and the run `fork` and `counterfactual` start from) the agent flags apply to exec runs only.
+- 2026-10-28: the stdout limit and the deadline killed only the docker client, so in container mode the container kept running and writing, and a timed out turn left one behind that its retry then duplicated, although "the process is killed" was stated without that qualification (EXEC-7); each turn's container is now named and `docker rm -f` is run for it after the client is killed, the Limit about timeouts is rewritten, and a Docker test shows the container running without the removal and gone with it.
+- 2026-10-28: `--agent-memory 0` and `--agent-cpus 0` passed `Validate` and, on Docker Engine 29.9.2, leave the memory and CPU limits at `max` (EXEC-9); both are refused, with every spelling of zero.
+- 2026-10-28: the docker client was given only `PATH` and `HOME`, so a daemon configured through `DOCKER_HOST` and its relatives was unreachable, and the only workaround, `--agent-env DOCKER_HOST`, also put the daemon address in the untrusted container (EXEC-14); the five connection variables now go to the client process only.
+- 2026-10-28: the Docker evidence for container mode could pass without running: a renamed test matched nothing, a failed image check skipped, and the network probe accepted any "blocked" answer (EXEC-13); the CI step requires the passes by name, the isolation test requires errno 101, and a bridge-network control shows the probe can connect.
