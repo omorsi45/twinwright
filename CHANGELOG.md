@@ -13,6 +13,27 @@ database written by a newer build is refused rather than downgraded.
 
 ### Added
 
+- **Documentation as Twinwright Cloud.** The README is rewritten as the overview of the
+  self-hosted platform, in under 450 lines: what it is, a 60-second quick start (`make
+  demo` and `make demo-stack`), the regression gate in CI, running your own agent, real
+  models and cassettes, the fleet, observability, benchmarks, limitations and
+  development. It says plainly that there are no accounts, tenants, web UI or hosted
+  service. Every section the README lost moved, word for word apart from the corrections
+  noted on each page, into `docs/guide/`, one page per topic, and `docs/guide/README.md`
+  maps each old section to its new page. `docs/architecture.md` has a component diagram,
+  the path of one tool call traced through the code, the trust boundaries (agent
+  process, provider, database, observability stack) and an index of all 34 ADRs.
+  `docs/claims.md` is one table of claims with the test or CI job that proves each and
+  where it runs, saying `not verified` for what nothing proves and `cut` for scope that
+  was dropped. `TestClaimsTableReferencesExist` fails when a row cites a test or a
+  workflow job that does not exist, and `TestDocLinksResolve` fails when a relative link
+  in the README, the architecture page, the claims table or the guide points at a
+  missing file. `SECURITY.md` gained the agent-process, recording and observability
+  notes, `docs/distributed.md` gained the bound on the release at the end of a local
+  run, the second Ctrl-C and the resume hint (each with the test that holds it, or a
+  statement that none does) and the advice to scrape one worker or aggregate with `max`,
+  and `CONTRIBUTING.md` describes what the Compose stack now starts and what `make down`
+  deletes. No version heading or tag was added: the release decision is the owner's.
 - **Two one-command demos: `make demo` and `make demo-stack`.** `make demo` builds the
   CLI and runs the 12-step scripted `twinwright demo` in a temporary directory, with no
   network and no key; the CI end-to-end job now runs the walkthrough through it.
@@ -39,7 +60,6 @@ database written by a newer build is refused rather than downgraded.
   takeover re-executes the run from the ledger, and the demo adds nothing to the ledger
   beyond normal runs. A new Integration job, `demo-stack`, runs `make demo-stack` on
   every Integration trigger; its CI result is not recorded here.
-
 - **Measured platform results, a methodology, and ADR 0034.** Two `twinwright perf`
   reports are committed unchanged in `docs/benchmarks/`, one for SQLite on a Windows
   PC under WSL2 and one for PostgreSQL 17 on a GitHub runner, each with three trials.
@@ -57,7 +77,6 @@ database written by a newer build is refused rather than downgraded.
   names the runner. ADR 0034 records the four workloads' definitions, the trials and
   statistics, what the environment block holds and leaves out, the rule that every
   published figure appears in a committed report, and what is not measured.
-
 - **`twinwright perf` measures the platform workloads and writes a report that says
   what produced it.** It runs the scripted duplicate-charge scenario, the one the
   crash matrix and the benchmark suite run, through four workloads: fleet
@@ -76,7 +95,6 @@ database written by a newer build is refused rather than downgraded.
   count or a lease TTL under one second. `make perf` runs it on SQLite into
   `perf.json`, which is git-ignored. A figure in the report is one machine's
   measurement, not a property of the project.
-
 - **A hardened container for an exec agent, and ADR 0033 for the protocol and the
   isolation.** `--agent-container IMAGE` runs the agent command behind `docker run
   --rm -i --read-only --cap-drop ALL --security-opt no-new-privileges --user
@@ -100,7 +118,6 @@ database written by a newer build is refused rather than downgraded.
   it. `docs/security-review.md` gains a section for agent processes with every test
   cited, and its line about live model runs now says that a local Ollama run is
   recorded in `docs/live-model-run.md` while hosted providers remain unverified.
-
 - **An `exec` agent protocol: your own program makes the decisions.** `--agent exec`
   starts a command of your choice once per turn, writes one JSON request to its
   stdin (the task, the history as the ledger records it, and the operations the run
@@ -124,7 +141,6 @@ database written by a newer build is refused rather than downgraded.
   example, not a model. `TestExecProviderCompletesTheBillingRun` runs a separate
   process through the whole scenario and verifies the replay; the unix process-group
   calls live in build-tagged files so the module still builds for Windows.
-
 - **A regression gate over bench reports, proven able to fail and run in CI.**
   `twinwright gate` compares a candidate report with an approved baseline and exits
   0 for no regressions, 1 for regressions and 2 when it cannot decide. The approved
@@ -137,7 +153,6 @@ database written by a newer build is refused rather than downgraded.
   a twelfth step that shows the gate refusing the regressed fixture, and `make
   gate` runs the first half locally. `run --fail-on-eval` exits non-zero after
   printing the result when the evaluation fails; it is opt-in. See ADR 0030.
-
 - **A documented security review, gated by a test.** `SECURITY.md` was the policy
   and there was no record of anyone having looked: nothing under `docs/` matching
   secur, audit, review or threat, and no ADR. `docs/security-review.md` is the pass
@@ -150,7 +165,8 @@ database written by a newer build is refused rather than downgraded.
   `cmd/twinwright/security_review_test.go` requires every cited file and test to
   exist and every surface to be present, and fails outright if it parses nothing,
   so the document fails the build when it drifts.
-- **Two claims `SECURITY.md` already made are now tested.** "Provider errors are
+
+  **Two claims `SECURITY.md` already made are now tested.** "Provider errors are
   recorded without credentials" is a claim about the ledger and only the provider's
   return values were asserted, so `TestProviderErrorReachesTheLedgerWithoutTheKey`
   now runs a real provider against a server that echoes the configured key into a
@@ -199,7 +215,8 @@ database written by a newer build is refused rather than downgraded.
   as zero: a local simulation has no wall clock comparable to a recorded stream.
   Shadow mode stays observe-only, the output stays deterministic and sorted, and
   it still declares no winner. See ADR 0026.
-- **`authz.Screen`.** The policy decision for one call at a given call number,
+
+  **`authz.Screen`.** The policy decision for one call at a given call number,
   without consuming one. `authz.Decide` is now `Screen` plus the two things only a
   live run supplies, the stored policy and the next call number, so a shadow
   verdict and an enforced one cannot drift apart.
@@ -222,7 +239,8 @@ database written by a newer build is refused rather than downgraded.
   `TestRealProcessDeathIsRecoveredPostgres` covers the two tool-commit points
   against a server. `after-completion` is simulated by skipping `FinishRun`. See
   ADR 0029.
-- **`bench` distributed cases name a crash boundary.** Distributed mode now runs on
+
+  **`bench` distributed cases name a crash boundary.** Distributed mode now runs on
   the crash matrix and accepts `crash_point` and `crash_operation`
   (`crash_operation` only with `before-tool-commit` or `after-tool-commit`;
   `after-completion` only with `crash_at` 1). An integer `crash_at` alone still
@@ -231,7 +249,8 @@ database written by a newer build is refused rather than downgraded.
   refund commits, and a comment that claimed a turn crash followed the refund was
   corrected. `TestFlagshipSuiteRecoversEveryCrashCase` runs `flagship.yaml` in
   `go test`.
-- **A crash boundary table in `docs/distributed.md`.** For each of the seven
+
+  **A crash boundary table in `docs/distributed.md`.** For each of the seven
   points, what is durable at death and the test that proves recovery from it.
 - **Provider turns record the provider's own account of the response, and
   `--max-output-tokens` sets the ceiling.** Each adapter stores the response ID,
@@ -292,7 +311,6 @@ database written by a newer build is refused rather than downgraded.
   a `getCustomer` call carrying a call ID and an `id` argument. Each skips with a
   message naming what is not set. Nothing runs them in CI, and neither had been
   run against a vendor when this was written.
-
 - **OTLP spans tie back to the ledger, and a worker can export the trace of a run
   it finishes.** Every exported span carries `twinwright.event.start_seq` and
   `twinwright.event.end_seq` (integers, the first and last ledger event the span
@@ -365,7 +383,6 @@ database written by a newer build is refused rather than downgraded.
   expiry; after `kill -9` the lease has to expire before `resume` is accepted;
   a failed release is reported rather than swallowed. Command output and exit
   codes are otherwise unchanged.
-
 - **Lease expiry and queue availability now order by time, not by text.** Both are
   compared inside SQL as text, and `time.RFC3339Nano` trims trailing zeros, so
   `12:00:01Z` sorted after `12:00:01.5Z`. Within one second a renewal could revive
@@ -378,7 +395,6 @@ database written by a newer build is refused rather than downgraded.
   older build before applying migration 3. An older build keeps writing the
   variable-width form, and a database holding both forms misorders times within a
   second.
-
 - **A run that kills its worker is now failed at the delivery limit, and a takeover
   means a displaced lease.** `MaxAttempts` was checked only when `Execute` returned
   an error, and a crash returns nothing, so a poison run was taken over forever.
@@ -394,7 +410,6 @@ database written by a newer build is refused rather than downgraded.
   because its ledger records the `delivery_limit` error and an unanswered model
   request. A test pins the behaviour and ADR 0029 lists it under remaining
   limits.
-
 - **A key echoed by a model, and a base URL that carries credentials, no longer
   reach the ledger or an error message.** Error bodies were masked but a
   successful response was not, so a model that repeated the configured key in its
@@ -408,7 +423,6 @@ database written by a newer build is refused rather than downgraded.
   (`TestTransportErrorHidesURLQueryAndUserinfo`). Only the configured key is
   masked on the success path, and `redact.Secrets` ignores a secret shorter than 8
   characters. See ADR 0031.
-
 - **The metrics document is well formed, and its counters can be alerted on.** The
   counters' `HELP` and `TYPE` lines were all written first and their samples after,
   so no family was contiguous, which the Prometheus text format requires.
@@ -434,7 +448,6 @@ database written by a newer build is refused rather than downgraded.
   is in `crypto/x509` and `govulncheck` reports it against go1.27.2, so the
   vulnerability check failed on any build of that toolchain. The `require` lines
   and `go.sum` are unchanged.
-
 - **The published recovery guarantees now match what the tests prove, including
   where ADR 0020 overstated them.** ADR 0029 states exactly what is idempotent: a
   world mutation commits at most once per (run, call ID); model calls are
@@ -451,7 +464,6 @@ database written by a newer build is refused rather than downgraded.
   without a fence, the real-process test kills one
   process at a time, and the matrix covers three scenarios. The README's
   distributed semantics and limitations were updated to match.
-
 - **A response over 4 MiB is an error, and a 429, a 5xx or a dropped connection
   is retried once.** The adapters read a body through a silent 4 MiB limit, so a
   longer body reached the decoder cut in half. It is now `ErrResponseTooLarge`,
