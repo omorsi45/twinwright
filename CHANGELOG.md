@@ -70,6 +70,11 @@ database written by a newer build is refused rather than downgraded.
   timeout was corrected (it held only for a deadline that passes before the response
   headers) and the mid-body failure it describes now has a test at the adapter
   (`TestBodyFailurePartWayIsNotRetried`, `TestRecordedBodyFailureReplaysAsAnOrdinaryError`).
+- **The live provider tests no longer print the key when it leaked.** The check that finds the
+  configured key in a turn printed the whole turn with `%+v` on failure, so the failure
+  wrote the key into test output that is routinely pasted into issues. A failure now prints the problem,
+  the names of the fields that held the key and the turn's metadata with the key masked
+  (`TestLiveFailureLineNeverCarriesTheKey`).
 
 ### Added
 

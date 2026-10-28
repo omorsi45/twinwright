@@ -225,7 +225,10 @@ here.
 `TW_LIVE_ANTHROPIC_MODEL`) each make one real call offering `getCustomer`. They
 require a model turn with a response ID, an HTTP status of 200 and a
 `getCustomer` call with a call ID and an `id` argument, and no copy of the key in
-the turn. Each skips with a message naming whatever is not set. Nothing runs them
+the turn. A failure prints the problem and the turn's metadata with the key
+masked, and for a leaked key it names the fields that held it; it never prints
+the turn (`TestLiveFailureLineNeverCarriesTheKey`). Each skips with a message
+naming whatever is not set. Nothing runs them
 in CI, which keeps hosted-provider keys out of every workflow. A hermetic test
 checks the same assertions against turns built by the real adapters and by hand,
 so the assertions are not themselves unexercised.
@@ -299,3 +302,4 @@ here.
 - 2026-10-28: the success path, the error path and the cassette URL did not mask what this ADR said they masked. The error from building a request (a base URL that does not parse) was returned as it was and quoted the URL, userinfo and query included; `redact.URL` kept the userinfo of an unparseable string; the response's id, model and stop reason, and a key in the URL path, were not masked; and a key the server escaped in its JSON was not recognised. Each is fixed as the Decision section above now reads. A base URL with a query now keeps it, where the suffix used to be appended inside the query.
 - 2026-10-28: a cassette served only `Content-Type` and `Retry-After`, so a run whose endpoint redirected could be recorded and never replayed, and the file's 0600 mode applied only when it was created, so a recording over an existing 0644 file stayed readable by everyone. A 3xx exchange now records and serves its `Location` (without userinfo, query or fragment), and the recorder sets the mode to 0600 whether the file is new or not.
 - 2026-10-28: the retry classification and the consequences did not say what the code does. Anthropic documents 529 as `overloaded_error`, a temporary condition, yet it failed the run on the first attempt with no stated reason; the Anthropic adapter now retries it once like a 503 and the other two adapters do not. The consequence about timeouts held only for a deadline that passes before the response headers: one that passes while the body is read is recorded as a 200 with an error and replays as an ordinary error, and the mid-body case now has a test at the adapter.
+- 2026-10-28: the live provider tests kept the key out of the problem text but printed the whole turn with `%+v` when they failed, so the check that finds the key in a turn wrote the key to the test output. A failure now prints the problem, the names of the fields that held the key and the turn's metadata with the key masked, and never the turn.
