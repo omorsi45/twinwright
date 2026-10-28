@@ -13,6 +13,24 @@ database written by a newer build is refused rather than downgraded.
 
 ### Added
 
+- **Measured platform results, a methodology, and ADR 0034.** Two `twinwright perf`
+  reports are committed unchanged in `docs/benchmarks/`, one for SQLite on a Windows
+  PC under WSL2 and one for PostgreSQL 17 on a GitHub runner, each with three trials.
+  `docs/performance.md` gains "Platform benchmarks", "Methodology", "Results" and "Not
+  measured" sections that name the machine, operating system, Go version, commit,
+  backend and trials of each report and copy its figures without rounding.
+  `TestBenchmarkDocsMatchTheirReports` holds the throughput table to the reports it
+  cites. One result is unfavourable and is stated as measured: SQLite throughput did
+  not scale with workers on the measured machine (two workers were slower than one,
+  eight were faster than four), and its cause was not investigated, while PostgreSQL
+  throughput rose with workers on the runner. The two reports are not a comparison of
+  the backends: the machines and the operating system layers differ. A new `perf` job in
+  the Integration workflow, run on demand only, runs `twinwright perf` against a
+  PostgreSQL 17 service container and uploads the report with a `runner.txt` that
+  names the runner. ADR 0034 records the four workloads' definitions, the trials and
+  statistics, what the environment block holds and leaves out, the rule that every
+  published figure appears in a committed report, and what is not measured.
+
 - **`twinwright perf` measures the platform workloads and writes a report that says
   what produced it.** It runs the scripted duplicate-charge scenario, the one the
   crash matrix and the benchmark suite run, through four workloads: fleet

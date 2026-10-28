@@ -1,0 +1,140 @@
+{
+  "schema_version": 1,
+  "environment": {
+    "twinwright_version": "v0.0.0-20261028181253-df3b273cde12",
+    "git_revision": "df3b273cde12516067f4c0aae5c9982b22369dab",
+    "git_modified": false,
+    "go_version": "go1.27.3",
+    "goos": "linux",
+    "goarch": "amd64",
+    "num_cpu": 4,
+    "seed": 42,
+    "started_at": "2026-10-28T18:16:42Z"
+  },
+  "backend": "postgres",
+  "config": {
+    "workers": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "runs": 40,
+    "trials": 3,
+    "lease_ttls_ms": [
+      1000,
+      2000,
+      5000
+    ],
+    "replay_runs": 20,
+    "seed": 42,
+    "workloads": [
+      "throughput",
+      "recovery",
+      "replay",
+      "crash-matrix"
+    ]
+  },
+  "throughput": [
+    {
+      "workers": 1,
+      "runs": 40,
+      "runs_per_second": {
+        "min": 24.311,
+        "median": 26.75,
+        "max": 26.757
+      },
+      "wall_ms": {
+        "min": 1494.957,
+        "median": 1495.348,
+        "max": 1645.329
+      }
+    },
+    {
+      "workers": 2,
+      "runs": 40,
+      "runs_per_second": {
+        "min": 19.273,
+        "median": 41.532,
+        "max": 42.349
+      },
+      "wall_ms": {
+        "min": 944.53,
+        "median": 963.124,
+        "max": 2075.443
+      }
+    },
+    {
+      "workers": 4,
+      "runs": 40,
+      "runs_per_second": {
+        "min": 56.607,
+        "median": 60.863,
+        "max": 62.208
+      },
+      "wall_ms": {
+        "min": 643.002,
+        "median": 657.211,
+        "max": 706.624
+      }
+    },
+    {
+      "workers": 8,
+      "runs": 40,
+      "runs_per_second": {
+        "min": 70.864,
+        "median": 86.481,
+        "max": 87.719
+      },
+      "wall_ms": {
+        "min": 456.003,
+        "median": 462.527,
+        "max": 564.46
+      }
+    }
+  ],
+  "recovery": [
+    {
+      "lease_ttl_ms": 1000,
+      "recovery_ms": {
+        "min": 1022.916,
+        "median": 1023.575,
+        "max": 1024.84
+      },
+      "duplicate_mutations": 0
+    },
+    {
+      "lease_ttl_ms": 2000,
+      "recovery_ms": {
+        "min": 2035.146,
+        "median": 2036.429,
+        "max": 2037.639
+      },
+      "duplicate_mutations": 0
+    },
+    {
+      "lease_ttl_ms": 5000,
+      "recovery_ms": {
+        "min": 5079.252,
+        "median": 5079.41,
+        "max": 5081.03
+      },
+      "duplicate_mutations": 0
+    }
+  ],
+  "replay": {
+    "runs": 20,
+    "verified": 20,
+    "ms": {
+      "min": 21.698,
+      "median": 22.714,
+      "max": 29.398
+    }
+  },
+  "crash_matrix": {
+    "scenario": "duplicate-charge",
+    "cases": 25,
+    "violations": 0,
+    "wall_ms": 2839.869
+  }
+}
