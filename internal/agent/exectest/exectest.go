@@ -40,6 +40,11 @@ const ChildSuffix = ".child"
 // Secret is read by the modes that echo it, so a test can prove it is masked.
 const Secret = "TW_TEST_SECRET"
 
+// ReplyFile names a file whose bytes the reply mode writes to stdout as they
+// are. It is a file and not a variable because every passed variable's value is
+// masked, and a variable holding the whole reply would mask the reply.
+const ReplyFile = "TW_EXEC_REPLYFILE"
+
 // Pad is read by the exit3-padded mode: how many filler bytes follow the secret.
 const Pad = "TW_EXEC_PAD"
 
@@ -72,7 +77,9 @@ var fixed = map[string]string{
 // Run speaks as an agent in the named mode and returns the process exit code.
 //
 // Modes: billing solves the duplicate-charge scenario from the history it is
-// sent; unauthorized asks for a refund whatever it was offered; echo-request
+// sent; unauthorized asks for a refund whatever it was offered; reply writes the
+// bytes of ReplyFile; call-with-secret proposes a call with Secret as its
+// argument; echo-request
 // answers with the request it received as its content;
 // environ answers with the sorted names of its environment; leak answers with
 // the value of Secret; exit3 fails with a message on stderr; exit3-spellings
@@ -121,6 +128,40 @@ func Run(mode string, stdin io.Reader, stdout, stderr io.Writer) int {
 		out, err := json.Marshal(response{Protocol: protocol, ToolCalls: []toolCall{{
 			ID: "exec-1", OperationID: "createRefund",
 			Arguments: map[string]any{"charge_id": "CH-1002", "amount_cents": 100, "reason": "duplicate"},
+		}}})
+		if err != nil {
+			return 2
+		}
+		stdout.Write(out)
+		return 0
+	case "reply":
+		// Whatever bytes the test put in ReplyFile, so a test can hand the
+		// provider any document, valid or not, in any encoding.
+		reply, err := os.ReadFile(os.Getenv(ReplyFile))
+		if err != nil {
+			fmt.Fprintln(stderr, "read reply:", err)
+			return 2
+		}
+		stdout.Write(reply)
+		return 0
+	case "call-with-secret":
+		// Proposes a call whose argument is the secret, then reports once it has
+		// the result: an agent that uses a value it was given as an argument.
+		raw, err := io.ReadAll(stdin)
+		if err != nil {
+			return 2
+		}
+		var req request
+		if err := json.Unmarshal(raw, &req); err != nil {
+			return 2
+		}
+		for _, m := range req.History {
+			if m.Role == "tool" {
+				return say(stdout, "done")
+			}
+		}
+		out, err := json.Marshal(response{Protocol: protocol, ToolCalls: []toolCall{{
+			ID: "exec-1", OperationID: "getCustomer", Arguments: map[string]any{"id": os.Getenv(Secret)},
 		}}})
 		if err != nil {
 			return 2

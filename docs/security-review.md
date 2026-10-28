@@ -374,9 +374,14 @@ is what it is trusted with, and the answer is deliberately small.
 - Its stdout is read through a 1 MiB limit and strictly: an unknown field, a
   missing or different `protocol`, a missing `content` or `tool_calls`, and data
   after the object are all errors. Its stderr is kept to the last 4 KiB, and that
-  tail, every other error text and the agent's own stdout are masked with the
-  passed values. In the tail the values are masked as written, as a JSON string
-  and as a Go quoted string, before the tail is quoted and before it is cut.
+  tail, every other error text and the strings of the agent's decoded answer (the
+  content, and the id, operation and arguments of each call) are masked with the
+  passed values; a value of fewer than 8 characters is never masked. In the tail
+  the values are masked as written, as a JSON string and as a Go quoted string,
+  before the tail is quoted and before it is cut. The answer is masked after it is
+  decoded, never in its bytes, so a value cannot break a valid response and the
+  agent's own escaping does not matter; a value the agent uses as an argument is
+  masked before the call is dispatched, so the tool receives the mask.
 - A turn that overruns its deadline gets SIGTERM, then SIGKILL after 500 ms, to the
   whole process group, and the child is always waited for. Every other turn ends
   with SIGKILL to the group too, so what the agent started and left in its group
@@ -423,7 +428,14 @@ contains a colon.
   `TestExecProviderKillsTheGroupOnWaitDelay` hold that a process the agent left in its
   group is gone when the turn returns, and `TestExecAgentDiesWithTheProcessThatStartedIt`
   holds that on Linux an agent is gone after the Twinwright that started it is killed
-  with SIGKILL,
+  with SIGKILL, `TestExecMaskingKeepsTheResponseValid` holds that a passed value that is
+  the digits of a number does not invalidate the response,
+  `TestExecMasksEveryStringOfTheDecodedResponse` and
+  `TestExecMasksValuesHoweverTheAgentEncodedThem` hold that content, ids and arguments at
+  any depth are masked whatever escaping the agent used (`TestExecMasksWhatPythonEncodes`
+  runs the real `json.dumps`), and `TestExecMaskedArgumentsAreWhatTheLedgerAndTheToolSee`
+  holds that a value used as an argument is `[REDACTED]` in the ledger and in the
+  arguments the tool received,
   and `TestExecProviderDoesNotBlockOnAnAgentThatNeverReads` holds that a 4 MiB
   request to an agent that never reads does not stall the turn.
   `TestExecAgentCannotExceedThePrincipalsPolicy` has an agent ask for a refund its

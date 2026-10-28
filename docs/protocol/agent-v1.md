@@ -154,8 +154,21 @@ JSON string and as a Go quoted string, before the tail is quoted for the error t
 and before it is cut to 4 KiB, so a value holding a quote, a backslash or a newline
 is masked, and so is one that the 4 KiB window would have cut in two. When stderr is
 longer than the window, the tail starts at a line boundary: the first, partial line
-is dropped. Passed values are also masked in the agent's own stdout before it
-is read, so an agent that echoes one back does not put it in the ledger.
+is dropped.
+
+Passed values are also masked in what the agent answers, after the response is
+decoded and not in its bytes: in `content` and in every string of each call (the
+`id`, the `operation_id`, and the names and values of `arguments` at any depth).
+Numbers, booleans and `null` are not strings and are never masked, so a passed
+value cannot make a valid response invalid, and the agent's own escaping (`\u00e4`
+for `ä` as Python's `json.dumps` writes it, `\"`, `\/`) does not matter. The
+masking is done before the runner records or dispatches a call, so a passed value
+that the agent uses as an argument is recorded in the ledger as `[REDACTED]` and the
+tool receives `[REDACTED]` too, never the value: that changes what the tool
+receives, and it is the only way the tool does not receive the secret.
+
+A passed value shorter than 8 characters is never masked, in stderr or in the
+answer, so that ordinary words are not; do not pass a secret that short.
 
 ## Trust boundary
 

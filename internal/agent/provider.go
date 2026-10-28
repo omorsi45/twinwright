@@ -119,7 +119,7 @@ func redactOutput(raws []json.RawMessage, secrets ...string) []json.RawMessage {
 }
 
 // maskSecrets hides each secret in s, both as written and as it appears inside
-// a JSON string, which is where a model's or an agent's answer carries it. A
+// a JSON string, which is where a model's answer carries it. A
 // server's encoder chooses the spelling: Go's escapes "&", "<" and ">" as
 // \u0026, \u003c and \u003e, and others escape "/" as "\/". A key spelled any of
 // those ways, or both, would pass a mask that looked only for the raw key. The

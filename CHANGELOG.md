@@ -107,6 +107,17 @@ database written by a newer build is refused rather than downgraded.
   (`TestExecAgentDiesWithTheProcessThatStartedIt`); this covers the direct child only, and
   a process that left the group, grandchildren of a killed Twinwright and other platforms
   are not covered, which the guide and ADR 0033 now say.
+- **A passed value no longer breaks or rewrites an exec agent's answer.** The agent's
+  stdout bytes were masked before they were decoded, so a `--agent-env` value that was the
+  digits of a number made a valid response fail as malformed JSON, and a value in an
+  argument rewrote the call; a value the agent encoded its own way (Python's `\u00e4`, a raw
+  `&`) was not recognised at all. The response is now decoded first and only the decoded
+  strings are masked: content, ids, and argument names and values at any depth. A value used
+  as an argument is masked before the call is dispatched, so the ledger and the tool receive
+  `[REDACTED]`, which the guide says; values under 8 characters are never masked, which it
+  also says (`TestExecMaskingKeepsTheResponseValid`, `TestExecMasksEveryStringOfTheDecodedResponse`,
+  `TestExecMasksValuesHoweverTheAgentEncodedThem`, `TestExecMasksWhatPythonEncodes`,
+  `TestExecMaskedArgumentsAreWhatTheLedgerAndTheToolSee`).
 
 ### Added
 

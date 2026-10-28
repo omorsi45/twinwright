@@ -111,11 +111,17 @@ listings and shell history, which is what passing a secret by environment variab
 exists to avoid. A name this process does not have is an error, not a silent gap.
 
 The passed values are masked in the stderr tail, in every error text, and in the
-agent's own stdout before it is read, so an agent that echoes one back does not put
-it in the ledger. This matches a literal value and its JSON-string form; it does
-not match a transformed one. In the stderr tail the match is made on the text the
-agent wrote, before the tail is quoted and before it is cut to 4 KiB, and it also
-covers the Go quoted form.
+strings of the agent's answer, so an agent that echoes one back does not put it in
+the ledger. The answer is decoded first and only its decoded strings are masked
+(the content, and the id, operation and argument names and values of each call, at
+any depth), never its bytes: that keeps a value from breaking a valid document and
+makes the agent's own escaping irrelevant. A value that the agent uses as an
+argument is masked before the call is dispatched, so the ledger and the tool both
+get the mask and the tool never receives the value. This matches a literal value,
+its JSON-string form and its Go-quoted form; it does not match a transformed one,
+and a value under eight characters is never masked. In the stderr tail the match is
+made on the text the agent wrote, before the tail is quoted and before it is cut to
+4 KiB.
 
 The command line and the environment names are not stored. The ledger records the
 provider name `exec` and the `--model`, and the turns, as for any provider. That
@@ -222,7 +228,8 @@ test, printed `connected` for the same probe on the default bridge network.
   can keep running until its own process exits. No test covers this and it is not
   fixed here.
 - **Masking is literal.** A secret that an agent encodes, splits or hashes before
-  printing is not recognised.
+  printing is not recognised. A value of fewer than eight characters is not masked
+  at all.
 - **Process groups are unix only.** Elsewhere the agent alone is killed, and
   anything it started is left to the operating system. On unix a process that
   leaves the agent's group is not killed with it, and the parent-death signal is
@@ -271,3 +278,4 @@ more.
 - 2026-10-28: the stderr tail was quoted before it was masked and cut to 4 KiB before it was masked, so a passed value holding a quote, a backslash or a control character, and the end of a value that the window cut in two, reached the error text and the ledger (EXEC-1); the tail is now masked, in the value's raw, JSON-escaped and Go-quoted spellings, before it is quoted and before it is cut, and the first partial line of a cut tail is dropped.
 - 2026-10-28: a child environment with neither `PATH` nor `HOME` and no passed variable was a nil slice, which `os/exec` reads as "inherit the parent's environment", so the stated "exactly `PATH` and `HOME` plus the named variables" did not hold (EXEC-2); it is now an empty slice that stays empty.
 - 2026-10-28: "nothing survives between turns" was false for what an agent started: the process group was signalled only on a timeout or an output overflow, so a helper left running by a turn that succeeded, or by one that failed because it held the output open, outlived it (EXEC-3). Every turn now ends by killing the group (unix), and on Linux the agent also gets a parent-death SIGKILL so it does not outlive a Twinwright that dies mid-turn (EXEC-12); the claim is now stated as "carries nothing between turns except the history", and the cases it does not cover (a process that left the group, grandchildren of a killed Twinwright, non-Linux platforms) are listed under Bounds and Limits.
+- 2026-10-28: the passed values were masked in the agent's stdout bytes before the response was decoded, so a value that occurs as the digits of a number made a valid response invalid and blamed the agent, one inside an argument rewrote the call, and a value the agent encoded its own way (`\u00e4` as Python writes it, a raw `&`) was not recognised although this ADR said the JSON-string form was matched (EXEC-4, EXEC-8); the response is now decoded first and only its decoded strings are masked, and the sentences above state what is matched, the 8-character floor and the effect on arguments.

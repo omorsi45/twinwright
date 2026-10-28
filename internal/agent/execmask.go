@@ -62,3 +62,27 @@ func maskSpellings(s string, spellings []string) string {
 	}
 	return s
 }
+
+// maskDecoded returns a copy of a decoded JSON value with every spelling masked
+// in each string it holds, the names of objects included, at any depth. Numbers,
+// booleans and null are left alone: a passed value is text, and a number that
+// shares its digits is not it.
+func maskDecoded(v any, spellings []string) any {
+	switch v := v.(type) {
+	case string:
+		return maskSpellings(v, spellings)
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for name, member := range v {
+			out[maskSpellings(name, spellings)] = maskDecoded(member, spellings)
+		}
+		return out
+	case []any:
+		out := make([]any, len(v))
+		for i, member := range v {
+			out[i] = maskDecoded(member, spellings)
+		}
+		return out
+	}
+	return v
+}

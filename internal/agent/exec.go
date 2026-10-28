@@ -291,12 +291,22 @@ func (p ExecProvider) Next(ctx context.Context, task string, history []Message, 
 		return Message{}, fail("agent produced no output; it must write one JSON object to stdout")
 	}
 	var response execResponse
-	if err = decodeExecResponse([]byte(maskSecrets(string(output), secrets)), &response); err != nil {
+	// The response is decoded as the agent wrote it, and only the decoded strings
+	// are masked. Rewriting the bytes first would let a passed value break a valid
+	// document (the digits of a number) or miss one the agent encoded its own way
+	// (\u escapes, which is what Python writes).
+	if err = decodeExecResponse(output, &response); err != nil {
 		return Message{}, fail("%v", err)
 	}
-	message := Message{Role: "assistant", Content: *response.Content, Usage: response.Usage}
+	message := Message{Role: "assistant", Content: maskSpellings(*response.Content, spellings), Usage: response.Usage}
 	for _, call := range *response.ToolCalls {
-		message.ToolCalls = append(message.ToolCalls, ToolCall{ID: *call.ID, OperationID: *call.OperationID, Arguments: *call.Arguments})
+		message.ToolCalls = append(message.ToolCalls, ToolCall{
+			ID:          maskSpellings(*call.ID, spellings),
+			OperationID: maskSpellings(*call.OperationID, spellings),
+			// Masked before the runner dispatches it, so a passed value used as an
+			// argument is masked in the ledger and is not what the tool receives.
+			Arguments: maskDecoded(*call.Arguments, spellings).(map[string]any),
+		})
 	}
 	if message.Content == "" && len(message.ToolCalls) == 0 {
 		return Message{}, fail("agent response has no content and no tool calls")
