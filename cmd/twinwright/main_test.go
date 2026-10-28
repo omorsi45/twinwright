@@ -9,6 +9,9 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -1898,5 +1901,208 @@ func TestSelectProviderCarriesTheOutputCeiling(t *testing.T) {
 	cfg.MaxOutputTokens = -1
 	if _, err := selectProvider(cfg); err == nil {
 		t.Fatal("a negative --max-output-tokens was accepted")
+	}
+}
+
+// cliCassetteKey is long enough to be masked. Recording needs it; replay must not.
+const cliCassetteKey = "cli-cassette-key-not-a-secret"
+
+// cassetteRun is a duplicate-charge run recorded through the CLI against a
+// scripted OpenAI-compatible server that is closed before the helper returns.
+type cassetteRun struct {
+	dir, manifest, db, cassette, runID string
+}
+
+// recordCLIRun runs `twinwright run --record-cassette` against a server that
+// answers a tool call and then a final answer, and holds the real key in the
+// environment while it does.
+func recordCLIRun(t *testing.T) cassetteRun {
+	t.Helper()
+	t.Setenv("OPENAI_API_KEY", cliCassetteKey)
+	t.Setenv("OPENAI_BASE_URL", "")
+	dir := t.TempDir()
+	r := cassetteRun{dir: dir, manifest: buildBillingManifest(t, dir), db: filepath.Join(dir, "world.db"), cassette: filepath.Join(dir, "run.cassette")}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		body, _ := io.ReadAll(req.Body)
+		if req.URL.Path != "/v1/chat/completions" || req.Header.Get("Authorization") != "Bearer "+cliCassetteKey || !strings.Contains(string(body), `"max_tokens":77`) {
+			t.Errorf("recording changed the request: path %s auth %q body %s", req.URL.Path, req.Header.Get("Authorization"), body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if !strings.Contains(string(body), `"role":"tool"`) {
+			w.Write([]byte(`{"id":"chatcmpl-1","model":"local-server-1","choices":[{"message":{"content":null,"tool_calls":[{"id":"call-1","type":"function","function":{"name":"getCharge","arguments":"{\"id\":\"CH-1002\"}"}}]},"finish_reason":"tool_calls"}]}`))
+			return
+		}
+		w.Write([]byte(`{"id":"chatcmpl-2","model":"local-server-1","choices":[{"message":{"content":"Done"},"finish_reason":"stop"}]}`))
+	}))
+	defer server.Close()
+	var out bytes.Buffer
+	err := runCLI([]string{
+		"run", "duplicate-charge", "--agent", "openai-compatible", "--model", "local", "--base-url", server.URL + "/v1",
+		"--max-output-tokens", "77", "--record-cassette", r.cassette, "--manifest", r.manifest, "--db", r.db,
+	}, &out)
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, out.String())
+	}
+	var result struct {
+		Run struct {
+			ID     string `json:"id"`
+			Status string `json:"status"`
+		} `json:"run"`
+	}
+	if err = json.Unmarshal(out.Bytes(), &result); err != nil || result.Run.Status != "completed" {
+		t.Fatalf("run output: %v\n%s", err, out.String())
+	}
+	r.runID = result.Run.ID
+	return r
+}
+
+// The server is gone and the key is not in the environment, so the verified
+// report can only have come from the cassette. The ceiling is not repeated on the
+// replay command line either: the cassette header carries it, because the
+// request bodies only hash the same if the adapter is rebuilt with it.
+func TestReplayCassetteFromCLI(t *testing.T) {
+	r := recordCLIRun(t)
+	t.Setenv("OPENAI_API_KEY", "")
+
+	var out bytes.Buffer
+	if err := runCLI([]string{"replay", r.runID, "--cassette", r.cassette, "--manifest", r.manifest, "--db", r.db}, &out); err != nil {
+		t.Fatalf("replay: %v\n%s", err, out.String())
+	}
+	var report struct {
+		Verified   bool   `json:"verified"`
+		ModelTurns int    `json:"model_turns"`
+		ToolCalls  int    `json:"tool_calls"`
+		Divergence string `json:"divergence"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &report); err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	if !report.Verified || report.ModelTurns != 2 || report.ToolCalls != 1 {
+		t.Fatalf("report = %+v", report)
+	}
+
+	data, err := os.ReadFile(r.cassette)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(string(data), "\n")
+	if want := `{"twinwright_cassette":1,"provider":"openai-compatible","model":"local","max_output_tokens":77}`; lines[0] != want {
+		t.Fatalf("header = %s, want %s", lines[0], want)
+	}
+	if strings.Contains(string(data), cliCassetteKey) || strings.Contains(string(data), "Authorization") {
+		t.Fatalf("the cassette holds a credential:\n%s", data)
+	}
+
+	// The same run still verifies without a cassette, from its own ledger.
+	out.Reset()
+	if err := runCLI([]string{"replay", r.runID, "--manifest", r.manifest, "--db", r.db}, &out); err != nil {
+		t.Fatalf("replay without a cassette: %v", err)
+	}
+}
+
+// A cassette answers one provider and model. The refusal names both sides, and
+// an unreadable or empty cassette is refused before any replay starts.
+func TestReplayCassetteRefusesWhatDoesNotMatchTheRun(t *testing.T) {
+	r := recordCLIRun(t)
+	t.Setenv("OPENAI_API_KEY", "")
+	data, err := os.ReadFile(r.cassette)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	header := lines[0]
+	cases := []struct{ name, content, want string }{
+		{"another model", strings.Replace(header, `"model":"local"`, `"model":"other"`, 1) + "\n" + strings.Join(lines[1:], "\n") + "\n", "openai-compatible/other"},
+		{"another provider", strings.Replace(header, `"openai-compatible"`, `"anthropic"`, 1) + "\n" + strings.Join(lines[1:], "\n") + "\n", "anthropic/local"},
+		{"another version", strings.Replace(header, `"twinwright_cassette":1`, `"twinwright_cassette":2`, 1) + "\n", "version 2"},
+		{"no exchanges", header + "\n", "no exchanges"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "edited.cassette")
+			if err := os.WriteFile(path, []byte(tc.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			err := runCLI([]string{"replay", r.runID, "--cassette", path, "--manifest", r.manifest, "--db", r.db}, &bytes.Buffer{})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want one that says %q", err, tc.want)
+			}
+			if tc.name == "another model" && !strings.Contains(err.Error(), "openai-compatible/local") {
+				t.Fatalf("the refusal does not name the run's own provider and model: %v", err)
+			}
+		})
+	}
+	missing := filepath.Join(t.TempDir(), "absent.cassette")
+	if err := runCLI([]string{"replay", r.runID, "--cassette", missing, "--manifest", r.manifest, "--db", r.db}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "absent.cassette") {
+		t.Fatalf("a missing cassette: %v", err)
+	}
+}
+
+// Both flags are for a provider that makes HTTP calls, and each is on exactly one
+// command: a cassette holds one run's exchanges, and bench, worker, fork and
+// resume run many runs or continue one.
+func TestCassetteFlagsAreRefusedWhereTheyMeanNothing(t *testing.T) {
+	dir := t.TempDir()
+	manifest := buildBillingManifest(t, dir)
+	db := filepath.Join(dir, "world.db")
+	cassette := filepath.Join(dir, "x.cassette")
+
+	err := runCLI([]string{"run", "duplicate-charge", "--agent", "scripted", "--record-cassette", cassette, "--manifest", manifest, "--db", db}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "--record-cassette") {
+		t.Fatalf("a scripted run was allowed to record a cassette: %v", err)
+	}
+	if _, statErr := os.Stat(cassette); statErr == nil {
+		t.Fatal("a refused --record-cassette still created the file")
+	}
+
+	err = runCLI([]string{"run", "duplicate-charge", "--agent", "openai-compatible", "--model", "local", "--base-url", "http://127.0.0.1:1/v1", "--enqueue", "--record-cassette", cassette, "--manifest", manifest, "--db", db}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "--enqueue") || !strings.Contains(err.Error(), "--record-cassette") {
+		t.Fatalf("an enqueued run was allowed to record a cassette: %v", err)
+	}
+	if _, statErr := os.Stat(cassette); statErr == nil {
+		t.Fatal("a refused --record-cassette still created the file")
+	}
+
+	var out bytes.Buffer
+	if err = runCLI([]string{"run", "duplicate-charge", "--agent", "scripted", "--manifest", manifest, "--db", db}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var started struct {
+		Run struct {
+			ID string `json:"id"`
+		} `json:"run"`
+	}
+	if err = json.Unmarshal(out.Bytes(), &started); err != nil {
+		t.Fatal(err)
+	}
+	id := started.Run.ID
+	if err = runCLI([]string{"replay", id, "--cassette", cassette, "--manifest", manifest, "--db", db}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "--cassette") {
+		t.Fatalf("a scripted run was replayed from a cassette: %v", err)
+	}
+
+	for _, args := range [][]string{
+		{"resume", id, "--record-cassette", cassette},
+		{"replay", id, "--record-cassette", cassette},
+		{"run", "duplicate-charge", "--cassette", cassette},
+		{"fork", id, "--at-event", "1", "--record-cassette", cassette},
+		{"worker", "--record-cassette", cassette},
+	} {
+		err := runCLI(append(args, "--manifest", manifest, "--db", db), &bytes.Buffer{})
+		if err == nil || !strings.Contains(err.Error(), "not defined") {
+			t.Errorf("%v: err = %v, want the flag to be unknown to that command", args[:2], err)
+		}
+	}
+}
+
+// A recording owns a file, so selectProvider, which has nowhere to hand it back,
+// refuses to open one rather than leak it.
+func TestSelectProviderDoesNotOpenARecording(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "x.cassette")
+	_, err := selectProvider(providerConfig{Name: "openai-compatible", Model: "local", BaseURL: "http://127.0.0.1:1/v1", Timeout: time.Second, RecordCassette: path})
+	if err == nil {
+		t.Fatal("selectProvider accepted a recording it cannot close")
+	}
+	if _, statErr := os.Stat(path); statErr == nil {
+		t.Fatal("the refused recording still created its file")
 	}
 }

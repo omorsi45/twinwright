@@ -73,8 +73,10 @@ type Runner struct {
 	// Sleep pauses between two attempts at one model turn after a rate limit, a
 	// server error or a transport failure. It must return the context's error if
 	// the context ends first. Nil means a context-aware timer; a test supplies
-	// one so a retry costs no time. Replay never reaches it: a replayed turn
-	// carries its interruptions already and arrives without an error.
+	// one so a retry costs no time. Replay from the ledger never reaches it: a
+	// replayed turn carries its interruptions already and arrives without an
+	// error. Replay through a real adapter (replay.VerifyWith) does reach it, and
+	// supplies one that returns at once.
 	Sleep func(ctx context.Context, d time.Duration) error
 }
 

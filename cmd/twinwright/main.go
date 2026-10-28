@@ -138,6 +138,7 @@ func runCLI(args []string, out io.Writer) error {
 		providerName := fs.String("agent", "openai", "scripted, openai, openai-compatible, or anthropic")
 		model := fs.String("model", "", "provider model; defaults depend on the agent")
 		providerCfg := providerFlags(fs)
+		recordCassetteFlag(fs, providerCfg)
 		seed := fs.Int64("seed", 42, "world seed")
 		fault := fs.String("fault", "", "operation ID that returns HTTP 503 once")
 		chaosPath := fs.String("chaos", "", "deterministic chaos policy YAML")
@@ -169,6 +170,11 @@ func runCLI(args []string, out io.Writer) error {
 		}
 		if *recovery != "safe" && *recovery != "unsafe" {
 			return fmt.Errorf("unknown recovery fixture %q", *recovery)
+		}
+		if *enqueue && providerCfg.RecordCassette != "" {
+			// A worker executes an enqueued run, and a worker does not record, so
+			// the file would be created and left holding only its header.
+			return fmt.Errorf("--enqueue and --record-cassette cannot be combined: an enqueued run is executed by a worker, which does not record")
 		}
 		if *recovery != "safe" && (scenario != "ambiguous-commit" || *providerName != "scripted") {
 			return fmt.Errorf("--recovery requires scripted ambiguous-commit")
@@ -212,10 +218,13 @@ func runCLI(args []string, out io.Writer) error {
 		if scenario == "ambiguous-commit" && *providerName == "scripted" {
 			*model = "fixture-" + *recovery + "-v1"
 		}
-		provider, err := selectProvider(providerCfg.with(*providerName, *model, scenario))
+		provider, recording, err := openProvider(providerCfg.with(*providerName, *model, scenario))
 		if err != nil {
 			return err
 		}
+		// Closed however the command ends. Each exchange was written when it
+		// happened, so a close that fails has nothing left to lose.
+		defer recording.Close()
 		provider = agent.WithManifest(provider, manifest)
 		s, err := store.OpenDSN(ctx, *dbPath)
 		if err != nil {
@@ -491,12 +500,13 @@ func runCLI(args []string, out io.Writer) error {
 		return emit(out, report)
 	case "replay":
 		if len(args) < 2 {
-			return fmt.Errorf("usage: twinwright replay <run-id> [--manifest path] [--db path]")
+			return fmt.Errorf("usage: twinwright replay <run-id> [--manifest path] [--db path] [--cassette path]")
 		}
 		fs := flag.NewFlagSet("replay", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
 		manifestPath := fs.String("manifest", "twinwright.manifest.json", "compiled manifest")
 		dbPath := fs.String("db", "twinwright.db", "SQLite path or postgres:// DSN")
+		cassettePath := fs.String("cassette", "", "re-execute through the run's own provider adapter, answered by this file from run --record-cassette instead of the ledger's recorded turns")
 		if err := fs.Parse(args[2:]); err != nil {
 			return err
 		}
@@ -509,7 +519,24 @@ func runCLI(args []string, out io.Writer) error {
 			return err
 		}
 		defer s.Close()
-		report, err := replay.Verify(ctx, s, args[1], manifest)
+		// A nil provider replays the ledger's own recorded turns.
+		var provider agent.Provider
+		if *cassettePath != "" {
+			run, err := s.Run(ctx, args[1])
+			if err != nil {
+				return err
+			}
+			var recording io.Closer
+			provider, recording, err = openProvider(providerConfig{
+				Name: run.Provider, Model: run.Model, Scenario: run.Scenario,
+				Timeout: agent.DefaultCallTimeout, Cassette: *cassettePath,
+			})
+			if err != nil {
+				return err
+			}
+			defer recording.Close()
+		}
+		report, err := replay.VerifyWith(ctx, s, args[1], manifest, provider)
 		if err != nil {
 			return err
 		}
