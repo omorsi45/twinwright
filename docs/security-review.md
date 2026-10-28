@@ -436,8 +436,11 @@ contains a colon.
   runs the real `json.dumps`), and `TestExecMaskedArgumentsAreWhatTheLedgerAndTheToolSee`
   holds that a value used as an argument is `[REDACTED]` in the ledger and in the
   arguments the tool received,
-  and `TestExecProviderDoesNotBlockOnAnAgentThatNeverReads` holds that a 4 MiB
-  request to an agent that never reads does not stall the turn.
+  and `TestExecProviderTimesOutAnAgentThatNeverReadsALargeRequest` holds that a 4 MiB
+  request to an agent that never reads and never exits does not stall the turn past
+  its deadline, and that the agent is gone afterwards (a synchronous write fails it;
+  `TestExecProviderDoesNotBlockOnAnAgentThatNeverReads` covers only the agent that
+  exits without reading, and a synchronous write passes it).
   `TestExecAgentCannotExceedThePrincipalsPolicy` has an agent ask for a refund its
   principal may not make: the call is answered 403, no refund row exists, and the
   operation was never offered.

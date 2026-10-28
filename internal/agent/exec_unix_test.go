@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"twinwright/internal/agent/exectest"
 )
 
 // processAlive reports whether a process with this ID still exists. A zombie
@@ -43,6 +45,45 @@ func killOnCleanup(t *testing.T, file string) {
 			}
 		}
 	})
+}
+
+// The case the stdin goroutine exists for: an agent that never reads its input
+// and never exits, sent far more than a pipe buffer holds. The agent that exits
+// at once (TestExecProviderDoesNotBlockOnAnAgentThatNeverReads) does not test it,
+// because its exit closes the pipe and a synchronous write fails instead of
+// blocking. Written synchronously, the request would block the turn on a full
+// pipe before the deadline is even watched, and a hung agent would stall a worker
+// for ever; so the turn must end within its deadline and the agent must be gone.
+func TestExecProviderTimesOutAnAgentThatNeverReadsALargeRequest(t *testing.T) {
+	const deadline, grace = time.Second, 5 * time.Second
+	pidFile := filepath.Join(t.TempDir(), "pid")
+	killOnCleanup(t, pidFile)
+	p := helperProvider(t, "hang", exectest.PIDFile+"="+pidFile)
+	p.Timeout = deadline
+
+	type result struct {
+		err     error
+		elapsed time.Duration
+	}
+	done := make(chan result, 1)
+	start := time.Now()
+	go func() {
+		_, err := p.Next(context.Background(), strings.Repeat("a", 4<<20), nil, nil)
+		done <- result{err, time.Since(start)}
+	}()
+	select {
+	case got := <-done:
+		var interrupt *CallInterrupted
+		if !errors.As(got.err, &interrupt) || interrupt.Kind != InterruptTimeout {
+			t.Fatalf("err = %v, want a timeout interruption", got.err)
+		}
+		if got.elapsed > deadline+grace {
+			t.Fatalf("took %v, want about the %v deadline", got.elapsed, deadline)
+		}
+	case <-time.After(deadline + grace):
+		t.Fatalf("the turn was still blocked %v after its %v deadline: the request is not written without blocking the turn", grace, deadline)
+	}
+	requireGone(t, pidFile, 3*time.Second)
 }
 
 // A turn that ends normally still ends whatever the agent left running in its

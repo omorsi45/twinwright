@@ -253,9 +253,12 @@ func TestExecProviderRefusesBadConfiguration(t *testing.T) {
 	}
 }
 
-// An agent that exits without reading its input must not hang the turn, even
-// when the request is far larger than a pipe buffer: the write would otherwise
-// block for ever.
+// An agent that exits without reading its input must not fail the turn, even when
+// the request is far larger than a pipe buffer: the write fails when the agent's
+// exit closes the pipe, and that is the agent's business, not an error of the
+// turn. This does not show that the write is off the turn's path; a synchronous
+// write would pass it too. TestExecProviderTimesOutAnAgentThatNeverReadsALargeRequest
+// is the test for that.
 func TestExecProviderDoesNotBlockOnAnAgentThatNeverReads(t *testing.T) {
 	p := helperProvider(t, "ignore-stdin")
 	p.Timeout = 10 * time.Second

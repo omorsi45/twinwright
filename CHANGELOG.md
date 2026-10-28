@@ -118,7 +118,14 @@ database written by a newer build is refused rather than downgraded.
   also says (`TestExecMaskingKeepsTheResponseValid`, `TestExecMasksEveryStringOfTheDecodedResponse`,
   `TestExecMasksValuesHoweverTheAgentEncodedThem`, `TestExecMasksWhatPythonEncodes`,
   `TestExecMaskedArgumentsAreWhatTheLedgerAndTheToolSee`).
-- **A worker started with exec flags still runs non-exec runs.** `worker` applied
+- **The test for the asynchronous stdin write now fails if the write is made synchronous.** The existing
+  guard used an agent that exits at once, which closes the pipe, so a synchronous write
+  failed with EPIPE instead of blocking and the test passed with the goroutine removed;
+  a request larger than a pipe buffer sent to an agent that never reads and never exits,
+  which is what the goroutine is for, was in no test. It is now: the turn must end with a
+  timeout within its deadline and the agent must be gone
+  (`TestExecProviderTimesOutAnAgentThatNeverReadsALargeRequest`, which blocks and fails
+  against a build with the synchronous write). `worker` applied
   `--agent-command` to every run it claimed, and the provider refuses those flags for any
   provider but exec, so a worker configured to serve an exec run failed every scripted or
   hosted run in the same queue until it was marked failed. The agent flags now apply to
