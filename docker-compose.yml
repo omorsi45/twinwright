@@ -9,9 +9,9 @@
 #   otel-collector  receives OTLP/HTTP (127.0.0.1:4318), prints what it gets and
 #                   forwards it to jaeger; health check on 127.0.0.1:13133
 #   jaeger          stores the spans; UI and query API on 127.0.0.1:16686
-#   prometheus      scrapes a worker started on the host with
-#                   --metrics-addr 0.0.0.0:9095; UI and query API on
-#                   127.0.0.1:9090
+#   prometheus      scrapes workers started on the host with
+#                   --metrics-addr 0.0.0.0:9095 and 0.0.0.0:9096; UI and query
+#                   API on 127.0.0.1:9090
 #
 # `docker compose up -d` starts all four. Name services to start fewer, for
 # example `docker compose up -d postgres`.

@@ -18,6 +18,14 @@ help: ## show this help
 build: ## build the CLI into ./twinwright
 	go build -o twinwright ./cmd/twinwright
 
+.PHONY: demo
+demo: build ## run the 12-step scripted demo in a temporary directory (no network, no keys)
+	./twinwright demo --dir "$$(mktemp -d)/demo"
+
+.PHONY: demo-stack
+demo-stack: ## start the Compose stack and run the fleet, takeover and observability demo against it
+	./scripts/demo-stack.sh
+
 .PHONY: fmt
 fmt: ## format all Go source
 	gofmt -w .
@@ -75,7 +83,7 @@ live-model: ## run a local Ollama model on the billing world and replay it (need
 	./scripts/live-model.sh "$(LIVE_BASE_URL)" "$(TW_LIVE_MODEL)"
 
 .PHONY: up
-up: ## start PostgreSQL and an OpenTelemetry collector
+up: ## start PostgreSQL, the OpenTelemetry collector, Jaeger and Prometheus
 	docker compose up -d
 	@echo "waiting for postgres to accept connections"
 	@until docker compose exec -T postgres pg_isready -U twinwright >/dev/null 2>&1; do sleep 1; done
