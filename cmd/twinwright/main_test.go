@@ -2281,6 +2281,34 @@ func TestWorkerExportsACompletedRunsTrace(t *testing.T) {
 			}
 		}
 	}
+
+	// The same scripted run drained by a worker that does not export must leave
+	// the same ledger: an event written because of the export would show up as
+	// a difference in the sequence of event types.
+	plainDir := t.TempDir()
+	plainManifest := buildBillingManifest(t, plainDir)
+	plainDB := filepath.Join(plainDir, "world.db")
+	plainRunID := enqueueBillingRun(t, plainManifest, plainDB)
+	drainWorker(t, plainManifest, plainDB)
+	plain, err := store.OpenDSN(context.Background(), plainDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer plain.Close()
+	plainEvents, err := plain.Events(context.Background(), plainRunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shape := func(events []store.Event) []string {
+		out := make([]string, len(events))
+		for i, event := range events {
+			out[i] = strconv.Itoa(event.Seq) + " " + event.Type
+		}
+		return out
+	}
+	if got, want := shape(events), shape(plainEvents); !reflect.DeepEqual(got, want) {
+		t.Fatalf("exporting changed the ledger:\nwith export:    %v\nwithout export: %v", got, want)
+	}
 }
 
 func TestWorkerExportFailureDoesNotFailTheRun(t *testing.T) {
