@@ -742,6 +742,7 @@ Default `--agent` is `scripted` so CI stays deterministic. Live agents are allow
 | `openai` | OpenAI Responses API | `OPENAI_API_KEY`; model defaults to `gpt-6-sol`, or `OPENAI_MODEL` / `--model` |
 | `openai-compatible` | `{base}/chat/completions` | `--base-url` or `OPENAI_BASE_URL`; optional `OPENAI_API_KEY`; model required via `--model` or `OPENAI_MODEL` |
 | `anthropic` | Anthropic Messages API | `ANTHROPIC_API_KEY`; model required via `--model` or `ANTHROPIC_MODEL` (no invented default) |
+| `exec` | your own program, JSON over stdin and stdout | `--model` naming the agent and its version, and `--agent-command`; see [the protocol](docs/protocol/agent-v1.md) |
 
 ```bash
 export OPENAI_API_KEY="..."            # or ANTHROPIC_API_KEY, or OPENAI_BASE_URL
@@ -756,6 +757,13 @@ credentials; `openai-compatible` also needs `--model` and a base URL. The base U
 is process configuration, not a ledger column, so resuming such a run needs
 `--base-url` or `OPENAI_BASE_URL` again. The stored provider name and model are what
 replay and traces show.
+
+`--agent exec` runs an agent of your own as a separate process, started afresh for
+every turn. It proposes tool calls; the dispatcher still authorizes and executes
+them. The command line is not stored with the run, so resuming an exec run or
+serving it from a worker needs `--agent-command` again. The protocol, its limits
+and a Python reference agent are in `docs/protocol/agent-v1.md` and
+`examples/agents/python/`.
 
 Twinwright's world state, tool execution, recorded decisions, and deterministic evaluators provide the reproducible boundary around it. When a provider reports token usage, the assistant turn stores it. Error bodies are redacted before they reach the ledger. No live OpenAI, Anthropic, or local-server run has been verified in this repository; scripted fixtures are the tested path. See `docs/adr/0013-agent-providers.md`.
 

@@ -17,7 +17,7 @@ import (
 // KnownProvider reports the provider names the CLI and forks accept.
 func KnownProvider(name string) bool {
 	switch name {
-	case "scripted", "openai", "openai-compatible", "anthropic":
+	case "scripted", "openai", "openai-compatible", "anthropic", "exec":
 		return true
 	}
 	return false

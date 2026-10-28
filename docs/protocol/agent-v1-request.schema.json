@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Twinwright agent request (twinwright.agent.v1)",
+  "description": "The one JSON object Twinwright writes to an agent's stdin, followed by end of file. An agent should ignore request fields it does not recognise.",
+  "type": "object",
+  "required": ["history", "operations", "protocol", "task"],
+  "properties": {
+    "protocol": {
+      "description": "Always twinwright.agent.v1. An agent that speaks another version should exit non-zero.",
+      "type": "string",
+      "const": "twinwright.agent.v1"
+    },
+    "task": {
+      "description": "What the agent is asked to do, as given to the run.",
+      "type": "string"
+    },
+    "history": {
+      "description": "The conversation so far, exactly as the run's ledger records it: assistant turns, and one tool message per executed call carrying the HTTP status and the response body.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["role"],
+        "properties": {
+          "role": {
+            "description": "assistant or tool.",
+            "type": "string"
+          },
+          "content": {
+            "description": "The assistant's text, or for a tool message the response body as a string.",
+            "type": "string"
+          },
+          "tool_calls": {
+            "description": "On an assistant message, the calls it proposed.",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["arguments", "id", "operation_id"],
+              "properties": {
+                "id": { "type": "string" },
+                "operation_id": { "type": "string" },
+                "arguments": { "type": "object" }
+              }
+            }
+          },
+          "call_id": {
+            "description": "On a tool message, the id of the call it answers.",
+            "type": "string"
+          },
+          "operation_id": {
+            "description": "On a tool message, the operation that was called.",
+            "type": "string"
+          },
+          "status": {
+            "description": "On a tool message, the HTTP status the simulated service returned.",
+            "type": "integer"
+          },
+          "raw_output": {
+            "description": "A hosted provider's own output items. Present only on turns made by such a provider.",
+            "type": "array"
+          },
+          "raw_body": { "type": "string" },
+          "usage": {
+            "type": "object",
+            "required": ["input_tokens", "output_tokens", "total_tokens"],
+            "properties": {
+              "input_tokens": { "type": "integer" },
+              "output_tokens": { "type": "integer" },
+              "total_tokens": { "type": "integer" }
+            }
+          },
+          "response_id": { "type": "string" },
+          "server_model": { "type": "string" },
+          "finish_reason": { "type": "string" },
+          "http_status": { "type": "integer" },
+          "interruptions": {
+            "description": "Attempts that produced no turn before this one did.",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["attempt", "kind"],
+              "properties": {
+                "kind": { "type": "string" },
+                "attempt": { "type": "integer" },
+                "reason": { "type": "string" },
+                "deadline_ms": { "type": "integer" },
+                "status": { "type": "integer" },
+                "retry_after_ms": { "type": "integer" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "operations": {
+      "description": "The operations the agent may propose calls to. Only those the run's policy exposes are listed.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["description", "method", "operation_id", "parameters", "path"],
+        "properties": {
+          "operation_id": {
+            "description": "The id to use as operation_id in a tool call.",
+            "type": "string"
+          },
+          "method": { "type": "string" },
+          "path": { "type": "string" },
+          "description": { "type": "string" },
+          "parameters": {
+            "description": "A JSON Schema object for the call's arguments.",
+            "type": "object"
+          }
+        }
+      }
+    }
+  }
+}

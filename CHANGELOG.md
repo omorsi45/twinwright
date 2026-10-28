@@ -13,6 +13,30 @@ database written by a newer build is refused rather than downgraded.
 
 ### Added
 
+- **An `exec` agent protocol: your own program makes the decisions.** `--agent exec`
+  starts a command of your choice once per turn, writes one JSON request to its
+  stdin (the task, the history as the ledger records it, and the operations the run
+  exposes), and reads one JSON response from its stdout: tool calls to propose, or a
+  final answer. The protocol is `twinwright.agent.v1`, documented in
+  `docs/protocol/agent-v1.md` with JSON Schema files for the request and the
+  response. The agent proposes and the dispatcher still authorizes and executes, so
+  the run's policy does not depend on the agent behaving. The response must carry
+  `protocol`, `content` and `tool_calls`; unknown fields, data after the object, a
+  non-zero exit and a protocol mismatch are provider errors. stdout is limited to 1
+  MiB and the process is killed past it, stderr keeps its last 4 KiB and is redacted
+  with the passed values, and a turn that overruns its deadline gets SIGTERM, then
+  SIGKILL after 500 ms, to its whole process group and is recorded as a `timeout`
+  interruption that the runner retries once. The child environment is only `PATH`,
+  `HOME` and the variables named with the repeatable `--agent-env NAME`; a
+  `NAME=value` is refused so no value is typed on a command line. `--model` is
+  required and names the agent and its version. The command is not stored with a
+  run, so `resume` and `worker` need `--agent-command` again and fail naming the flag
+  without it. `examples/agents/python/billing_agent.py` is a deterministic,
+  standard-library reference agent that solves `duplicate-charge`; it is a protocol
+  example, not a model. `TestExecProviderCompletesTheBillingRun` runs a separate
+  process through the whole scenario and verifies the replay; the unix process-group
+  calls live in build-tagged files so the module still builds for Windows.
+
 - **A regression gate over bench reports, proven able to fail and run in CI.**
   `twinwright gate` compares a candidate report with an approved baseline and exits
   0 for no regressions, 1 for regressions and 2 when it cannot decide. The approved

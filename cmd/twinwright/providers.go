@@ -7,8 +7,10 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"time"
+	"unicode"
 
 	"twinwright/internal/agent"
 )
@@ -30,6 +32,14 @@ type providerConfig struct {
 	// network, and only replay sets it. Neither is registered by providerFlags,
 	// and neither is meaningful for a provider that makes no HTTP calls.
 	RecordCassette, Cassette string
+	// AgentCommand is the command line of the agent process for the exec
+	// provider, split into arguments without a shell by splitAgentCommand.
+	// AgentEnv names the environment variables of this process to hand to it.
+	// Neither is part of a run: the ledger records the model name that
+	// identifies the agent, never how it was started, so both are needed again
+	// whenever an exec run is continued.
+	AgentCommand string
+	AgentEnv     []string
 }
 
 // cassetteKeyPlaceholder stands in for the API key when a cassette is replayed.
@@ -53,7 +63,19 @@ func providerFlags(fs *flag.FlagSet) *providerConfig {
 	fs.StringVar(&cfg.BaseURL, "base-url", os.Getenv("OPENAI_BASE_URL"), "base URL for openai-compatible")
 	fs.DurationVar(&cfg.Timeout, "provider-timeout", agent.DefaultCallTimeout, "per-attempt provider call deadline")
 	fs.IntVar(&cfg.MaxOutputTokens, "max-output-tokens", 0, "output token ceiling per model call; 0 keeps each provider's own default")
+	fs.StringVar(&cfg.AgentCommand, "agent-command", "", "command line of the agent process for --agent exec, split on blanks with quotes grouping words and no shell; needed again to resume or serve an exec run")
+	fs.Var((*stringList)(&cfg.AgentEnv), "agent-env", "NAME of an environment variable to pass to the exec agent, with this process's value; repeatable. The agent otherwise gets only PATH and HOME")
 	return cfg
+}
+
+// stringList is a repeatable string flag.
+type stringList []string
+
+func (l *stringList) String() string { return strings.Join(*l, ",") }
+
+func (l *stringList) Set(value string) error {
+	*l = append(*l, value)
+	return nil
 }
 
 // recordCassetteFlag registers --record-cassette. It is separate from
@@ -106,6 +128,18 @@ func openProvider(cfg providerConfig) (agent.Provider, io.Closer, error) {
 	}
 	if cfg.MaxOutputTokens < 0 {
 		return nil, nil, fmt.Errorf("--max-output-tokens must not be negative, got %d", cfg.MaxOutputTokens)
+	}
+	if cfg.Name == "exec" {
+		return openExecProvider(cfg)
+	}
+	// These flags describe an agent process, so with any other provider they
+	// would be silently ignored, and an operator who passed them believes an
+	// agent of their own is running.
+	if cfg.AgentCommand != "" {
+		return nil, nil, fmt.Errorf("--agent-command only applies to --agent exec; this run uses %s", cfg.Name)
+	}
+	if len(cfg.AgentEnv) > 0 {
+		return nil, nil, fmt.Errorf("--agent-env only applies to --agent exec; this run uses %s", cfg.Name)
 	}
 	if cfg.Name == "scripted" {
 		// A scripted provider makes no HTTP calls, so there is nothing to record
@@ -198,4 +232,113 @@ func openProvider(cfg providerConfig) (agent.Provider, io.Closer, error) {
 	default:
 		return agent.AnthropicProvider{APIKey: key, Model: cfg.Model, URL: endpoint, Client: client, Timeout: cfg.Timeout, MaxOutputTokens: maxTokens}, closer, nil
 	}
+}
+
+// openExecProvider builds the provider that lets a separate program decide.
+//
+// The provider makes no HTTP calls, so a cassette has nothing to record or
+// serve. The model is required because it is the only thing the run keeps to
+// say which agent, and which version of it, made the decisions: the command is
+// deliberately not stored, and two different programs must not both be recorded
+// as an empty model name.
+func openExecProvider(cfg providerConfig) (agent.Provider, io.Closer, error) {
+	if cfg.RecordCassette != "" {
+		return nil, nil, fmt.Errorf("--record-cassette needs a provider that makes HTTP calls; exec makes none")
+	}
+	if cfg.Cassette != "" {
+		return nil, nil, fmt.Errorf("--cassette needs a run made through an HTTP provider; this run used exec, which makes no calls")
+	}
+	if cfg.Model == "" {
+		return nil, nil, fmt.Errorf("exec needs --model to name the agent and its version, for example --model my-agent@1.4")
+	}
+	if cfg.AgentCommand == "" {
+		return nil, nil, fmt.Errorf("exec needs --agent-command to say how to start the agent; the command is not stored with a run, so it is needed again to resume or serve one")
+	}
+	command, err := splitAgentCommand(cfg.AgentCommand)
+	if err != nil {
+		return nil, nil, fmt.Errorf("--agent-command: %w", err)
+	}
+	env, err := resolveAgentEnv(cfg.AgentEnv)
+	if err != nil {
+		return nil, nil, err
+	}
+	return agent.ExecProvider{Command: command, Env: env, Timeout: cfg.Timeout}, closerFunc(noClose), nil
+}
+
+// splitAgentCommand splits a command line into arguments the way an operator
+// reads it, and no further. Words are separated by blanks; a single or double
+// quoted span is part of one word, with the quotes removed; text and quoted
+// spans that touch make one word. There are no escapes, variables, globs,
+// substitutions or operators, because the result is run directly and never
+// reaches a shell: what the line says is what is executed.
+func splitAgentCommand(line string) ([]string, error) {
+	var words []string
+	var word strings.Builder
+	inWord := false
+	var quote rune
+	for _, r := range line {
+		switch {
+		case quote != 0:
+			if r == quote {
+				quote = 0
+			} else {
+				word.WriteRune(r)
+			}
+		case r == '"' || r == '\'':
+			quote, inWord = r, true
+		case unicode.IsSpace(r):
+			if inWord {
+				words = append(words, word.String())
+				word.Reset()
+				inWord = false
+			}
+		default:
+			word.WriteRune(r)
+			inWord = true
+		}
+	}
+	if quote != 0 {
+		return nil, fmt.Errorf("a %c quote is never closed", quote)
+	}
+	if inWord {
+		words = append(words, word.String())
+	}
+	if len(words) == 0 {
+		return nil, errors.New("the command is empty")
+	}
+	return words, nil
+}
+
+var agentEnvName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// resolveAgentEnv turns --agent-env names into the NAME=value pairs for the
+// agent, taking each value from this process's environment.
+//
+// Only names are accepted. A value typed on the command line is visible in
+// process listings and shell history to anyone on the machine, which is what
+// passing a secret by environment variable exists to avoid, so NAME=value is
+// refused without repeating the value. A name this process does not have is an
+// error too: passing nothing would let the agent start without a key it needs
+// and fail in a way that looks like the agent's own bug.
+func resolveAgentEnv(names []string) ([]string, error) {
+	var pairs []string
+	seen := map[string]bool{}
+	for _, name := range names {
+		if before, _, hasValue := strings.Cut(name, "="); hasValue {
+			return nil, fmt.Errorf("--agent-env takes the NAME of a variable, not NAME=value, because a value on the command line shows in process listings; export %q instead and pass the name", before)
+		}
+		if !agentEnvName.MatchString(name) {
+			return nil, errors.New("--agent-env needs a variable NAME of letters, digits and underscores that does not start with a digit")
+		}
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		value, ok := os.LookupEnv(name)
+		if !ok {
+			return nil, fmt.Errorf("--agent-env %s: that variable is not set in this process's environment", name)
+		}
+		pairs = append(pairs, name+"="+value)
+	}
+	return pairs, nil
 }
