@@ -165,3 +165,7 @@ When the job passes, for one scripted run and the pinned images:
   job's evidence and is reviewed with it.
 - `docker compose up -d` pulls and starts two more services than before. Name the
   services to start fewer.
+
+## Corrections
+
+- 2026-10-28: the exporter returned the collector endpoint as it was given, so `trace --otlp-endpoint` printed the endpoint's userinfo and query in its delivery report and in its errors, which the worker's log line had always scrubbed. `Delivery.Endpoint` and every error the exporter returns now name the address without userinfo or query, and mask header values and the endpoint's own credentials if a collector echoes them back. An endpoint with a query string was posted to the wrong path and now keeps its query. Collector headers can be set with the standard `OTEL_EXPORTER_OTLP_HEADERS` variable (comma-separated `name=value` pairs, values percent-decoded) on both `trace` and `worker` when `--otlp-header` is not given, so a worker's credential need not sit in its command line.

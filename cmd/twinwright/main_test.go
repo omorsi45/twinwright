@@ -2117,6 +2117,7 @@ func TestSelectProviderDoesNotOpenARecording(t *testing.T) {
 // collectedPost is one request a test collector received.
 type collectedPost struct {
 	Path   string
+	Query  string
 	Header http.Header
 	Body   []byte
 }
@@ -2135,7 +2136,7 @@ func newTestCollector(t *testing.T, status int) *testCollector {
 	c.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		c.mu.Lock()
-		c.posts = append(c.posts, collectedPost{Path: r.URL.Path, Header: r.Header.Clone(), Body: body})
+		c.posts = append(c.posts, collectedPost{Path: r.URL.Path, Query: r.URL.RawQuery, Header: r.Header.Clone(), Body: body})
 		c.mu.Unlock()
 		w.WriteHeader(status)
 	}))

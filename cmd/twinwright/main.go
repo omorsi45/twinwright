@@ -899,7 +899,7 @@ func runCLI(args []string, out io.Writer) error {
 		dbPath := fs.String("db", "twinwright.db", "SQLite path or postgres:// DSN")
 		format := fs.String("format", "json", "json, text, or otlp")
 		otlpEndpoint := fs.String("otlp-endpoint", os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"), "POST the spans to this OpenTelemetry collector instead of printing them")
-		otlpHeader := fs.String("otlp-header", "", "extra request header for the collector, as Name: value")
+		otlpHeader := fs.String("otlp-header", "", "extra request header for the collector, as Name: value; with none, OTEL_EXPORTER_OTLP_HEADERS (name=value,...) is used, which keeps a credential out of the process listing")
 		if err := fs.Parse(args[2:]); err != nil {
 			return err
 		}
@@ -925,13 +925,16 @@ func runCLI(args []string, out io.Writer) error {
 			if *otlpEndpoint != "" {
 				// Delivering the spans, not just formatting them: the
 				// collector's status code is what makes the export verifiable.
-				headers, err := parseOTLPHeader(*otlpHeader)
+				headers, err := resolveOTLPHeaders(*otlpHeader)
 				if err != nil {
 					return err
 				}
+				// The endpoint can carry userinfo or a query token, so the
+				// report and the error pass through the same scrubbing the
+				// worker applies before it logs one.
 				delivery, err := trace.Exporter{Endpoint: *otlpEndpoint, Headers: headers}.Export(ctx, built)
 				if err != nil {
-					return err
+					return exportErrorScrubber(*otlpEndpoint, headers)(err)
 				}
 				return emit(out, delivery)
 			}

@@ -9,7 +9,6 @@ import (
 	"io"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -17,7 +16,6 @@ import (
 	"twinwright/internal/compiler"
 	"twinwright/internal/dispatch"
 	"twinwright/internal/metrics"
-	"twinwright/internal/redact"
 	"twinwright/internal/store"
 	"twinwright/internal/trace"
 	"twinwright/internal/worker"
@@ -179,7 +177,7 @@ func workerCommand(ctx context.Context, args []string, out io.Writer) error {
 	// OTEL_EXPORTER_OTLP_ENDPOINT: a worker that exports every completed run's
 	// trace is new behaviour, so it must be asked for with the flag.
 	otlpEndpoint := fs.String("otlp-endpoint", "", "POST each completed run's trace to this OpenTelemetry collector (empty disables export)")
-	otlpHeader := fs.String("otlp-header", "", "extra request header for the collector, as Name: value")
+	otlpHeader := fs.String("otlp-header", "", "extra request header for the collector, as Name: value; with none, OTEL_EXPORTER_OTLP_HEADERS (name=value,...) is used, which keeps a credential out of the process listing")
 	providerCfg := providerFlags(fs)
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
@@ -187,7 +185,7 @@ func workerCommand(ctx context.Context, args []string, out io.Writer) error {
 	// Checked before any file or database is touched, like a missing manifest.
 	var otlpHeaders map[string]string
 	if *otlpEndpoint != "" {
-		headers, err := parseOTLPHeader(*otlpHeader)
+		headers, err := resolveOTLPHeaders(*otlpHeader)
 		if err != nil {
 			return err
 		}
@@ -334,12 +332,7 @@ func traceExporter(s *store.Store, endpoint string, headers map[string]string) f
 	for _, value := range headers {
 		secrets = append(secrets, value)
 	}
-	rawEndpoint := strings.TrimRight(endpoint, "/")
-	safeEndpoint := strings.TrimRight(redact.URL(endpoint), "/")
-	scrub := func(err error) error {
-		text := redact.String(err.Error(), secrets...)
-		return errors.New(strings.ReplaceAll(text, rawEndpoint, safeEndpoint))
-	}
+	scrub := exportErrorScrubber(endpoint, headers)
 	return func(ctx context.Context, runID string) error {
 		built, err := trace.Build(ctx, s, runID, secrets...)
 		if err != nil {

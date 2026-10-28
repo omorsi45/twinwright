@@ -13,6 +13,22 @@ database written by a newer build is refused rather than downgraded.
 
 ### Fixed
 
+- **`trace --otlp-endpoint` no longer prints the endpoint's credentials.** The delivery
+  report named the endpoint as given and the error for a refusal or a failed post quoted
+  it, so a password in the userinfo or a token in the query went to stdout and stderr,
+  though the worker had always scrubbed the same thing from its log. The exporter now
+  names the address alone in `Delivery.Endpoint` and in every error, and masks header
+  values and the endpoint's own credentials if a collector echoes them back
+  (`TestTraceCommandExportDoesNotPrintEndpointCredentials`,
+  `TestExporterNeverReturnsTheEndpointCredentials`). An endpoint with a query string was
+  posted to the wrong path, with the traces path appended inside the query, and now keeps
+  its query and gets the path added to its path (`TestExporterKeepsTheQueryOfTheEndpoint`).
+- **Collector headers can come from `OTEL_EXPORTER_OTLP_HEADERS`.** `trace` and `worker`
+  read the standard variable (comma-separated `name=value` pairs, values percent-decoded)
+  when `--otlp-header` is not given, so a long-running worker's credential need not sit in
+  its command line; the flag still works and wins. A malformed variable is refused before the
+  database is opened, without repeating a value (`TestResolveOTLPHeaders`,
+  `TestWorkerReadsTheOTLPHeaderFromTheEnvironment`).
 - **`perf` no longer prints the PostgreSQL password when it holds an unencoded `/`, `#` or
   `?`.** `url.Parse` rejects such a DSN and quotes a piece of the password in its error,
   which the scrubber's search for the whole DSN never found, so `perf --db` printed it
