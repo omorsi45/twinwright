@@ -150,6 +150,9 @@ func TestExecProviderRejectsMisbehavingAgents(t *testing.T) {
 		{name: "no content", mode: "no-content", want: []string{"content"}},
 		{name: "neither content nor calls", mode: "nothing-to-say", want: []string{"no content and no tool calls"}},
 		{name: "data after the object", mode: "trailing", want: []string{"after the response"}},
+		{name: "usage with no counts", mode: "usage-empty", want: []string{"usage", "input_tokens"}},
+		{name: "usage with one count", mode: "usage-partial", want: []string{"usage", "output_tokens"}},
+		{name: "usage that is null", mode: "usage-null", want: []string{"usage", "object"}},
 		{name: "stdout flood", mode: "flood", within: 10 * time.Second, want: []string{"exceeded", strconv.Itoa(MaxAgentOutputBytes)}, gone: true},
 		{name: "hang", mode: "hang", timeout: 500 * time.Millisecond, within: 2 * time.Second, interrupted: true, gone: true},
 		{name: "hang that ignores SIGTERM", mode: "hang-ignore-term", timeout: 500 * time.Millisecond, within: 4 * time.Second, interrupted: true, gone: true},
@@ -404,6 +407,37 @@ func TestExecProviderRecordsUsageTheAgentReports(t *testing.T) {
 	}
 }
 
+// A usage that is there follows the schema: an object with the three counts, as
+// integers, and nothing else. The three malformed ones in the misbehaving-agent
+// table are the cases the decoder used to accept; these are the ones it refuses.
+func TestExecUsageIsHeldToTheSchema(t *testing.T) {
+	head := `{"protocol":"twinwright.agent.v1","content":"x","tool_calls":[],"usage":`
+	for name, usage := range map[string]string{
+		"an unknown member":          `{"input_tokens":1,"output_tokens":2,"total_tokens":3,"cost":4}`,
+		"a count that is a string":   `{"input_tokens":"1","output_tokens":2,"total_tokens":3}`,
+		"a count that is fractional": `{"input_tokens":1.5,"output_tokens":2,"total_tokens":3}`,
+		"a count that is null":       `{"input_tokens":null,"output_tokens":2,"total_tokens":3}`,
+		"not an object":              `5`,
+		"an array":                   `[1,2,3]`,
+	} {
+		var response execResponse
+		if err := decodeExecResponse([]byte(head+usage+"}"), &response); err == nil {
+			t.Errorf("usage as %s was accepted: %s", name, usage)
+		}
+	}
+	var response execResponse
+	if err := decodeExecResponse([]byte(head+`{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.usage == nil || *response.usage != (Usage{InputTokens: 1, OutputTokens: 2, TotalTokens: 3}) {
+		t.Fatalf("usage = %+v", response.usage)
+	}
+	response = execResponse{}
+	if err := decodeExecResponse([]byte(`{"protocol":"twinwright.agent.v1","content":"x","tool_calls":[]}`), &response); err != nil || response.usage != nil {
+		t.Fatalf("a response without usage: err = %v, usage = %+v", err, response.usage)
+	}
+}
+
 // An agent proposes and the dispatcher decides. A process that asks for a refund
 // its principal may not make, and that was never offered the operation, is
 // refused exactly as a model would be: the call is answered 403 and nothing is
@@ -608,7 +642,7 @@ func TestAgentSchemasMatchTheProtocol(t *testing.T) {
 	checkObjectSchema(t, "request history interruption", schemaChild(t, request, "properties", "history", "items", "properties", "interruptions", "items"), reflect.TypeOf(Interruption{}))
 	checkObjectSchema(t, "response", response, reflect.TypeOf(execResponse{}))
 	checkObjectSchema(t, "response tool call", schemaChild(t, response, "properties", "tool_calls", "items"), reflect.TypeOf(execToolCall{}))
-	checkObjectSchema(t, "response usage", schemaChild(t, response, "properties", "usage"), reflect.TypeOf(Usage{}))
+	checkObjectSchema(t, "response usage", schemaChild(t, response, "properties", "usage"), reflect.TypeOf(execUsage{}))
 	if got := schemaChild(t, request, "properties", "protocol")["const"]; got != AgentProtocol {
 		t.Errorf("request protocol const = %v", got)
 	}

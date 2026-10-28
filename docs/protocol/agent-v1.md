@@ -110,7 +110,10 @@ Schema: [`agent-v1-response.schema.json`](agent-v1-response.schema.json).
 ```
 
 - `protocol`, `content` and `tool_calls` are required. `usage` (`input_tokens`,
-  `output_tokens`, `total_tokens`) is optional and is recorded with the turn.
+  `output_tokens`, `total_tokens`) is optional and is recorded with the turn. When
+  it is there it must be an object with all three counts as integers, as the schema
+  says: `null`, `{}` and an object with some of the counts are refused, where they
+  used to be recorded as zeros.
 - With one or more `tool_calls` the calls are proposed. The run executes them and
   the next turn is the agent started again with their results in `history`.
 - With `tool_calls: []` the turn is the final answer and `content` is it. The run

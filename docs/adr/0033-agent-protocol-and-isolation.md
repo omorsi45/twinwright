@@ -61,8 +61,8 @@ files for both documents.
   `parameters`, built from the compiled operation the way the hosted adapters build
   a tool definition).
 - **Response.** One JSON object on stdout: `protocol`, `content` and `tool_calls`
-  are required, `usage` is optional. A call needs `id`, `operation_id` and
-  `arguments`.
+  are required, `usage` is optional but, when present, must carry all three counts.
+  A call needs `id`, `operation_id` and `arguments`.
 - **Strict in what it reads.** Unknown fields (at any level), a missing or
   different `protocol`, a missing `content`, `tool_calls` or call field, data after
   the object, and a response with neither content nor calls are errors. A missing
@@ -216,7 +216,7 @@ By tests that run on every `go test ./...`:
 - A separate process completes the billing run across a pause and a resume, passes
   the evaluation, and the run replays. The standard-library Python agent does the
   same when `python3` is present.
-- The fourteen misbehaviours in `TestExecProviderRejectsMisbehavingAgents` are
+- The seventeen misbehaviours in `TestExecProviderRejectsMisbehavingAgents` are
   errors, a hang is killed within its deadline with its process reaped, a child that
   ignores SIGTERM is killed with the group, and the stdout limit holds.
 - The environment is exactly `HOME`, `PATH` and the passed names, and empty when
@@ -325,3 +325,4 @@ more.
 - 2026-10-28: `--agent-memory 0` and `--agent-cpus 0` passed `Validate` and, on Docker Engine 29.9.2, leave the memory and CPU limits at `max` (EXEC-9); both are refused, with every spelling of zero.
 - 2026-10-28: the docker client was given only `PATH` and `HOME`, so a daemon configured through `DOCKER_HOST` and its relatives was unreachable, and the only workaround, `--agent-env DOCKER_HOST`, also put the daemon address in the untrusted container (EXEC-14); the five connection variables now go to the client process only.
 - 2026-10-28: the Docker evidence for container mode could pass without running: a renamed test matched nothing, a failed image check skipped, and the network probe accepted any "blocked" answer (EXEC-13); the CI step requires the passes by name, the isolation test requires errno 101, and a bridge-network control shows the probe can connect.
+- 2026-10-28: the decoder accepted a `usage` that was `null`, `{}` or missing counts and recorded zeros, although the response schema requires an object with all three (EXEC-10); a `usage` that is there is now held to the schema.

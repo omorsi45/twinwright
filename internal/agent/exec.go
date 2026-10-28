@@ -104,7 +104,19 @@ type execResponse struct {
 	Protocol  *string         `json:"protocol"`
 	Content   *string         `json:"content"`
 	ToolCalls *[]execToolCall `json:"tool_calls"`
-	Usage     *Usage          `json:"usage,omitempty"`
+	// RawUsage is usage as it was written, so that null can be told from absent
+	// and the counts can be required: the schema says that a usage that is there
+	// is an object with all three. decodeExecResponse checks it and fills usage.
+	RawUsage json.RawMessage `json:"usage,omitempty"`
+	usage    *Usage
+}
+
+// execUsage is usage as it is decoded, with a pointer per count so that a count
+// that is missing is not read as zero.
+type execUsage struct {
+	InputTokens  *int `json:"input_tokens"`
+	OutputTokens *int `json:"output_tokens"`
+	TotalTokens  *int `json:"total_tokens"`
 }
 
 // execToolCall is a proposed call, with the same presence rule as execResponse.
@@ -179,7 +191,39 @@ func decodeExecResponse(raw []byte, out *execResponse) error {
 			return fmt.Errorf("agent tool call %d is missing %q (use {} when there are none)", i, "arguments")
 		}
 	}
+	if out.RawUsage != nil {
+		usage, err := decodeExecUsage(out.RawUsage)
+		if err != nil {
+			return err
+		}
+		out.usage = usage
+	}
 	return nil
+}
+
+// decodeExecUsage reads the usage object the way the response schema describes
+// it: an object with all three counts and nothing else. It is optional, so a
+// response without one is fine, but one that is there and null, empty or short is
+// a mistake that would otherwise be recorded as zeros.
+func decodeExecUsage(raw json.RawMessage) (*Usage, error) {
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil, fmt.Errorf("agent response %q must be an object with input_tokens, output_tokens and total_tokens, not null (leave it out when there are no counts)", "usage")
+	}
+	var counts execUsage
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&counts); err != nil {
+		return nil, fmt.Errorf("agent response %q does not follow the protocol: %w", "usage", err)
+	}
+	switch {
+	case counts.InputTokens == nil:
+		return nil, fmt.Errorf("agent response %q is missing %q", "usage", "input_tokens")
+	case counts.OutputTokens == nil:
+		return nil, fmt.Errorf("agent response %q is missing %q", "usage", "output_tokens")
+	case counts.TotalTokens == nil:
+		return nil, fmt.Errorf("agent response %q is missing %q", "usage", "total_tokens")
+	}
+	return &Usage{InputTokens: *counts.InputTokens, OutputTokens: *counts.OutputTokens, TotalTokens: *counts.TotalTokens}, nil
 }
 
 // Next runs the agent for one turn.
@@ -310,7 +354,7 @@ func (p ExecProvider) Next(ctx context.Context, task string, history []Message, 
 	if err = decodeExecResponse(output, &response); err != nil {
 		return Message{}, fail("%v", err)
 	}
-	message := Message{Role: "assistant", Content: maskSpellings(*response.Content, spellings), Usage: response.Usage}
+	message := Message{Role: "assistant", Content: maskSpellings(*response.Content, spellings), Usage: response.usage}
 	for _, call := range *response.ToolCalls {
 		message.ToolCalls = append(message.ToolCalls, ToolCall{
 			ID:          maskSpellings(*call.ID, spellings),

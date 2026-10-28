@@ -118,6 +118,12 @@ database written by a newer build is refused rather than downgraded.
   also says (`TestExecMaskingKeepsTheResponseValid`, `TestExecMasksEveryStringOfTheDecodedResponse`,
   `TestExecMasksValuesHoweverTheAgentEncodedThem`, `TestExecMasksWhatPythonEncodes`,
   `TestExecMaskedArgumentsAreWhatTheLedgerAndTheToolSee`).
+- **A `usage` that breaks the schema is refused, not recorded as zeros.** The response
+  schema says `usage`, when present, is an object with `input_tokens`, `output_tokens` and
+  `total_tokens`, but the decoder accepted `{}`, an object with some of them and `null`, and
+  recorded zeros or nothing for a turn's cost. It now refuses all three, and an unknown member,
+  a count that is not an integer and a non-object (`TestExecProviderRejectsMisbehavingAgents`,
+  `TestExecUsageIsHeldToTheSchema`).
 - **The test for the asynchronous stdin write now fails if the write is made synchronous.** The existing
   guard used an agent that exits at once, which closes the pipe, so a synchronous write
   failed with EPIPE instead of blocking and the test passed with the goroutine removed;

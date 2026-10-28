@@ -72,6 +72,11 @@ var fixed = map[string]string{
 	// that does not care about its input looks like to the provider.
 	"ignore-stdin": `{"protocol":"` + protocol + `","content":"done","tool_calls":[]}`,
 	"with-usage":   `{"protocol":"` + protocol + `","content":"counted","tool_calls":[],"usage":{"input_tokens":3,"output_tokens":4,"total_tokens":7}}`,
+	// usage is optional, but when it is there the schema wants an object with all
+	// three counts, so these three are malformed.
+	"usage-empty":   `{"protocol":"` + protocol + `","content":"hi","tool_calls":[],"usage":{}}`,
+	"usage-partial": `{"protocol":"` + protocol + `","content":"hi","tool_calls":[],"usage":{"input_tokens":5}}`,
+	"usage-null":    `{"protocol":"` + protocol + `","content":"hi","tool_calls":[],"usage":null}`,
 }
 
 // Run speaks as an agent in the named mode and returns the process exit code.

@@ -406,10 +406,11 @@ contains a colon.
 **Evidence.**
 
 - `internal/agent/exec_test.go` - `TestExecProviderRejectsMisbehavingAgents` runs
-  a real child in fourteen misbehaving modes: not JSON, no output, exit 3 (the
+  a real child in seventeen misbehaving modes: not JSON, no output, exit 3 (the
   error carries the stderr tail with the passed secret masked), an unknown
   response field, a different and a missing protocol, a missing `tool_calls` and
-  `content`, no content and no calls, data after the object, a stdout flood past
+  `content`, no content and no calls, data after the object, a usage that is
+  empty, partial or null, a stdout flood past
   1 MiB, a hang, a hang that ignores SIGTERM, and a hang whose child ignores
   SIGTERM and holds the output pipes. The last four assert the process is gone
   afterwards, including the grandchild, and that the timeout is an interruption
