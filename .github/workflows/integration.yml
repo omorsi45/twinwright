@@ -11,8 +11,9 @@ name: Integration
 #
 # Jobs: postgres (storage and the distributed runtime on two PostgreSQL majors),
 # docker (the container executor against a real daemon), observability (spans
-# read back from Jaeger and a worker's metrics scraped by Prometheus) and
-# real-model (a small model, recorded and replayed).
+# read back from Jaeger and a worker's metrics scraped by Prometheus),
+# real-model (a small model, recorded and replayed) and perf (the platform
+# benchmarks on PostgreSQL 17, run only from a manual dispatch).
 
 on:
   push:
@@ -291,4 +292,102 @@ jobs:
             ${{ runner.temp }}/live/live.cassette.jsonl
           if-no-files-found: warn
           retention-days: 30
+
+  perf:
+    name: platform benchmarks on PostgreSQL 17 (on demand)
+    # Published PostgreSQL figures have to come from a labelled shared runner,
+    # one whose operating system, CPU count and memory are recorded next to the
+    # numbers, and not from a machine the reader cannot name. This job runs
+    # `twinwright perf` against a PostgreSQL 17 service and uploads the JSON
+    # report with that record, so the documentation quotes a committed copy of
+    # the report and not a number typed from memory.
+    #
+    # It is dispatch-only because it takes minutes and the figures mean something
+    # only when someone intends to record them. A run on every push or pull
+    # request would spend runner time on numbers nobody reads and would invite
+    # comparing two runs from different shared machines. The job also fails when
+    # perf exits non-zero, which it does on a duplicated mutation or a
+    # crash-matrix violation.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: twinwright
+          POSTGRES_PASSWORD: twinwright
+          POSTGRES_DB: twinwright
+        ports:
+          - 5432:5432
+        # Waiting on pg_isready rather than sleeping is what keeps this job
+        # from being the flaky one.
+        options: >-
+          --health-cmd "pg_isready -U twinwright"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DSN: postgres://twinwright:twinwright@127.0.0.1:5432/twinwright?sslmode=disable
+      OPENAI_API_KEY: ""
+      ANTHROPIC_API_KEY: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: build twinwright
+        run: go build -o twinwright ./cmd/twinwright
+
+      - name: record the runner
+        # What the figures were measured on, written next to the report. The
+        # server version is read with psql when the runner image has it; the
+        # service container is not reachable with docker exec by name, so when
+        # psql is absent the line says the version was not recorded instead of
+        # leaving it out. The DSN is never printed.
+        run: |
+          set -euo pipefail
+          cpu="$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//')"
+          mem="$(grep -m1 '^MemTotal:' /proc/meminfo | sed 's/  */ /g')"
+          pg="not recorded (psql is not on this runner)"
+          if command -v psql > /dev/null; then
+            pg="$(psql "$DSN" -Atc 'show server_version' 2> /dev/null || true)"
+            if [ -z "$pg" ]; then
+              pg="not recorded (psql could not read it)"
+            fi
+          fi
+          {
+            echo "uname: $(uname -a)"
+            echo "nproc: $(nproc)"
+            echo "cpu: $cpu"
+            echo "memory: $mem"
+            echo "go: $(go version)"
+            echo "postgres server: $pg"
+            echo "commit: $GITHUB_SHA"
+          } | tee runner.txt
+
+      - name: measure throughput, recovery, replay and the crash matrix
+        # Three trials, so the report carries a spread and not one sample. The
+        # text summary goes to the log; the full report is perf.json.
+        run: ./twinwright perf --db "$DSN" --trials 3 --out perf.json
+
+      - name: show the report
+        if: always()
+        run: |
+          if [ -f perf.json ]; then
+            jq . perf.json
+          else
+            echo "perf wrote no report" >&2
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: perf-postgres17
+          path: |
+            perf.json
+            runner.txt
+          if-no-files-found: warn
 
