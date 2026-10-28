@@ -310,7 +310,7 @@ func runCLI(args []string, out io.Writer) error {
 		if *model != "" && *model != run.Model {
 			return fmt.Errorf("model mismatch: run uses %s", run.Model)
 		}
-		provider, err := selectProvider(providerCfg.with(run.Provider, run.Model, run.Scenario))
+		provider, err := selectProvider(providerCfg.forRun(run.Provider, run.Model, run.Scenario))
 		if err != nil {
 			return err
 		}
@@ -422,7 +422,14 @@ func runCLI(args []string, out io.Writer) error {
 			if options.Model != "" {
 				modelForRun = options.Model
 			}
-			provider, err = selectProvider(providerCfg.with(providerNameForRun, modelForRun, parent.Scenario))
+			// A provider named with --agent is the operator's choice, and agent flags
+			// that cannot apply to it are refused; one inherited from the parent run
+			// gets the agent flags only if it is exec.
+			chosen := providerCfg.forRun(providerNameForRun, modelForRun, parent.Scenario)
+			if options.Provider != "" {
+				chosen = providerCfg.with(providerNameForRun, modelForRun, parent.Scenario)
+			}
+			provider, err = selectProvider(chosen)
 			if err != nil {
 				return err
 			}
@@ -651,8 +658,19 @@ func runCLI(args []string, out io.Writer) error {
 			return err
 		}
 		defer source.Close()
+		parent, err := source.Run(ctx, args[1])
+		if err != nil {
+			return err
+		}
 		analysis, err := counterfactual.Prepare(ctx, source, args[1], manifest, set, judge, counterfactual.Options{Trials: *trials, Steps: *steps, ProviderFor: func(provider, model, scenario string) (agent.Provider, error) {
-			p, err := selectProvider(providerCfg.with(provider, model, scenario))
+			// The run's own provider is recorded, so the agent flags apply to it only
+			// if it is exec. A different one was named by an intervention, which is the
+			// operator's choice, and flags that cannot apply to it are refused.
+			cfg := providerCfg.with(provider, model, scenario)
+			if provider == parent.Provider {
+				cfg = providerCfg.forRun(provider, model, scenario)
+			}
+			p, err := selectProvider(cfg)
 			if err != nil {
 				return nil, err
 			}

@@ -37,9 +37,14 @@ line says is what runs.
 
 The flags are registered by the same helper as the other provider flags, so `run`,
 `resume`, `fork`, `counterfactual`, `bench`, `shadow` and `worker` all accept them.
-`--agent-command` or `--agent-env` with any other provider is refused by name, and
-so are `--record-cassette` and `--cassette` with `exec`: it makes no HTTP calls, so
-there is nothing to record or serve.
+Where the operator names the provider (`run`, `bench`, `shadow`, `fork --agent`),
+`--agent-command` or `--agent-env` with any other provider is refused by name. Where
+the provider comes from the run's own record (`worker`, `resume`, and the run that
+`fork` and `counterfactual` start from), the flags apply to a run whose provider is
+`exec` and are not applied to any other, so a worker started with `--agent-command`
+still serves the scripted and hosted runs in its queue. `--record-cassette` and
+`--cassette` with `exec` are refused: it makes no HTTP calls, so there is nothing to
+record or serve.
 
 The agent process is started once per turn. It carries nothing between turns
 except the history it is sent, so a run can be resumed by a different process on a
@@ -279,3 +284,4 @@ more.
 - 2026-10-28: a child environment with neither `PATH` nor `HOME` and no passed variable was a nil slice, which `os/exec` reads as "inherit the parent's environment", so the stated "exactly `PATH` and `HOME` plus the named variables" did not hold (EXEC-2); it is now an empty slice that stays empty.
 - 2026-10-28: "nothing survives between turns" was false for what an agent started: the process group was signalled only on a timeout or an output overflow, so a helper left running by a turn that succeeded, or by one that failed because it held the output open, outlived it (EXEC-3). Every turn now ends by killing the group (unix), and on Linux the agent also gets a parent-death SIGKILL so it does not outlive a Twinwright that dies mid-turn (EXEC-12); the claim is now stated as "carries nothing between turns except the history", and the cases it does not cover (a process that left the group, grandchildren of a killed Twinwright, non-Linux platforms) are listed under Bounds and Limits.
 - 2026-10-28: the passed values were masked in the agent's stdout bytes before the response was decoded, so a value that occurs as the digits of a number made a valid response invalid and blamed the agent, one inside an argument rewrote the call, and a value the agent encoded its own way (`\u00e4` as Python writes it, a raw `&`) was not recognised although this ADR said the JSON-string form was matched (EXEC-4, EXEC-8); the response is now decoded first and only its decoded strings are masked, and the sentences above state what is matched, the 8-character floor and the effect on arguments.
+- 2026-10-28: "`--agent-command` or `--agent-env` with any other provider is refused" made a worker started with the agent flags fail every scripted or hosted run it claimed, so one fleet could not serve exec runs and others from one queue (EXEC-5); the refusal now holds where the operator names the provider (`run`, `bench`, `shadow`, `fork --agent`), and where the provider comes from the run's record (`worker`, `resume`, and the run `fork` and `counterfactual` start from) the agent flags apply to exec runs only.

@@ -24,9 +24,15 @@ twinwright run duplicate-charge \
 | `--provider-timeout D` | the deadline of one turn, default 90 seconds |
 
 The flags are accepted by every command that can reach a provider (`run`,
-`resume`, `fork`, `counterfactual`, `bench`, `shadow`, `worker`). `--agent-command`
-and `--agent-env` with any provider other than `exec` are refused, and so are
-`--record-cassette` and `--cassette` with `exec`, which makes no HTTP calls.
+`resume`, `fork`, `counterfactual`, `bench`, `shadow`, `worker`). Where the
+operator names the provider (`run`, `bench`, `shadow`, and `fork --agent`),
+`--agent-command` and `--agent-env` with any provider other than `exec` are
+refused. Where the provider comes from the run's own record (`worker`, `resume`,
+and `fork` and `counterfactual` for the run they start from), the agent flags apply
+to the runs whose provider is `exec` and are not applied to the others, so one
+worker started with `--agent-command` serves scripted, hosted and exec runs from
+the same queue. `--record-cassette` and `--cassette` are refused with `exec`, which
+makes no HTTP calls.
 
 ## Starting the agent
 

@@ -208,7 +208,7 @@ func workerCommand(ctx context.Context, args []string, out io.Writer) error {
 		if err != nil {
 			return store.Run{}, err
 		}
-		provider, err := selectProvider(providerCfg.with(run.Provider, run.Model, run.Scenario))
+		provider, err := selectProvider(providerCfg.forRun(run.Provider, run.Model, run.Scenario))
 		if err != nil {
 			return store.Run{}, err
 		}

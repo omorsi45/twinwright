@@ -33,8 +33,11 @@ Newer commands, and what has to stay aligned with them:
 - `--agent exec` with `--agent-command`, `--agent-env` and the `--agent-container`
   family: the child environment is `PATH`, `HOME` and the named variables only, a
   `NAME=value` is refused, and the command is not stored with the run, so `resume`
-  and `worker` need it again. Keep the flag help, `docs/protocol/agent-v1.md` and
-  its JSON Schemas, `exec_test.go` and ADR 0033 in line.
+  and `worker` need it again. Commands that take a run's provider from its record
+  (`worker`, `resume`, `fork`, `counterfactual`) use `providerConfig.forRun`, which
+  applies the agent flags to exec runs only; commands that name the provider use
+  `with` and refuse them for any other. Keep the flag help, `docs/protocol/agent-v1.md` and
+  its JSON Schemas, `exec_test.go`, `exec_fleet_test.go` and ADR 0033 in line.
 - `make demo` and `make demo-stack`: `make demo` builds the CLI and runs the
   twelve-step `demo` in a temporary directory, and `ci.yml` runs it. `make
   demo-stack` runs `scripts/demo-stack.sh` against Compose, and the `demo-stack`

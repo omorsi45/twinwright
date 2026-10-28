@@ -452,6 +452,10 @@ contains a colon.
   holds that `$HOME`, `*.py`, `$(id)` and `a;b|c` stay literal words.
   `TestResumeOfExecRunNeedsTheCommand` runs the CLI end to end and requires the
   resume without the command to fail naming `--agent-command`.
+  `cmd/twinwright/exec_fleet_test.go` holds that a worker given `--agent-command`
+  drains a scripted run and an exec run from one queue, that `resume`, `fork` and
+  `counterfactual` do the same for a scripted parent, and that `run` and `fork --agent`
+  still refuse the agent flags for a provider the operator named.
   `TestSelectProviderRefusesBadContainerConfigurations` and
   `TestSelectProviderWrapsTheAgentInAContainer` hold the container flags through
   the CLI, including that the mount is made absolute.

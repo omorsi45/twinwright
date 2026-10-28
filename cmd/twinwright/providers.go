@@ -111,6 +111,25 @@ func (c providerConfig) with(name, model, scenario string) providerConfig {
 	return c
 }
 
+// forRun is with for a run whose provider was recorded rather than chosen on
+// this command line: what a worker, resume or fork finds in the ledger.
+//
+// The agent flags describe an exec agent, and a command that serves runs of every
+// provider (one worker serves scripted fixtures and live-provider runs from the
+// same queue) cannot apply them to all of them: for a run whose provider is not
+// exec they are dropped, where openProvider would refuse them. A command that
+// names the provider itself, such as run, bench and shadow, uses with and keeps
+// the refusal, because there the operator asked for a provider and an agent that
+// cannot both be used. The copy leaves the shared config alone.
+func (c providerConfig) forRun(name, model, scenario string) providerConfig {
+	c = c.with(name, model, scenario)
+	if name != "exec" {
+		c.AgentCommand, c.AgentEnv = "", nil
+		c.AgentContainer, c.AgentMount = "", ""
+	}
+	return c
+}
+
 // selectProvider builds the provider for a command that never records. A
 // recording owns a file that has to be closed, which this cannot hand back, so a
 // config that asks for one is refused; openProvider is the entry point for that.

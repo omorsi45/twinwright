@@ -118,6 +118,16 @@ database written by a newer build is refused rather than downgraded.
   also says (`TestExecMaskingKeepsTheResponseValid`, `TestExecMasksEveryStringOfTheDecodedResponse`,
   `TestExecMasksValuesHoweverTheAgentEncodedThem`, `TestExecMasksWhatPythonEncodes`,
   `TestExecMaskedArgumentsAreWhatTheLedgerAndTheToolSee`).
+- **A worker started with exec flags still runs non-exec runs.** `worker` applied
+  `--agent-command` to every run it claimed, and the provider refuses those flags for any
+  provider but exec, so a worker configured to serve an exec run failed every scripted or
+  hosted run in the same queue until it was marked failed. The agent flags now apply to
+  runs whose recorded provider is `exec`, in `worker`, `resume`, and the run `fork` and
+  `counterfactual` start from; `run`, `bench`, `shadow` and `fork --agent` still refuse them
+  for a provider the operator named (`TestWorkerWithAgentFlagsServesAScriptedRun`,
+  `TestResumeOfAScriptedRunIgnoresTheAgentFlags`,
+  `TestForkAndCounterfactualOnAScriptedRunIgnoreTheAgentFlags`,
+  `TestForRunAppliesTheAgentFlagsOnlyToExecRuns`, `TestRunRefusesAgentFlagsForANonExecProvider`).
 
 ### Added
 
