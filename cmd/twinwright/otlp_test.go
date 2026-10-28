@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -138,6 +139,44 @@ func TestResolveOTLPHeaders(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The worker's log line is the only place an operator learns an export failed, and
+// an endpoint that does not parse is the case where the standard library's own text
+// quotes the credential. The exporter reports it without that text.
+func TestWorkerExportFailureForAMalformedEndpointDoesNotLeak(t *testing.T) {
+	const password, token = "endpoint-password-not-a-secret", "query-token-not-a-secret"
+	var logs syncBuffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	dir := t.TempDir()
+	manifestPath := buildBillingManifest(t, dir)
+	db := filepath.Join(dir, "world.db")
+	for _, endpoint := range []string{
+		"http://collector:pa%ss-" + password + "@127.0.0.1:1/?token=" + token,
+		"http://collector:" + password + "@127.0.0.1:1/?token=" + token + "\n",
+		"http://collector:" + password + "@127.0.0.1:notaport/?token=" + token,
+	} {
+		logs.mu.Lock()
+		logs.buf.Reset()
+		logs.mu.Unlock()
+		enqueueBillingRun(t, manifestPath, db)
+		outcomes := drainWorker(t, manifestPath, db, "--otlp-endpoint", endpoint)
+		if len(outcomes) == 0 || outcomes[0].Disposition != "finished" || outcomes[0].TraceExported {
+			t.Fatalf("outcomes=%+v", outcomes)
+		}
+		text := logs.String()
+		if !strings.Contains(text, "trace export failed") {
+			t.Fatalf("no export warning was logged for %q:\n%s", endpoint, text)
+		}
+		for _, secret := range []string{password, token, "pa%ss"} {
+			if strings.Contains(text, secret) {
+				t.Errorf("%q reached the worker log for %q:\n%s", secret, endpoint, text)
+			}
+		}
 	}
 }
 

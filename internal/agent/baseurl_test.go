@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -107,5 +108,46 @@ func TestChatBaseURLQueryIsKept(t *testing.T) {
 				t.Fatalf("the server saw path %q and query %q, want path %q and the query unchanged", path, query, wantPath)
 			}
 		})
+	}
+}
+
+// The cassette records the address through redact.URL, so a base URL's query is
+// not in it, and a replay matches on the path alone. The query used to be glued to
+// the path in the cassette's URL, before the suffix was joined to the path.
+func TestCassetteOfAQueryBaseURLRecordsThePathAndReplays(t *testing.T) {
+	const query = "api-version=2024-02-01&token=cassette-query-not-a-secret"
+	server := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(strings.ReplaceAll(adapterCases()[1].success, "ECHO", "ok")))
+	})
+	path := filepath.Join(t.TempDir(), "query.cassette")
+	rec, err := NewRecordingTransport(http.DefaultTransport, path, "openai-compatible", "m", secretKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := ChatCompletionsProvider{APIKey: secretKey, Model: "m", BaseURL: server.URL + "/v1?" + query, Client: &http.Client{Transport: rec}}
+	liveTurn, err := live.Next(context.Background(), "task", nil, metadataOps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = rec.Close(); err != nil {
+		t.Fatal(err)
+	}
+	c := loadCassette(t, path)
+	recorded := c.Exchanges[0].URL
+	if want := server.URL + "/v1/chat/completions"; recorded != want {
+		t.Fatalf("recorded url = %q, want the path without the query, %q", recorded, want)
+	}
+	// What the CLI does to rebuild the adapter: cut the suffix off the first URL.
+	base, found := strings.CutSuffix(recorded, "/chat/completions")
+	if !found {
+		t.Fatalf("the recorded url %q is not a chat completions endpoint", recorded)
+	}
+	replay := ChatCompletionsProvider{APIKey: "cassette-replay-placeholder", Model: "m", BaseURL: base, Client: &http.Client{Transport: c.Transport()}}
+	turn, err := replay.Next(context.Background(), "task", nil, metadataOps)
+	if err != nil {
+		t.Fatalf("a cassette recorded against a base URL with a query does not replay: %v", err)
+	}
+	if turn.Content != liveTurn.Content {
+		t.Fatalf("replay content = %q, want %q", turn.Content, liveTurn.Content)
 	}
 }
