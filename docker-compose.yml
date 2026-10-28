@@ -1,8 +1,23 @@
 # Local services for developing against the distributed runtime.
 #
-# Neither service is required: Twinwright's default backend is SQLite and its
-# traces print to stdout. Bring these up when you want to exercise the
-# PostgreSQL path or send OTLP spans somewhere that renders them.
+# None of these services is required: Twinwright's default backend is SQLite and
+# its traces print to stdout, and the default test suite starts none of them.
+# Bring them up when you want to exercise the PostgreSQL path, send OTLP spans
+# somewhere that renders them, or scrape a worker.
+#
+#   postgres        the PostgreSQL path (127.0.0.1:5432)
+#   otel-collector  receives OTLP/HTTP (127.0.0.1:4318), prints what it gets and
+#                   forwards it to jaeger; health check on 127.0.0.1:13133
+#   jaeger          stores the spans; UI and query API on 127.0.0.1:16686
+#   prometheus      scrapes a worker started on the host with
+#                   --metrics-addr 0.0.0.0:9095; UI and query API on
+#                   127.0.0.1:9090
+#
+# `docker compose up -d` starts all four. Name services to start fewer, for
+# example `docker compose up -d postgres`.
+#
+# There is no TLS and no authentication on any of them. Every published port is
+# bound to loopback so they are not reachable from other machines.
 
 services:
   postgres:
@@ -28,7 +43,32 @@ services:
     command: ["--config=/etc/otel/config.yaml"]
     volumes:
       - ./deploy/otel-collector.yaml:/etc/otel/config.yaml:ro
+    depends_on:
+      - jaeger
     ports:
       # OTLP/HTTP, which is what `twinwright trace --format otlp` produces and
       # what `--otlp-endpoint` posts to.
       - "127.0.0.1:4318:4318"
+      # The health_check extension, which answers 200 once the collector runs.
+      - "127.0.0.1:13133:13133"
+
+  jaeger:
+    image: jaegertracing/jaeger:2.22.0
+    ports:
+      # The UI and the query API (GET /api/traces/{traceID}). Jaeger's OTLP
+      # receiver on 4317 is not published: only the collector reaches it, over
+      # the Compose network.
+      - "127.0.0.1:16686:16686"
+
+  prometheus:
+    image: prom/prometheus:v3.15.1
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    # The scrape target is a worker running on the host. On Linux the name does
+    # not exist inside a container unless it is mapped, and host-gateway maps it
+    # to the host's address on the bridge, so the worker has to listen on that
+    # address (0.0.0.0, or the bridge address) and not on loopback alone.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:9090:9090"

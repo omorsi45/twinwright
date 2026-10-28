@@ -6,8 +6,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"twinwright/internal/agent"
 	"twinwright/internal/authz"
@@ -422,5 +424,88 @@ func TestBuildIsDeterministic(t *testing.T) {
 	}
 	if _, err := Build(context.Background(), s, "R-missing"); err == nil {
 		t.Fatal("missing run traced")
+	}
+}
+
+// interruptedOnce refuses the first model call with the given interruption and
+// then behaves like the billing fixture, so the ledger holds exactly one
+// provider.interrupted event.
+type interruptedOnce struct {
+	interrupt *agent.CallInterrupted
+	refused   bool
+}
+
+func (p *interruptedOnce) Next(ctx context.Context, task string, history []agent.Message, ops []compiler.Operation) (agent.Message, error) {
+	if !p.refused {
+		p.refused = true
+		return agent.Message{}, p.interrupt
+	}
+	return agent.ScriptedProvider{}.Next(ctx, task, history, ops)
+}
+
+// A rate-limited or failed attempt is only useful in a trace if the trace says
+// what the provider answered and how long it asked the caller to wait. Both are
+// in the ledger payload; the span event has to carry them, and has to leave them
+// out when the payload does not have them so a scripted run's trace is the one
+// it always was.
+func TestBuildKeepsTheStatusAndWaitOfAProviderInterruption(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		interrupt *agent.CallInterrupted
+		want      map[string]any
+	}{
+		{
+			name:      "rate limited with a wait",
+			interrupt: &agent.CallInterrupted{Kind: agent.InterruptRateLimited, Status: 429, RetryAfter: 7 * time.Second, Err: errors.New("provider answered HTTP 429")},
+			want:      map[string]any{"kind": "rate_limited", "attempt": 1, "status": 429, "retry_after_ms": 7000},
+		},
+		{
+			name:      "server error without a wait",
+			interrupt: &agent.CallInterrupted{Kind: agent.InterruptServerError, Status: 503, Err: errors.New("provider answered HTTP 503")},
+			want:      map[string]any{"kind": "server_error", "attempt": 1, "status": 503},
+		},
+		{
+			name:      "timeout has neither",
+			interrupt: &agent.CallInterrupted{Kind: agent.InterruptTimeout, Deadline: 90 * time.Second, Err: errors.New("deadline exceeded")},
+			want:      map[string]any{"kind": "timeout", "attempt": 1, "deadline_ms": 90000},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newStore(t)
+			manifest := billingManifest(t)
+			ctx := context.Background()
+			world, err := s.SeedScenario(ctx, 42, manifest.Digest, "duplicate-charge")
+			if err != nil {
+				t.Fatal(err)
+			}
+			run, err := s.CreateRun(ctx, world.ID, "duplicate-charge", "scripted", "fixture-v1", "task", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner := agent.Runner{
+				Store: s, Dispatch: &dispatch.Dispatcher{Store: s, Manifest: manifest}, Manifest: manifest,
+				Provider: &interruptedOnce{interrupt: tc.interrupt},
+				// The wait is recorded, not served: the test must not sleep.
+				Sleep: func(context.Context, time.Duration) error { return nil },
+			}
+			if _, err = runner.Execute(ctx, run.ID, 20); err != nil {
+				t.Fatal(err)
+			}
+			built := build(t, s, run.ID)
+			var got []map[string]any
+			for _, child := range built.Root.Children {
+				for _, event := range child.Events {
+					if event.Name == "provider.interrupted" {
+						got = append(got, event.Attributes)
+					}
+				}
+			}
+			if len(got) != 1 || !reflect.DeepEqual(got[0], tc.want) {
+				t.Fatalf("interruption events = %v, want one with %v", got, tc.want)
+			}
+			if built.Summary.Interruptions != 1 {
+				t.Fatalf("summary interruptions = %d", built.Summary.Interruptions)
+			}
+		})
 	}
 }

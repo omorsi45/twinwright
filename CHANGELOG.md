@@ -181,6 +181,65 @@ database written by a newer build is refused rather than downgraded.
   message naming what is not set. Nothing runs them in CI, and neither had been
   run against a vendor when this was written.
 
+- **OTLP spans tie back to the ledger, and a worker can export the trace of a run
+  it finishes.** Every exported span carries `twinwright.event.start_seq` and
+  `twinwright.event.end_seq` (integers, the first and last ledger event the span
+  covers) and `twinwright.run_id`, so someone reading the collector can name the
+  events behind a span without the database. They are added in the OTLP projection
+  only, so `trace --format json` keeps its attributes
+  (`TestOTLPSpansCarryLedgerSequence`). `trace.TraceIDFor(runID)` is the one
+  derivation of the trace ID that `Build`, the fork link and the worker share
+  (`TestTraceIDForIsTheIDBuildUses`), and the delivery `trace --otlp-endpoint`
+  reports gains `trace_id` (`TestDeliveryReportsTheTraceID`). `twinwright worker`
+  gains `--otlp-endpoint` and `--otlp-header`. Unlike `trace`, the worker does not
+  default the endpoint from `OTEL_EXPORTER_OTLP_ENDPOINT`, so export is off unless
+  asked for. When a claim ends `finished` on a `completed` run, the worker builds
+  and exports that run's trace under a 10 second bound, and the `claim finished`
+  log line gains `trace_id`. A paused, failed, requeued or fenced claim does not
+  export. Export is best effort: a failure is logged at warn level with the trace
+  ID, with the endpoint's userinfo, the header value and the configured provider
+  keys scrubbed from the text, and never changes the claim's disposition
+  (`TestWorkerExportFailureDoesNotFailTheRun`,
+  `TestWorkerExportFailureWarnsWithoutLeakingCredentials`). Nothing about the
+  worker, the export or the trace ID reaches the event ledger
+  (`TestWorkerExportsACompletedRunsTrace` drains the same scripted run with and
+  without export and requires the same sequence of event types). Delivery is still
+  at-least-once: a run delivered twice can be exported twice, to the same trace
+  ID.
+- **Worker metrics for run duration, queue wait and worker liveness.** The
+  histogram `twinwright_worker_run_duration_seconds` (labelled `worker`, buckets
+  0.05 to 120 seconds and `+Inf`) is observed for every claim whatever its
+  disposition. `twinwright_queue_oldest_runnable_age_seconds` is how long the
+  longest-waiting runnable entry has been available, 0 when nothing is runnable
+  (an entry still in backoff does not count), and
+  `twinwright_worker_last_seen_age_seconds{worker}` is the time since each
+  registered worker last registered, claimed or renewed a lease
+  (`TestRunDurationHistogramIsCumulative`, `TestOldestRunnableAge`,
+  `TestWorkerLastSeenAge`). The database-derived gauges are served by every worker
+  for the database it points at, so with several workers on one database scrape one
+  of them or aggregate with `max`, never `sum`. See ADR 0032.
+- **An observability stack in Compose, and an `observability` CI job that checks it.**
+  `docker-compose.yml` gains `jaeger` (`jaegertracing/jaeger:2.22.0`, UI and query
+  API on `127.0.0.1:16686`) and `prometheus` (`prom/prometheus:v3.15.1`, on
+  `127.0.0.1:9090`, scraping `host.docker.internal:9095` every two seconds from
+  `deploy/prometheus.yml`). The collector keeps `127.0.0.1:4318`, forwards to Jaeger
+  as well as printing what it receives, and exposes a health endpoint on
+  `127.0.0.1:13133`. `docker compose up -d` now starts all four services; name the
+  ones you want to start fewer. Two opt-in tests (`TWINWRIGHT_TEST_OTEL=1`, skipped
+  otherwise) use the stack: `TestSpansAreQueryableInJaeger` exports a scripted
+  `company-incident` run through the collector and reads it back from Jaeger by
+  trace ID, requiring the same span count, a root with the local root's name and a
+  span carrying `twinwright.event.start_seq`; `TestPrometheusScrapesAWorker` serves
+  a worker's metrics and requires Prometheus to return a `runnable` queue entry
+  count of 1 and the worker's claims counter. The comparison and polling logic have
+  ordinary tests against canned answers. The `observability` job in
+  `integration.yml` starts the three services, waits on the collector's health
+  endpoint and Jaeger's UI port, runs the two tests, prints `docker compose logs` on
+  failure and removes the stack. The stack has no TLS and no authentication, every
+  published port is on loopback, and the gated metrics listener binds `0.0.0.0`
+  only in that test. The job had not run on GitHub Actions when this was written;
+  the two tests passed against the stack on a developer machine. See ADR 0032.
+
 ### Fixed
 
 - **A provider turn that reuses a call ID now fails the turn.** A call ID already
@@ -238,6 +297,25 @@ database written by a newer build is refused rather than downgraded.
   masked on the success path, and `redact.Secrets` ignores a secret shorter than 8
   characters. See ADR 0031.
 
+- **The metrics document is well formed, and its counters can be alerted on.** The
+  counters' `HELP` and `TYPE` lines were all written first and their samples after,
+  so no family was contiguous, which the Prometheus text format requires.
+  Each family is now `HELP`, `TYPE`, then its samples
+  (`TestExpositionIsWellFormed`). A counter's label name was guessed from whichever
+  value was passed to it, so any non-empty label became `disposition`; each counter
+  now declares its label, and only `twinwright_worker_claim_disposition_total`
+  carries `disposition` (`TestCounterLabelNamesAreDeclaredPerMetric`, and
+  `TestMetricsDispositionLabelsMatchTheWorkerDispositions` keeps the four
+  dispositions equal to the worker's). A counter existed only after its first
+  increment, so `rate()` had no earlier sample to start from; every counter now
+  renders a zero sample from the first scrape (`TestCountersRenderZeroBeforeFirstUse`).
+  `twinwright_worker_lease_renewals_total` could never move, because nothing counted
+  a renewal; the worker now counts each successful renewal
+  (`TestRenewalsAreCounted`). Label values went through `%q` after their own
+  escaping, which doubled backslashes in worker IDs; they are escaped once. Metric
+  names, and the labels of `twinwright_queue_entries` and the run-status gauges,
+  are unchanged. See ADR 0032.
+
 ### Changed
 
 - **The Go directive is 1.27.3 to take the fix for GO-2026-6809.** The advisory
@@ -280,9 +358,11 @@ database written by a newer build is refused rather than downgraded.
   attempt. Replay never waits: a replayed turn carries its interruptions, and a
   replay through a cassette skips the wait (`TestRetriedRunStillReplays`,
   `TestCassetteReplayDoesNotWaitOutARecordedRateLimit`). Every other non-2xx status,
-  501, 505 and 529 included, stays an ordinary error and is not retried. Limit:
-  `twinwright trace` copies an interruption's kind, attempt, reason and deadline
-  into the span but not its `status` or `retry_after_ms`. See ADR 0031.
+  501, 505 and 529 included, stays an ordinary error and is not retried. The span
+  event `twinwright trace` writes for each interruption keeps the `status` and
+  `retry_after_ms` as well as the kind, attempt, reason and deadline
+  (`TestBuildKeepsTheStatusAndWaitOfAProviderInterruption`). See ADR 0031 and
+  ADR 0032.
 
 ## v0.1.0 - 2026-09-30
 

@@ -253,8 +253,9 @@ here.
 - Cassettes for forked or resumed runs are not tested, and neither is an Anthropic
   record and replay. The OpenAI Responses and chat completions adapters were
   recorded and replayed in tests.
-- Trace export copies an interruption's kind, attempt, reason and deadline but not
-  its `status` or `retry_after_ms`. They are in the ledger and in replay.
+- Trace export copied an interruption's kind, attempt, reason and deadline but not
+  its `status` or `retry_after_ms`, which were in the ledger and in replay only.
+  ADR 0032 closes that: the span event keeps both when the payload has them.
 - `--record-cassette` exists on `run` only.
 - A `Do` error that is really a configuration mistake, such as an unsupported URL
   scheme, is a `transport` interruption, so the run waits a second and tries once

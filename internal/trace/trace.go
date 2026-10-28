@@ -254,13 +254,14 @@ func (b *builder) add(event store.Event) error {
 	case "provider.interrupted":
 		// The attempt belongs to the model call that is open, so the note lands on
 		// that span rather than at the root: a reader looking at a slow turn sees
-		// why it was slow.
+		// why it was slow. status and retry_after_ms are in the payload only for a
+		// rate limit or a server error, and pick leaves out what is not there.
 		span := b.current
 		if span == nil || span.Name != "model.invocation" {
 			return fmt.Errorf("provider interruption without a model request")
 		}
 		b.summary.Interruptions++
-		b.note(span, event, "provider.interrupted", pick(payload, "kind", "attempt", "reason", "deadline_ms"))
+		b.note(span, event, "provider.interrupted", pick(payload, "kind", "attempt", "reason", "deadline_ms", "status", "retry_after_ms"))
 	case "tool.request":
 		span := b.span("tool.call", event)
 		span.Attributes["call_id"], span.Attributes["operation"] = payload["call_id"], payload["operation_id"]

@@ -1,0 +1,24 @@
+# Prometheus for local development and for the observability CI job.
+#
+# It scrapes one worker's metrics endpoint, which `twinwright worker
+# --metrics-addr` serves. host.docker.internal is the host as seen from the
+# container (docker-compose.yml maps it with host-gateway), so a worker started
+# on the host with --metrics-addr 0.0.0.0:9095 is scraped here. On Linux the
+# container reaches the host through the bridge gateway, which a loopback-only
+# listener does not answer, so the worker has to listen on 0.0.0.0 or on the
+# bridge address. The endpoint has no authentication: do that only on a machine
+# you control.
+#
+# Every worker serves the same database-derived gauges (queue depth, run
+# statuses, ledger counts) for the database it points at. When several workers
+# share one database, scrape one of them or aggregate those gauges with max,
+# never sum.
+
+global:
+  # Short, so the CI job and a local run see a first sample within seconds.
+  scrape_interval: 2s
+
+scrape_configs:
+  - job_name: twinwright-workers
+    static_configs:
+      - targets: ["host.docker.internal:9095"]

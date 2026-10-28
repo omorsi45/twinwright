@@ -8,6 +8,11 @@ name: Integration
 # Ollama container: no hosted provider is called, and no key is configured in
 # this workflow. The hosted-provider live tests (TestLiveOpenAIToolCall and
 # TestLiveAnthropicToolCall) are opt-in and run nowhere in CI.
+#
+# Jobs: postgres (storage and the distributed runtime on two PostgreSQL majors),
+# docker (the container executor against a real daemon), observability (spans
+# read back from Jaeger and a worker's metrics scraped by Prometheus) and
+# real-model (a small model, recorded and replayed).
 
 on:
   push:
@@ -112,6 +117,64 @@ jobs:
           ./twinwright container start --config examples/container/http-echo.yaml
           ./twinwright container status --config examples/container/http-echo.yaml
           ./twinwright container stop --config examples/container/http-echo.yaml
+
+  observability:
+    name: spans queryable in Jaeger, metrics scraped by Prometheus
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # The unit tests answer the OTLP exporter and the metrics endpoint from
+    # in-process servers, which shows the bytes are sent and are in the documented
+    # format and nothing about what a collector or a scraper does with them. This
+    # job starts the Compose collector, Jaeger and Prometheus and has two opt-in
+    # tests (TWINWRIGHT_TEST_OTEL=1) check the two claims against them: that the
+    # spans of a scripted run, exported through the collector, can be read back
+    # from Jaeger by trace ID, and that Prometheus scrapes a worker's metrics
+    # endpoint and answers a query for them. It calls no model.
+    #
+    # The images are the pinned tags in docker-compose.yml. Ports are published on
+    # the runner's loopback only, except that the test serves metrics on 0.0.0.0:9095
+    # because the Prometheus container reaches the host through the bridge gateway.
+    # Nothing on the stack has TLS or authentication, and the runner is discarded
+    # with the job.
+    env:
+      TWINWRIGHT_TEST_OTEL: "1"
+      OPENAI_API_KEY: ""
+      ANTHROPIC_API_KEY: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: start the collector, Jaeger and Prometheus
+        run: docker compose up -d otel-collector jaeger prometheus
+
+      - name: wait for the collector and Jaeger
+        # Waiting on the health endpoint and the UI port, rather than sleeping, is
+        # what keeps this job from being the flaky one.
+        run: |
+          for _ in $(seq 1 60); do
+            if curl -fsS --max-time 2 http://127.0.0.1:13133/ > /dev/null &&
+              curl -fsS --max-time 2 http://127.0.0.1:16686/ > /dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose ps
+          echo "the collector (13133) or Jaeger (16686) did not answer" >&2
+          exit 1
+
+      - name: export a run and query it back, scrape a worker and query it back
+        run: go test -count=1 -v -run 'TestSpansAreQueryableInJaeger|TestPrometheusScrapesAWorker' ./internal/trace/ ./internal/metrics/
+
+      - name: stack logs
+        if: failure()
+        run: docker compose logs
+
+      - name: stop the stack
+        if: always()
+        run: docker compose down -v
 
   real-model:
     name: a real small model on a local Ollama server, recorded and replayed
