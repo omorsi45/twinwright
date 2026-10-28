@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"twinwright/internal/agent/exectest"
 	"twinwright/internal/dispatch"
@@ -169,5 +170,64 @@ func TestExecStderrSecretsNeverReachTheLedger(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// How the agent was started is not part of a run. An agent that cannot be started
+// fails the run with the operating system's reason, and not with the command that
+// was tried, whose path and arguments are the operator's.
+func TestExecStartFailureNeverPutsTheCommandInTheLedger(t *testing.T) {
+	cases := []struct {
+		name    string
+		command []string
+		reason  string
+	}{
+		{"a path that does not exist", []string{"/home/operator-name/private-agents/billing-agent-v7", "--private-flag"}, "no such file"},
+		{"a name that is not on PATH", []string{"private-agent-billing-v7", "--private-flag"}, "not found"},
+	}
+	ctx := context.Background()
+	manifest := execBillingManifest(t)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, err := store.Open(filepath.Join(t.TempDir(), "world.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			world, err := s.Seed(ctx, 42, manifest.Digest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			run, err := s.CreateRun(ctx, world.ID, "duplicate-charge", "exec", "missing@test", "task", "listCharges")
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner := Runner{Store: s, Dispatch: &dispatch.Dispatcher{Store: s, Manifest: manifest}, Manifest: manifest, Provider: ExecProvider{Command: tc.command, Timeout: time.Second}}
+			if _, err := runner.Execute(ctx, run.ID, 5); err == nil {
+				t.Fatal("the run did not fail")
+			}
+			events, err := s.Events(ctx, run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			seen := false
+			for _, event := range events {
+				payload := string(event.Payload)
+				for _, word := range []string{tc.command[0], "operator-name", "private-agents", "--private-flag"} {
+					if strings.Contains(payload, word) {
+						t.Errorf("ledger event %s (%s) holds %q: %s", event.ID, event.Type, word, payload)
+					}
+				}
+				if event.Type == "error" {
+					seen = true
+					if !strings.Contains(strings.ToLower(payload), tc.reason) || !strings.Contains(payload, "start") {
+						t.Errorf("the error event gives no reason (%q): %s", tc.reason, payload)
+					}
+				}
+			}
+			if !seen {
+				t.Fatal("no error event was recorded")
+			}
+		})
 	}
 }

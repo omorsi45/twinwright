@@ -251,7 +251,12 @@ boundary is the Docker Desktop VM. See
 
 The run records the provider name `exec`, the `--model` you gave, and the turns,
 exactly as for any other provider. It does **not** record the command, its
-arguments or the environment names. Replay verifies a run from its recorded turns
+arguments or the environment names: an agent that cannot be started fails the run
+with the operating system's reason (for example "no such file or directory") and not
+the command that was tried. The stderr tail of an agent that fails after it started
+is quoted in the error and is the agent's own text, so a traceback that prints its
+script path puts that path in the ledger; masking covers the passed values and
+key-like tokens, not paths. Replay verifies a run from its recorded turns
 and needs no agent. Continuing an exec run, with `resume` or a `worker`, needs
 `--agent-command` again, and an exec run started elsewhere fails with an error
 that names that flag.

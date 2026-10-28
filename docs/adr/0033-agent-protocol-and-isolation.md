@@ -131,8 +131,14 @@ made on the text the agent wrote, before the tail is quoted and before it is cut
 
 The command line and the environment names are not stored. The ledger records the
 provider name `exec` and the `--model`, and the turns, as for any provider. That
-keeps the ledger what ADR 0029 says it is, the agent's trajectory: nothing about
-the machine, the operator's setup or who executed a run enters it. The cost is that continuing an exec run, with `resume` or
+keeps the ledger what ADR 0029 says it is, the agent's trajectory: on a run that
+succeeds, nothing about the machine, the operator's setup or who executed a run
+enters it. An agent that cannot be started fails the run with the operating
+system's reason ("no such file or directory") and not the command that was tried.
+An agent that fails after it started is quoted from its own stderr, which is its
+words and not Twinwright's: a traceback that prints its script path puts that path
+in the error, and the masking covers the passed values and key-like tokens, not
+paths. The cost is that continuing an exec run, with `resume` or
 a worker, needs `--agent-command` again, and the error names the flag.
 
 ### The agent proposes; the dispatcher decides
@@ -326,3 +332,4 @@ more.
 - 2026-10-28: the docker client was given only `PATH` and `HOME`, so a daemon configured through `DOCKER_HOST` and its relatives was unreachable, and the only workaround, `--agent-env DOCKER_HOST`, also put the daemon address in the untrusted container (EXEC-14); the five connection variables now go to the client process only.
 - 2026-10-28: the Docker evidence for container mode could pass without running: a renamed test matched nothing, a failed image check skipped, and the network probe accepted any "blocked" answer (EXEC-13); the CI step requires the passes by name, the isolation test requires errno 101, and a bridge-network control shows the probe can connect.
 - 2026-10-28: the decoder accepted a `usage` that was `null`, `{}` or missing counts and recorded zeros, although the response schema requires an object with all three (EXEC-10); a `usage` that is there is now held to the schema.
+- 2026-10-28: "the ledger records nothing about how the agent was started" was false for a failed turn: the error for an agent that could not be started carried the command's path (`fork/exec /home/operator/...`), and a traceback in the stderr tail can carry a script path (EXEC-11); a start failure now gives the operating system's reason without the command, and the sentence above says what holds for a run that succeeds and what a failed agent's own stderr can still contain.

@@ -229,6 +229,9 @@ func TestExecProviderRefusesAnUnstartableAgent(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "start") {
 		t.Fatalf("err = %v, want a start failure", err)
 	}
+	if strings.Contains(err.Error(), "no-such-agent") {
+		t.Fatalf("err = %v, which names the command that was run", err)
+	}
 	var interrupt *CallInterrupted
 	if errors.As(err, &interrupt) {
 		t.Fatalf("a missing binary is not transient, but was classified %+v", interrupt)

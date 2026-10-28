@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"slices"
@@ -291,7 +292,7 @@ func (p ExecProvider) Next(ctx context.Context, task string, history []Message, 
 		return Message{}, fail("prepare agent: %v", err)
 	}
 	if err = cmd.Start(); err != nil {
-		return Message{}, fail("start agent: %v", err)
+		return Message{}, fail("start agent: %s", startFailure(err))
 	}
 	// Written from a goroutine so that an agent which never reads cannot block
 	// the turn on a full pipe. Its errors are the agent having exited or been
@@ -419,6 +420,24 @@ func parentEnv(names ...string) []string {
 		}
 	}
 	return pairs
+}
+
+// startFailure says why an agent could not be started without saying what was
+// being started. os/exec names the program in its error ("fork/exec /home/me/agent:
+// no such file or directory"), and the program is how the operator started the
+// agent, which the ledger is not to record: only the operating system's reason is
+// kept.
+func startFailure(err error) string {
+	const prefix = "the agent command could not be started"
+	var pathErr *fs.PathError
+	var execErr *exec.Error
+	switch {
+	case errors.As(err, &pathErr):
+		return prefix + ": " + pathErr.Err.Error()
+	case errors.As(err, &execErr):
+		return prefix + ": " + execErr.Err.Error()
+	}
+	return prefix
 }
 
 // removeContainer runs the provider's Cleanup, if it has one, for a turn that was

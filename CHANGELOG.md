@@ -124,6 +124,13 @@ database written by a newer build is refused rather than downgraded.
   recorded zeros or nothing for a turn's cost. It now refuses all three, and an unknown member,
   a count that is not an integer and a non-object (`TestExecProviderRejectsMisbehavingAgents`,
   `TestExecUsageIsHeldToTheSchema`).
+- **An agent that cannot be started no longer puts its command in the ledger.** The error for a
+  start failure quoted what `os/exec` says, `fork/exec /home/operator/private-agents/agent: no
+  such file or directory`, so the path of the command went into the run's `error` event, though
+  the guide said the ledger records nothing about how the agent was started. The error now gives
+  the operating system's reason alone (`TestExecStartFailureNeverPutsTheCommandInTheLedger`). The
+  stderr of an agent that failed after starting is its own text and can still name its script, and
+  the guide and ADR 0033 now say that the claim holds for a run that succeeds.
 - **The test for the asynchronous stdin write now fails if the write is made synchronous.** The existing
   guard used an agent that exits at once, which closes the pipe, so a synchronous write
   failed with EPIPE instead of blocking and the test passed with the goroutine removed;

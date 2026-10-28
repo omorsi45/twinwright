@@ -388,8 +388,12 @@ is what it is trusted with, and the answer is deliberately small.
   does not outlive the turn; on Linux the agent is also killed if Twinwright dies
   mid-turn. A process that left the group, grandchildren of a killed Twinwright
   and platforms other than unix are not covered.
-- The command line and the environment names are not part of the run, so the
-  ledger records nothing about how the agent was started.
+- The command line and the environment names are not part of the run, so a run
+  that succeeds records nothing about how the agent was started. An agent that
+  cannot be started fails with the operating system's reason and not the command
+  (`TestExecStartFailureNeverPutsTheCommandInTheLedger`); the stderr tail of an
+  agent that failed after it started is its own text and can name its script, which
+  the masking of passed values and key-like tokens does not cover.
 
 Container mode (`--agent-container`) puts the same process behind
 `docker run --rm -i --read-only --cap-drop ALL --security-opt no-new-privileges
