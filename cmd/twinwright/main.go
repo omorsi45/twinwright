@@ -41,7 +41,7 @@ func main() {
 
 func runCLI(args []string, out io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: twinwright version|doctor|build|build-world|run|resume|worker|enqueue|queue|inspect|trace|replay|checkpoints|fork|compare|evaluate|counterfactual|bench|gate|shadow|container|demo ...")
+		return fmt.Errorf("usage: twinwright version|doctor|build|build-world|run|resume|worker|enqueue|queue|inspect|trace|replay|checkpoints|fork|compare|evaluate|counterfactual|bench|gate|perf|shadow|container|demo ...")
 	}
 	ctx := context.Background()
 	switch args[0] {
@@ -51,6 +51,8 @@ func runCLI(args []string, out io.Writer) error {
 		return cmdDemo(args[1:], out)
 	case "gate":
 		return gateCommand(args[1:], out)
+	case "perf":
+		return perfCommand(ctx, args[1:], out)
 	case "doctor":
 		return doctorCommand(ctx, args, out)
 	case "worker":

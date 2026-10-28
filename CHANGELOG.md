@@ -13,6 +13,25 @@ database written by a newer build is refused rather than downgraded.
 
 ### Added
 
+- **`twinwright perf` measures the platform workloads and writes a report that says
+  what produced it.** It runs the scripted duplicate-charge scenario, the one the
+  crash matrix and the benchmark suite run, through four workloads: fleet
+  throughput (`--workers 1,2,4,8` in-process workers draining `--runs` queued runs
+  under fenced leases), crash recovery (a worker killed just after its first refund
+  commits, then the time until a polling worker finishes the run, for each of
+  `--lease-ttls`, with the committed refunds beyond one counted), replay
+  (`replay.Verify` timed over `--replay-runs` finished runs), and the whole
+  duplicate-charge crash matrix. `--trials` repeats the throughput and recovery
+  measurements and each is reported as a minimum, median and maximum. The JSON report
+  (`--out`, required) carries the backend (`sqlite` or `postgres`, never the DSN),
+  the configuration, and an environment block with the build, Go version, OS,
+  architecture, CPU count, seed and start time. The command exits 1 after writing the
+  report when a recovery duplicated a committed mutation or the crash matrix reported
+  a violation, and 2 for bad input such as an empty list item, a non-positive worker
+  count or a lease TTL under one second. `make perf` runs it on SQLite into
+  `perf.json`, which is git-ignored. A figure in the report is one machine's
+  measurement, not a property of the project.
+
 - **A hardened container for an exec agent, and ADR 0033 for the protocol and the
   isolation.** `--agent-container IMAGE` runs the agent command behind `docker run
   --rm -i --read-only --cap-drop ALL --security-opt no-new-privileges --user
