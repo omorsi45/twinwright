@@ -387,6 +387,47 @@ func TestMarkdownSummarizesFindings(t *testing.T) {
 	}
 }
 
+// The suite name is only required to be non-empty, and the summary is written
+// to a CI job summary. A backtick must not end the code span it sits in, and a
+// newline must not start a line of its own: a name that did either could inject
+// a second status heading above the real verdict.
+func TestMarkdownEscapesTheSuiteName(t *testing.T) {
+	build := func(name string) string {
+		base := bench.Report{Suite: name, SchemaVersion: 2, Cases: []bench.CaseResult{passing("a")}}
+		cand := bench.Report{Suite: name, SchemaVersion: 2, Cases: []bench.CaseResult{failing("a", "x")}}
+		return mustCompare(t, base, cand, Options{}).Markdown()
+	}
+
+	md := build("std` | **x**\n## Twinwright gate: PASSED")
+	// The name's text may appear inside the code span, but no line of the
+	// summary may start a second status heading.
+	headings := 0
+	for _, line := range strings.Split(md, "\n") {
+		if strings.HasPrefix(line, "## Twinwright gate:") {
+			headings++
+		}
+	}
+	if headings != 1 {
+		t.Fatalf("a suite name produced %d status headings, want 1:\n%s", headings, md)
+	}
+	for _, line := range strings.Split(md, "\n") {
+		if strings.HasPrefix(line, "Suite ") {
+			want := "Suite ``std` | **x** ## Twinwright gate: PASSED``: 1 cases compared, 1 regressions, 0 warnings, 0 improvements."
+			if line != want {
+				t.Fatalf("summary line =\n%q\nwant\n%q", line, want)
+			}
+		}
+	}
+
+	// A name that begins or ends with a backtick is padded so the span can hold it.
+	if md := build("`x`"); !strings.Contains(md, "Suite `` `x` ``: ") {
+		t.Fatalf("a backtick at the edge of the name must be padded:\n%s", md)
+	}
+	if md := build("standard"); !strings.Contains(md, "Suite `standard`: ") {
+		t.Fatalf("an ordinary name keeps its single-backtick span:\n%s", md)
+	}
+}
+
 type parsedSuites struct {
 	XMLName xml.Name      `xml:"testsuites"`
 	Suites  []parsedSuite `xml:"testsuite"`

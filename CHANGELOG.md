@@ -13,6 +13,12 @@ database written by a newer build is refused rather than downgraded.
 
 ### Fixed
 
+- **The gate's Markdown summary no longer lets a suite name change its layout.** The suite name
+  was printed raw inside a code span, so a backtick in it ended the span and a line break
+  started a line of its own, which could put a second `## Twinwright gate: PASSED` heading into
+  a CI job summary right after a failed verdict. The name is now rendered with a backtick fence
+  longer than any run inside it and line breaks become spaces
+  (`TestMarkdownEscapesTheSuiteName`).
 - **The gate refuses a case it cannot judge instead of passing it.** A candidate case whose
   status was anything but `passed`, `failed` or `error` (`skipped`, `PASSED`, `timeout`, empty)
   made a passed baseline case "regress" to it silently and the gate exited 0; a case with an

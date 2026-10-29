@@ -15,8 +15,8 @@ func (r Result) Markdown() string {
 		status = "FAILED"
 	}
 	fmt.Fprintf(&b, "## Twinwright gate: %s\n\n", status)
-	fmt.Fprintf(&b, "Suite `%s`: %d cases compared, %d regressions, %d warnings, %d improvements.\n",
-		r.Candidate, r.Compared, len(r.Regressions), len(r.Warnings), len(r.Improvements))
+	fmt.Fprintf(&b, "Suite %s: %d cases compared, %d regressions, %d warnings, %d improvements.\n",
+		codeSpan(r.Candidate), r.Compared, len(r.Regressions), len(r.Warnings), len(r.Improvements))
 	section(&b, "Regressions", r.Regressions)
 	section(&b, "Warnings", r.Warnings)
 	section(&b, "Improvements", r.Improvements)
@@ -43,4 +43,28 @@ func cell(s string) string {
 	s = strings.ReplaceAll(s, "|", `\|`)
 	s = strings.ReplaceAll(s, "\r", " ")
 	return strings.ReplaceAll(s, "\n", " ")
+}
+
+// codeSpan renders s as one inline code span. A line break would start a new
+// line of the summary, so it becomes a space, and the delimiter is a backtick
+// run longer than any run inside s, so a backtick in the name cannot end the
+// span early. CommonMark strips one space from each end of a span whose content
+// has a space at both, which is how a name that starts or ends with a backtick
+// is held.
+func codeSpan(s string) string {
+	s = strings.NewReplacer("\r\n", " ", "\r", " ", "\n", " ").Replace(s)
+	longest, run := 0, 0
+	for _, r := range s {
+		if r == '`' {
+			run++
+			longest = max(longest, run)
+		} else {
+			run = 0
+		}
+	}
+	if strings.HasPrefix(s, "`") || strings.HasSuffix(s, "`") {
+		s = " " + s + " "
+	}
+	fence := strings.Repeat("`", longest+1)
+	return fence + s + fence
 }
