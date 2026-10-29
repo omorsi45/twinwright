@@ -172,7 +172,8 @@ What each test is:
   equal to the reference, the recovered ledger verifying under `replay.Verify`,
   the latest checkpoint at or before the crash and the final checkpoint
   reconstructing, model requests equal to responses, and the dead worker's fence
-  refused for a new call and for an already committed one.
+  refused for a new call, for an already committed one and for the runner's own
+  writes (a model turn and a status change).
 - `TestCrashMatrixPostgres` runs the first and last occurrence of each point on
   PostgreSQL when `TWINWRIGHT_TEST_POSTGRES_DSN` is set. It is skipped without a
   server. The `postgres` job of the Integration workflow sets the DSN and runs

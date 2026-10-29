@@ -13,6 +13,15 @@ database written by a newer build is refused rather than downgraded.
 
 ### Fixed
 
+- **The runner's own writes now have a test that a superseded fence is refused.** The
+  model request, the model turn (which overwrites the transcript and step), a provider
+  failure and the completed, paused and failed statuses are fenced in code, but only the
+  dispatcher's writes had a stale-worker test: removing the fence from all seven runner
+  calls passed every suite. A stalled runner whose lease was taken over is now shown unable
+  to rewrite the finished run (`TestStaleRunnerCannotCommitAModelTurnAfterTakeover`), each
+  of the seven writes is reached on its own (`TestStaleRunnerWritesNothingAfterTakeover`),
+  and the crash matrix has the dead worker attempt a model turn and a status change in
+  every case. No behaviour changed.
 - **Commands that take `--db` stopped printing the PostgreSQL password when it holds an
   unencoded `/`, `#` or `?`.** The `perf` fix did not reach the store's own open, so
   `run`, `worker`, `queue`, `trace` and the rest printed `url.Parse`'s quote of the

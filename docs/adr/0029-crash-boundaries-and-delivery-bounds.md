@@ -55,8 +55,10 @@ delivery there, expires the lease, lets a second worker take over, and checks:
 - `replay.Verify` passes on the recovered ledger;
 - the latest checkpoint at or before the crash, and the final one, reconstruct;
 - model requests equal model responses;
-- the dead worker's fence is refused for a new mutating call and for a call ID
-  that was already committed.
+- the dead worker's fence is refused for a new mutating call, for a call ID
+  that was already committed, and for the runner's own writes (a model turn,
+  which would overwrite the transcript and step, and a status change), which
+  leave the run row and the ledger as they were.
 
 `TestCrashMatrixSQLite` runs every (point, occurrence) of three scenarios:
 `duplicate-charge` (25 cases), `ambiguous-commit` (15) and `company-incident`
@@ -266,3 +268,7 @@ than the tests. The cost is an upgrade step, stopping old workers before migrati
 3, and a run that kills its worker three times now ends `failed` with a ledger
 event saying why, where before it was retried indefinitely. An operator who
 believes the cause was transient re-enqueues it and gets a fresh budget.
+
+## Corrections
+
+- 2026-10-28: the crash matrix's stale-worker check covers the runner's own writes (a model turn and a status change) as well as the dispatcher's, because a review found that dropping the fence from every runner write passed all suites (CORE-1). `TestStaleRunnerWritesNothingAfterTakeover` reaches each of the runner's seven durable writes with a superseded fence.

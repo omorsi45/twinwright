@@ -284,6 +284,45 @@ func verifyStaleWorker(ctx context.Context, s *store.Store, t Target, runID stri
 	if now := attributeMutations(after).total; now != before {
 		fail("agent mutation count changed from %d to %d after stale calls", before, now)
 	}
+	verifyStaleRunnerWrites(ctx, s, runID, fence, len(after), fail)
+}
+
+// verifyStaleRunnerWrites has the doomed worker make the two writes the runner
+// itself makes (a model turn, which overwrites the transcript and step, and a
+// status change), which the dispatcher calls above do not reach. A run's most
+// damaging stale write is a transcript overwrite, and the dispatcher check alone
+// would not notice a runner that stopped presenting its fence. Both must be
+// refused and leave the run row and the ledger as they were.
+func verifyStaleRunnerWrites(ctx context.Context, s *store.Store, runID string, fence store.Fence, eventsBefore int, fail func(string, ...any)) {
+	before, err := s.Run(ctx, runID)
+	if err != nil {
+		fail("read run before the stale runner writes: %v", err)
+		return
+	}
+	turn := map[string]any{"role": "assistant", "content": "written by a stale worker"}
+	if err = s.SaveTurnGuarded(ctx, &fence, nil, runID, before.Step+1, `[{"role":"assistant","content":"stale"}]`, turn, nil); !errors.Is(err, store.ErrFenced) {
+		fail("a stale worker's model turn was not refused as fenced: %v", err)
+	}
+	if err = s.SaveStatusGuarded(ctx, &fence, nil, runID, "failed", "error", map[string]any{"kind": "stale"}); !errors.Is(err, store.ErrFenced) {
+		fail("a stale worker's status change was not refused as fenced: %v", err)
+	}
+	after, err := s.Run(ctx, runID)
+	if err != nil {
+		fail("read run after the stale runner writes: %v", err)
+		return
+	}
+	if after.Status != before.Status || after.Step != before.Step || after.Transcript != before.Transcript {
+		fail("a stale worker's runner writes changed the run: status %q to %q, step %d to %d, transcript changed %v",
+			before.Status, after.Status, before.Step, after.Step, after.Transcript != before.Transcript)
+	}
+	events, err := s.Events(ctx, runID)
+	if err != nil {
+		fail("read ledger after the stale runner writes: %v", err)
+		return
+	}
+	if len(events) != eventsBefore {
+		fail("a stale worker's runner writes added %d ledger event(s)", len(events)-eventsBefore)
+	}
 }
 
 // firstCommittedCall returns the earliest tool call in the ledger that has a
