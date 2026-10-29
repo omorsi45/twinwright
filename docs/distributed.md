@@ -143,6 +143,20 @@ While a run executes the worker renews on a timer, and a rejected renewal
 cancels the execution context immediately. Continuing would spend model calls on
 work this worker is no longer permitted to commit.
 
+A renewal that fails for another reason, such as a dropped connection or a locked
+SQLite file, says nothing about who owns the run, so it is not treated as a
+rejection. The worker logs it at warn level and tries again at the next interval
+while its own clock says the lease is still valid. It abandons the run only when
+the lease was refused or that expiry has passed, and writes a `fence.rejected`
+row only for a real refusal, with the store's reason (`TestTransientRenewalErrorDoesNotAbandonTheRun`,
+`TestRenewalErrorsPastTheLocalExpiryAbandonTheRun`, `TestAbandonedRunRecordsTheRenewalCause`).
+
+The renewal interval defaults to a third of the lease TTL, and to no less than
+100 ms where the TTL leaves room for a retry. A one second lease therefore renews
+about every 333 ms (`TestOneSecondLeaseRenewsAtLeastTwiceDuringALongerRun`). An
+explicit interval at or above the TTL is an error, reported before anything is
+claimed (`TestRenewEveryAtOrAboveTheTTLIsRefused`).
+
 ## Crash boundaries
 
 A process can die at seven places in a run. Each is a named point in

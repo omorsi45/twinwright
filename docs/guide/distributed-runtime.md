@@ -91,6 +91,9 @@ owner, so a reconnected worker cannot reuse an old token. The check rejects both
 token below the highest that has committed - which needs no clock and is therefore
 immune to clock skew - and an expired lease. Losing a renewal cancels execution
 immediately rather than spending model calls on work that can no longer commit.
+A renewal that merely fails (a dropped connection, a locked SQLite file) is
+retried at the next interval while the worker's own clock says the lease is still
+valid, and the run is abandoned only once it is not.
 
 A run is claimable when it is runnable, or marked leased with an expired lease,
 which is what a killed process leaves behind, so recovery needs no janitor. On

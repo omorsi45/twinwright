@@ -13,6 +13,21 @@ database written by a newer build is refused rather than downgraded.
 
 ### Fixed
 
+- **A lease renewal that fails no longer abandons a healthy run, and a one second lease no
+  longer fences its own worker.** Any renewal error was treated as a lost lease, so a
+  database blip cancelled the run, reported the claim as fenced and wrote a false
+  `fence.rejected` row whose reason was `context canceled`. Only a refusal by the store
+  does that now. Other errors are logged and retried at the next interval while the lease is
+  valid by the worker's own clock, the run is abandoned once it is not, and a fence rejection
+  is recorded only for a real refusal, with the store's reason
+  (`TestTransientRenewalErrorDoesNotAbandonTheRun`,
+  `TestRenewalErrorsPastTheLocalExpiryAbandonTheRun`,
+  `TestAbandonedRunRecordsTheRenewalCause`). The renewal interval was floored at one second,
+  so with the store's minimum lease of one second the first renewal ran at expiry and was
+  refused, and every run longer than the lease failed. It is now a third of the TTL with a
+  100 ms floor that cannot reach the TTL, and an explicit interval at or above the TTL is an
+  error (`TestOneSecondLeaseRenewsAtLeastTwiceDuringALongerRun`,
+  `TestRenewalCadenceLeavesMarginAtTheMinimumTTL`, `TestRenewEveryAtOrAboveTheTTLIsRefused`).
 - **The runner's own writes now have a test that a superseded fence is refused.** The
   model request, the model turn (which overwrites the transcript and step), a provider
   failure and the completed, paused and failed statuses are fenced in code, but only the

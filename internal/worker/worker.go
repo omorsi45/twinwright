@@ -38,6 +38,9 @@ const (
 	DefaultMaxAttempts  = 3
 )
 
+// minRenewEvery is the shortest default renewal interval. See withDefaults.
+const minRenewEvery = 100 * time.Millisecond
+
 // ExecuteFunc runs one claimed run to a stopping point: completion, a step
 // budget pause, or an error. It receives a context that is cancelled if the
 // worker loses the lease mid-flight, and must pass lease.Fence() into the
@@ -54,7 +57,9 @@ type Config struct {
 	// LeaseTTL is how long a claim is valid without renewal. Shorter means
 	// faster recovery from a crash and less tolerance for a slow model call.
 	LeaseTTL time.Duration
-	// RenewEvery defaults to LeaseTTL/3.
+	// RenewEvery defaults to LeaseTTL/3, and never to less than 100ms where that
+	// still leaves room for a retry. An explicit value at or above LeaseTTL is
+	// refused: see Validate.
 	RenewEvery time.Duration
 	// PollInterval is the idle wait between empty claims.
 	PollInterval time.Duration
@@ -105,8 +110,12 @@ func (c Config) withDefaults() Config {
 	}
 	if c.RenewEvery <= 0 {
 		c.RenewEvery = c.LeaseTTL / 3
-		if c.RenewEvery < time.Second {
-			c.RenewEvery = time.Second
+		// The floor keeps a very short TTL from becoming a busy loop. It used to be
+		// one second, which for the store's minimum TTL of one second made the first
+		// renewal run exactly when the lease expired. It is applied only where it
+		// still leaves room for a retry, so it can never reach the TTL.
+		if c.RenewEvery < minRenewEvery && minRenewEvery <= c.LeaseTTL/2 {
+			c.RenewEvery = minRenewEvery
 		}
 	}
 	if c.PollInterval <= 0 {
@@ -124,11 +133,28 @@ func (c Config) withDefaults() Config {
 	return c
 }
 
+// Validate reports a configuration that cannot hold a lease. It checks the
+// configuration as the worker will run it, with defaults applied. A renewal
+// interval at or above the lease TTL means the first renewal runs when the lease
+// has already expired and is refused, so every run longer than the TTL would
+// fence itself out; no choice of the other settings repairs that.
+func (c Config) Validate() error {
+	c = c.withDefaults()
+	if c.RenewEvery >= c.LeaseTTL {
+		return fmt.Errorf("renew interval %s must be shorter than the lease TTL %s: the first renewal would run after the lease had expired", c.RenewEvery, c.LeaseTTL)
+	}
+	return nil
+}
+
 // Worker claims and executes queued runs.
 type Worker struct {
 	Store   *store.Store
 	Execute ExecuteFunc
 	Config  Config
+
+	// configErr is Validate's verdict, taken when the worker was built. New has no
+	// error to return, so ClaimAndRun and Serve report it before they claim anything.
+	configErr error
 
 	// Observer, when set, receives every outcome. The metrics endpoint and
 	// tests both use this instead of scraping logs.
@@ -172,9 +198,12 @@ type Outcome struct {
 	TraceExported bool `json:"trace_exported,omitempty"`
 }
 
-// New returns a worker with defaults applied.
+// New returns a worker with defaults applied. A configuration that cannot hold a
+// lease (see Config.Validate) is reported by ClaimAndRun and Serve, before they
+// claim anything.
 func New(s *store.Store, execute ExecuteFunc, cfg Config) *Worker {
-	return &Worker{Store: s, Execute: execute, Config: cfg.withDefaults()}
+	cfg = cfg.withDefaults()
+	return &Worker{Store: s, Execute: execute, Config: cfg, configErr: cfg.Validate()}
 }
 
 // Register records this worker so operators can list the fleet.
@@ -189,6 +218,9 @@ func (w *Worker) ID() string { return w.Config.ID }
 // from the store, when the queue holds nothing claimable, which callers treat as
 // an idle tick rather than a failure.
 func (w *Worker) ClaimAndRun(ctx context.Context) (Outcome, error) {
+	if w.configErr != nil {
+		return Outcome{WorkerID: w.Config.ID}, w.configErr
+	}
 	now := w.Config.Clock.Now()
 	lease, entry, err := w.Store.ClaimRun(ctx, w.Config.ID, w.Config.LeaseTTL, now)
 	if err != nil {
@@ -205,44 +237,48 @@ func (w *Worker) ClaimAndRun(ctx context.Context) (Outcome, error) {
 		return w.settleOverDelivered(ctx, lease, entry, outcome)
 	}
 
-	// Renewal runs alongside execution. If the lease cannot be renewed the run
-	// has moved on, so the execution context is cancelled: continuing would
-	// burn model calls on work this worker is no longer allowed to commit.
+	// Renewal runs alongside execution. If the lease is lost the run has moved
+	// on, so the execution context is cancelled: continuing would burn model calls
+	// on work this worker is no longer allowed to commit. A renewal that merely
+	// fails does not lose the lease; see renew.
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	renewalLost := make(chan struct{})
+	loss := &leaseLoss{}
 	renewalDone := make(chan struct{})
 	go func() {
 		defer close(renewalDone)
-		w.renew(runCtx, lease, cancel, renewalLost)
+		w.renew(runCtx, lease, cancel, loss)
 	}()
 
 	run, execErr := w.Execute(runCtx, lease, entry)
 	cancel()
 	<-renewalDone
 
-	lostLease := false
-	select {
-	case <-renewalLost:
-		lostLease = true
-	default:
-	}
-
 	outcome.Duration = w.Config.Clock.Now().Sub(started)
 	outcome.RunStatus = run.Status
 
 	switch {
-	case errors.Is(execErr, store.ErrFenced) || lostLease:
+	case errors.Is(execErr, store.ErrFenced) || loss.lost:
 		outcome.Disposition = Fenced
-		if execErr != nil {
+		switch {
+		case loss.cause != nil:
+			// What the store refused, or why the lease was given up, rather than
+			// the cancellation that followed it.
+			outcome.Err = loss.cause.Error()
+		case execErr != nil:
 			outcome.Err = execErr.Error()
-		} else {
+		default:
 			outcome.Err = "lease lost during execution"
 		}
-		// Best-effort audit note. The run is not ours, so a failure to record
-		// the rejection must not turn into a reported error.
-		if recErr := w.Store.RecordFenceRejection(ctx, lease.Fence(), w.Config.Clock.Now(), outcome.Err); recErr != nil {
-			w.Config.Logger.Warn("could not record fencing rejection", "run", lease.RunID, "error", recErr)
+		// Best-effort audit note, and only for a real fence rejection: the store
+		// refusing the renewal, or a guarded write refused. A lease the worker
+		// gave up because renewals kept failing past its expiry was not rejected
+		// by anyone, and a row saying so would be false. The run is not ours, so a
+		// failure to record must not turn into a reported error.
+		if errors.Is(loss.cause, store.ErrFenced) || errors.Is(execErr, store.ErrFenced) {
+			if recErr := w.Store.RecordFenceRejection(ctx, lease.Fence(), w.Config.Clock.Now(), outcome.Err); recErr != nil {
+				w.Config.Logger.Warn("could not record fencing rejection", "run", lease.RunID, "error", recErr)
+			}
 		}
 	case execErr != nil:
 		reason := execErr.Error()
@@ -327,9 +363,26 @@ func (w *Worker) observe(outcome Outcome) Outcome {
 	return outcome
 }
 
+// leaseLoss records that the renewal loop gave the lease up, and why. The loop
+// writes it before it ends and the caller reads it after the loop has ended, so
+// it needs no lock.
+type leaseLoss struct {
+	lost  bool
+	cause error
+}
+
 // renew extends the lease until the run finishes or the lease is lost. Losing
-// it cancels execution through cancel and signals lost.
-func (w *Worker) renew(ctx context.Context, lease store.RunLease, cancel context.CancelFunc, lost chan struct{}) {
+// it cancels execution through cancel and records loss.
+//
+// A rejected renewal (store.ErrFenced) means the lease moved to someone else or
+// lapsed, and nothing a retry does can change that, so the run is abandoned. Any
+// other error (a dropped connection, a failover, SQLite's "database is locked")
+// says nothing about who owns the run. Abandoning on one would cancel a healthy
+// run on a database blip, and report it as fenced although nobody took it. So the
+// next interval tries again, for as long as the lease is still valid by this
+// worker's own clock, and the run is abandoned once that expiry has passed:
+// from then on another worker may legitimately hold it.
+func (w *Worker) renew(ctx context.Context, lease store.RunLease, cancel context.CancelFunc, loss *leaseLoss) {
 	ticker := time.NewTicker(w.Config.RenewEvery)
 	defer ticker.Stop()
 	current := lease
@@ -343,11 +396,26 @@ func (w *Worker) renew(ctx context.Context, lease store.RunLease, cancel context
 				if ctx.Err() != nil {
 					return
 				}
-				w.Config.Logger.Warn("lease renewal rejected; abandoning run",
-					"worker", w.Config.ID, "run", current.RunID, "fence", current.Token, "error", err)
-				close(lost)
-				cancel()
-				return
+				if errors.Is(err, store.ErrFenced) {
+					w.Config.Logger.Warn("lease renewal rejected; abandoning run",
+						"worker", w.Config.ID, "run", current.RunID, "fence", current.Token, "error", err)
+					loss.lost, loss.cause = true, err
+					cancel()
+					return
+				}
+				if now := w.Config.Clock.Now(); !now.Before(current.ExpiresAt) {
+					loss.lost = true
+					loss.cause = fmt.Errorf("lease on run %s expired at %s while renewals were failing: %w",
+						current.RunID, current.ExpiresAt.UTC().Format(time.RFC3339Nano), err)
+					w.Config.Logger.Warn("lease renewal failed and the lease has expired; abandoning run",
+						"worker", w.Config.ID, "run", current.RunID, "fence", current.Token, "error", err)
+					cancel()
+					return
+				}
+				w.Config.Logger.Warn("lease renewal failed; trying again at the next interval",
+					"worker", w.Config.ID, "run", current.RunID, "fence", current.Token,
+					"valid_for", current.ExpiresAt.Sub(w.Config.Clock.Now()).Round(time.Millisecond).String(), "error", err)
+				continue
 			}
 			current = renewed
 			if w.Config.OnRenew != nil {
@@ -363,6 +431,9 @@ func (w *Worker) renew(ctx context.Context, lease store.RunLease, cancel context
 // Serve claims and runs work until ctx is cancelled, waiting PollInterval
 // whenever the queue is empty.
 func (w *Worker) Serve(ctx context.Context) error {
+	if w.configErr != nil {
+		return w.configErr
+	}
 	if err := w.Register(ctx); err != nil {
 		return fmt.Errorf("register worker: %w", err)
 	}
