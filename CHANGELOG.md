@@ -13,6 +13,15 @@ database written by a newer build is refused rather than downgraded.
 
 ### Fixed
 
+- **An OTLP partial success is no longer reported as a full delivery.** A collector that answers
+  200 with `partialSuccess.rejectedSpans` above zero has refused some of the spans, but the
+  exporter looked only at the status code and reported `delivered: true`. The exporter now reads
+  the body of a 2xx answer, returns the delivery with `delivered: false` and a new
+  `rejected_spans` count, and fails with the count and the collector's reason. `trace
+  --otlp-endpoint` exits non-zero, and a worker logs the failure at warn like any other
+  (`TestExporterReportsAPartialSuccess`, `TestTraceCommandFailsOnAPartialSuccess`,
+  `TestWorkerWarnsOnAPartialSuccess`). A rejected count of zero with a message is still a
+  delivery.
 - **Claims are counted as they ended.** A run settled without being executed (past
   `--max-attempts`) was timed as 0 s; a claim whose read of the run failed was counted in
   `twinwright_worker_claims_total` and in no disposition series; and a closing write refused by

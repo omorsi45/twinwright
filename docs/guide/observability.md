@@ -16,7 +16,12 @@ go run ./cmd/twinwright trace <run-id> --format otlp \
 ```
 
 The endpoint form POSTs to the collector and reports its status code; a rejection
-is an error, not a silent success. `docker compose up -d` starts a collector that
+is an error, not a silent success. That includes a collector that answers 200 and
+reports `partialSuccess.rejectedSpans` above zero: the delivery report then says
+`"delivered": false` with a `rejected_spans` count, the command exits non-zero, and
+a worker logs it at warn like any other failed export
+(`TestExporterReportsAPartialSuccess`, `TestTraceCommandFailsOnAPartialSuccess`,
+`TestWorkerWarnsOnAPartialSuccess`). `docker compose up -d` starts a collector that
 prints what it receives and forwards it to Jaeger, plus a Prometheus that scrapes workers
 (the stack is described under "The Compose stack" below).
 

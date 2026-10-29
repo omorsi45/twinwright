@@ -3,6 +3,7 @@ package trace
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -110,7 +111,9 @@ func (e Exporter) scrub(text, rawURL, safeURL string) string {
 //
 // A non-2xx response is an error: an exporter that reported success on a 403
 // would turn a misconfigured collector into silent data loss, which is the
-// failure mode observability work exists to prevent.
+// failure mode observability work exists to prevent. So is a 2xx that reports
+// rejected spans (OTLP partialSuccess): the Delivery comes back with the count and
+// Delivered false, next to the error.
 func (e Exporter) Export(ctx context.Context, trace Trace) (Delivery, error) {
 	if strings.TrimSpace(e.Endpoint) == "" {
 		return Delivery{}, fmt.Errorf("OTLP endpoint is required")
@@ -171,8 +174,41 @@ func (e Exporter) Export(ctx context.Context, trace Trace) (Delivery, error) {
 		delivery.Response = e.scrub(strings.TrimSpace(string(body)), target, safeTarget)
 		return delivery, &exportError{text: fmt.Sprintf("collector at %s rejected the spans: HTTP %d %s", safeTarget, response.StatusCode, delivery.Response)}
 	}
+	// A 2xx can still carry a partial success: the collector took the request and
+	// refused some spans. That is data loss the status code does not show.
+	if rejected, reason := partialSuccess(body); rejected > 0 {
+		delivery.RejectedSpans = rejected
+		delivery.Response = e.scrub(reason, target, safeTarget)
+		text := fmt.Sprintf("collector at %s accepted the request but rejected %d of %d spans", safeTarget, rejected, delivery.Spans)
+		if delivery.Response != "" {
+			text += ": " + delivery.Response
+		}
+		return delivery, &exportError{text: text}
+	}
 	delivery.Delivered = true
 	return delivery, nil
+}
+
+// partialSuccess reads the partialSuccess an OTLP/HTTP collector may put in the
+// body of a 2xx answer: how many spans it refused and why. rejectedSpans is an
+// int64, which the protobuf JSON mapping writes as a string, so a number is
+// accepted too. A body that is empty, is not JSON or names no rejection reads as
+// none: a collector that answers a bare OK has lost nothing we can see.
+func partialSuccess(body []byte) (rejected int, reason string) {
+	var answer struct {
+		PartialSuccess struct {
+			RejectedSpans json.Number `json:"rejectedSpans"`
+			ErrorMessage  string      `json:"errorMessage"`
+		} `json:"partialSuccess"`
+	}
+	if err := json.Unmarshal(body, &answer); err != nil {
+		return 0, ""
+	}
+	count, err := answer.PartialSuccess.RejectedSpans.Int64()
+	if err != nil || count <= 0 {
+		return 0, ""
+	}
+	return int(count), strings.TrimSpace(answer.PartialSuccess.ErrorMessage)
 }
 
 // Delivery is the outcome of one export, reported so a caller can prove the
@@ -186,8 +222,11 @@ type Delivery struct {
 	Delivered bool   `json:"delivered"`
 	Status    int    `json:"status"`
 	Spans     int    `json:"spans"`
-	Bytes     int    `json:"bytes"`
-	Response  string `json:"response,omitempty"`
+	// RejectedSpans is how many spans the collector accepted the request for and
+	// then refused (OTLP partialSuccess). A delivery with any is not Delivered.
+	RejectedSpans int    `json:"rejected_spans,omitempty"`
+	Bytes         int    `json:"bytes"`
+	Response      string `json:"response,omitempty"`
 }
 
 func countSpans(trace Trace) int {

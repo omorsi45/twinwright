@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"twinwright/internal/trace"
 )
 
 // finishedRun drains one scripted run with a worker that does not export, so a
@@ -176,6 +178,53 @@ func TestWorkerExportFailureForAMalformedEndpointDoesNotLeak(t *testing.T) {
 			if strings.Contains(text, secret) {
 				t.Errorf("%q reached the worker log for %q:\n%s", secret, endpoint, text)
 			}
+		}
+	}
+}
+
+// A collector can answer 200 and still refuse some spans (OTLP partialSuccess).
+// The status code alone would read as a delivery, so the trace command fails and
+// says how many spans were refused, and the worker logs it at warn like any other
+// export failure, without changing the claim's disposition.
+const partialSuccessBody = `{"partialSuccess":{"rejectedSpans":"1","errorMessage":"1 span is too old"}}`
+
+func TestTraceCommandFailsOnAPartialSuccess(t *testing.T) {
+	db, runID := finishedRun(t)
+	collector := newTestCollectorWithBody(t, http.StatusOK, partialSuccessBody)
+	var out bytes.Buffer
+	err := runCLI([]string{"trace", runID, "--format", "otlp", "--db", db, "--otlp-endpoint", collector.URL}, &out)
+	if err == nil || !strings.Contains(err.Error(), "rejected 1 of") || !strings.Contains(err.Error(), "1 span is too old") {
+		t.Fatalf("err=%v, want the refused spans named\n%s", err, out.String())
+	}
+}
+
+func TestWorkerWarnsOnAPartialSuccess(t *testing.T) {
+	var logs syncBuffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	dir := t.TempDir()
+	manifestPath := buildBillingManifest(t, dir)
+	db := filepath.Join(dir, "world.db")
+	collector := newTestCollectorWithBody(t, http.StatusOK, partialSuccessBody)
+	runID := enqueueBillingRun(t, manifestPath, db)
+	outcomes := drainWorker(t, manifestPath, db, "--otlp-endpoint", collector.URL)
+	if len(outcomes) != 1 || outcomes[0].Disposition != "finished" || outcomes[0].RunStatus != "completed" {
+		t.Fatalf("a partial success changed the outcome: %+v", outcomes)
+	}
+	if outcomes[0].TraceExported {
+		t.Fatalf("the outcome reports a delivery the collector only partly took: %+v", outcomes[0])
+	}
+	warning := ""
+	for _, line := range strings.Split(logs.String(), "\n") {
+		if strings.Contains(line, "trace export failed") {
+			warning = line
+		}
+	}
+	for _, want := range []string{"level=WARN", "run=" + runID, "trace_id=" + trace.TraceIDFor(runID), "rejected 1 of", "1 span is too old"} {
+		if !strings.Contains(warning, want) {
+			t.Fatalf("the warning lacks %q:\n%s", want, logs.String())
 		}
 	}
 }

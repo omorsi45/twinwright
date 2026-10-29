@@ -2212,14 +2212,21 @@ type testCollector struct {
 }
 
 func newTestCollector(t *testing.T, status int) *testCollector {
+	return newTestCollectorWithBody(t, status, "")
+}
+
+// newTestCollectorWithBody answers every request with status and body, as a
+// collector reporting a partial success does.
+func newTestCollectorWithBody(t *testing.T, status int, body string) *testCollector {
 	t.Helper()
 	c := &testCollector{}
 	c.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
+		posted, _ := io.ReadAll(r.Body)
 		c.mu.Lock()
-		c.posts = append(c.posts, collectedPost{Path: r.URL.Path, Query: r.URL.RawQuery, Header: r.Header.Clone(), Body: body})
+		c.posts = append(c.posts, collectedPost{Path: r.URL.Path, Query: r.URL.RawQuery, Header: r.Header.Clone(), Body: posted})
 		c.mu.Unlock()
 		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
 	}))
 	t.Cleanup(c.Close)
 	return c
