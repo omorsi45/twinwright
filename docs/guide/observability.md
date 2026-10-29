@@ -1,6 +1,6 @@
 # Observability
 
-This page was moved out of the project README when the README was rewritten as the Twinwright Cloud overview. It holds the README section "Observability", unchanged except where noted. The sentence about what `docker compose up -d` starts was corrected: the collector forwards to Jaeger, and Prometheus is part of the stack. A delivery to a collector that answers 200 and reports rejected spans is described as a failed one, and the paragraph on worker metrics says that a worker whose address cannot be bound exits. The sections "Exporting from a worker", "Metrics", "The Compose stack" and "What CI shows" at the end are new, and so is the paragraph on collector credentials. Paths in backticks are relative to the repository root. [Back to the guide index](README.md).
+This page was moved out of the project README when the README was rewritten as the platform overview. It holds the README section "Observability", unchanged except where noted. The sentence about what `docker compose up -d` starts was corrected: the collector forwards to Jaeger, and Prometheus is part of the stack. A delivery to a collector that answers 200 and reports rejected spans is described as a failed one, and the paragraph on worker metrics says that a worker whose address cannot be bound exits. The sections "Exporting from a worker", "Metrics", "The Compose stack" and "What CI shows" at the end are new, and so is the paragraph on collector credentials. Paths in backticks are relative to the repository root. [Back to the guide index](README.md).
 
 ## Observability
 

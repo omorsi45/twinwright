@@ -23,9 +23,8 @@ TW_LIVE_OUT=~/tws/live-run-1 TW_LIVE_MODEL=qwen2.5:1.5b \
 | CLI | Go 1.27.3 linux/amd64 in WSL2 Ubuntu 24.04, kernel 6.18.33.2-microsoft-standard-WSL2 |
 | Host | Windows 11 Enterprise 10.0.26300, AMD Ryzen 9 7900X (12 cores, 24 threads) |
 
-The plan named the development Mac for this run. The build ledger rules that local
-runs happen on this Windows PC instead and are labelled with it, so the machine
-above is the one measured.
+This run was planned for the development Mac and was taken on this Windows PC
+instead, so the machine above is the one measured.
 
 The model was picked after a probe through Ollama's `/v1` API: `qwen2.5:0.5b`
 answered in text without a tool call, and `qwen2.5:1.5b` returned a tool call in 2

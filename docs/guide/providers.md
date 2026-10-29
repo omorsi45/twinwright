@@ -1,6 +1,6 @@
 # Agent providers, recording and real models
 
-This page was moved out of the project README when the README was rewritten as the Twinwright Cloud overview. It holds the README section "Agent providers", unchanged except where noted. The statement that no live run had been verified was corrected, the protocol link was adjusted, and the `exec` provider and `--agent-container` were added to the table and the text. The sections "The output ceiling", "Rate limits, server errors and dropped connections", "Recording a run, and replaying it through the adapter", "A real model, once" and "Gating a run" at the end are new. Paths in backticks are relative to the repository root. [Back to the guide index](README.md).
+This page was moved out of the project README when the README was rewritten as the platform overview. It holds the README section "Agent providers", unchanged except where noted. The statement that no live run had been verified was corrected, the protocol link was adjusted, and the `exec` provider and `--agent-container` were added to the table and the text. The sections "The output ceiling", "Rate limits, server errors and dropped connections", "Recording a run, and replaying it through the adapter", "A real model, once" and "Gating a run" at the end are new. Paths in backticks are relative to the repository root. [Back to the guide index](README.md).
 
 ## Agent providers
 

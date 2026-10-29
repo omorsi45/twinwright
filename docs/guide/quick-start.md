@@ -1,6 +1,6 @@
 # Quick start and the twelve-step demo
 
-This page was moved out of the project README when the README was rewritten as the Twinwright Cloud overview. It holds the README section "Quick start", unchanged except where noted. The demo has twelve steps, not eleven, and the sample output shows the real twelve-step markers from an actual run. Paths in backticks are relative to the repository root. [Back to the guide index](README.md).
+This page was moved out of the project README when the README was rewritten as the platform overview. It holds the README section "Quick start", unchanged except where noted. The demo has twelve steps, not eleven, and the sample output shows the real twelve-step markers from an actual run. Paths in backticks are relative to the repository root. [Back to the guide index](README.md).
 
 ## Quick start
 

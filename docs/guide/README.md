@@ -1,6 +1,6 @@
 # Twinwright guide
 
-The project README is the Twinwright Cloud overview: what the platform is, how to run it, and what is and is not proven. This directory holds the detail that used to be in the README. Nothing was dropped: each page below says which README sections it holds, and the table shows where every old section went.
+The project README is the platform overview: what the platform is, how to run it, and what is and is not proven. This directory holds the detail that used to be in the README. Nothing was dropped: each page below says which README sections it holds, and the table shows where every old section went.
 
 The documents that make claims are separate. [docs/claims.md](../claims.md) lists every claim with the test or CI job that proves it, and [docs/architecture.md](../architecture.md) has the component diagram, the path of one tool call, the trust boundaries and the index of all 34 architecture decision records.
 
