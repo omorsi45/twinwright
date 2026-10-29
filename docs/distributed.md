@@ -17,8 +17,11 @@ lease.
 ## Topology
 
 `twinwright run --enqueue` queues a run. `twinwright worker` claims, executes
-and finishes runs. `twinwright queue` reports depth, fleet and ownership, and
-writes nothing.
+and finishes runs. `twinwright queue` reports depth, fleet and ownership. It
+opens the database read-only, so it writes nothing: it does not apply a pending
+migration, which matters while workers on an older build are still running, and
+it refuses a path that does not exist instead of creating a database there
+(`TestReadCommandsDoNotMigrateTheSource`, `TestReadCommandsRefuseAMissingDatabase`).
 
 ```mermaid
 flowchart LR
@@ -297,7 +300,7 @@ once for the fleet was left out, and ADR 0032 lists this among its limits.
 
 ```
 twinwright bench --suite-file examples/bench/flagship.yaml
-twinwright queue --dsn <dsn>
+twinwright queue --db <dsn>
 twinwright demo --dir <dir>     # step 8 crashes a worker and shows the takeover
 ```
 

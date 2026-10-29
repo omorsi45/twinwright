@@ -8,7 +8,7 @@
 #
 # Usage:
 #   scripts/e2e.sh                 # SQLite in a temporary directory
-#   scripts/e2e.sh "postgres://…"  # against a PostgreSQL server
+#   scripts/e2e.sh "postgres://…"  # against a PostgreSQL serve
 set -euo pipefail
 
 DSN_BASE="${1:-}"
@@ -44,7 +44,7 @@ go build -o "$BIN" ./cmd/twinwright
 "$BIN" version
 
 step "doctor"
-"$BIN" doctor --db "$(db doctor)" > "$WORK/doctor.json"
+"$BIN" doctor > "$WORK/doctor.json"
 grep -q '"healthy": true' "$WORK/doctor.json" || { cat "$WORK/doctor.json"; fail "doctor reported an unhealthy environment"; }
 
 step "compile the billing service and the multi-service company world"
@@ -62,6 +62,17 @@ RUN_ID="$("$BIN" run duplicate-charge \
 grep -q '"passed":true' "$WORK/run.json" || { cat "$WORK/run.json"; fail "duplicate-charge evaluation did not pass"; }
 printf 'run %s\n' "$RUN_ID"
 
+# doctor opens the database read-only, so it checks the one the run just created
+# and reports healthy. Pointed at a SQLite path that does not exist it must say
+# so and leave nothing behind, instead of creating a database.
+step "doctor on the database the run created"
+"$BIN" doctor --db "$BILLING_DB" > "$WORK/doctor-db.json"
+grep -q '"healthy": true' "$WORK/doctor-db.json" || { cat "$WORK/doctor-db.json"; fail "doctor reported an unhealthy database"; }
+if [ -z "$DSN_BASE" ]; then
+  "$BIN" doctor --db "$WORK/no-such.db" > "$WORK/doctor-missing.json"
+  grep -q '"healthy": false' "$WORK/doctor-missing.json" || { cat "$WORK/doctor-missing.json"; fail "doctor called a missing database healthy"; }
+  [ ! -e "$WORK/no-such.db" ] || fail "doctor created a database for a missing path"
+fi
 step "inspect and trace"
 "$BIN" inspect "$RUN_ID" --manifest "$WORK/billing.manifest.json" --db "$BILLING_DB" > /dev/null
 "$BIN" trace "$RUN_ID" --db "$BILLING_DB" > "$WORK/trace.json"

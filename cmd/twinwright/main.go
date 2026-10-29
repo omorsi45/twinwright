@@ -978,7 +978,7 @@ func runCLI(args []string, out io.Writer) error {
 		if err := fs.Parse(args[2:]); err != nil {
 			return err
 		}
-		s, err := store.OpenDSN(ctx, *dbPath)
+		s, err := openForReading(ctx, *dbPath, store.SchemaVersionLedger, "inspection")
 		if err != nil {
 			return err
 		}

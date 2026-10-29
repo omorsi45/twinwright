@@ -13,6 +13,19 @@ database written by a newer build is refused rather than downgraded.
 
 ### Fixed
 
+- **`inspect`, `queue` and `doctor` no longer migrate the database or create one.** They
+  opened the source for writing, so a version 2 database came out at version 3 (the
+  migration ADR 0029 says must wait until older workers stop), and a mistyped `--db` left
+  a new migrated file behind; `queue` on that path exited 0 with an empty queue and
+  `doctor` reported the version it had just written. All three now open the database
+  read-only, as `trace`, `replay` and `evaluate` already did. A missing path is an error that
+  names it, `doctor` reports the version the database had and says when a migration is
+  pending, and a database too old for the command is refused with a request to run a
+  command that migrates it. The file comes out byte for byte unchanged
+  (`TestReadCommandsDoNotMigrateTheSource`, `TestReadCommandsRefuseAMissingDatabase`,
+  `TestDoctorReportsTheAppliedSchemaVersionWithoutMigrating`,
+  `TestReadCommandsAskForAMigrationWhenTheSchemaIsTooOld`, `TestRequireSchema`). The
+  documented `twinwright queue --dsn` is `--db`.
 - **`trace --otlp-endpoint` no longer prints the endpoint's credentials.** The delivery
   report named the endpoint as given and the error for a refusal or a failed post quoted
   it, so a password in the userinfo or a token in the query went to stdout and stderr,

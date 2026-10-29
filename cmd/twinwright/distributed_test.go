@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"twinwright/internal/store"
 )
 
 // buildBillingManifest compiles the billing example into a temp manifest the
@@ -134,12 +136,17 @@ func TestEnqueueRejectsUnknownRun(t *testing.T) {
 	dir := t.TempDir()
 	db := filepath.Join(dir, "world.db")
 	var out bytes.Buffer
-	// Create the schema first so the failure is about the run, not the file.
-	if err := runCLI([]string{"queue", "--db", db}, &out); err != nil {
-		t.Fatalf("queue: %v", err)
+	// Create the schema first so the failure is about the run, not the file. A
+	// migrating open does that; `queue` used to, by accident, and now refuses a
+	// database that does not exist.
+	created, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
 	}
-	out.Reset()
-	if err := runCLI([]string{"enqueue", "R-does-not-exist", "--db", db}, &out); err == nil {
+	if err = created.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err = runCLI([]string{"enqueue", "R-does-not-exist", "--db", db}, &out); err == nil {
 		t.Fatal("expected enqueueing an unknown run to fail")
 	}
 }

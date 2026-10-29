@@ -63,7 +63,25 @@ func enqueueCommand(ctx context.Context, args []string, out io.Writer) error {
 	})
 }
 
+// openForReading opens the database a read-only command examines. It uses the
+// read-only open, so it never creates a database for a mistyped path and never
+// migrates one, and then checks that the schema has what the command reads.
+// The docs and AGENTS.md promise that inspection never changes the source; an
+// operator who watches a rolling upgrade with `queue` or `doctor` depends on it.
+func openForReading(ctx context.Context, dsn string, minSchema int, feature string) (*store.Store, error) {
+	s, err := store.OpenReadOnlyDSN(ctx, dsn)
+	if err != nil {
+		return nil, err
+	}
+	if err = s.RequireSchema(ctx, minSchema, feature); err != nil {
+		s.Close()
+		return nil, err
+	}
+	return s, nil
+}
+
 // queueCommand reports queue depth, the registered fleet and per-run ownership.
+// It only reads: see openForReading.
 func queueCommand(ctx context.Context, args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("queue", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -72,7 +90,7 @@ func queueCommand(ctx context.Context, args []string, out io.Writer) error {
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
-	s, err := store.OpenDSN(ctx, *dbPath)
+	s, err := openForReading(ctx, *dbPath, store.SchemaVersionQueue, "the work queue")
 	if err != nil {
 		return err
 	}

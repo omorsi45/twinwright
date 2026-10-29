@@ -113,6 +113,12 @@ go run ./cmd/twinwright doctor --db "$TW_DSN"   # backend, schema version, queue
 go run ./cmd/twinwright version                  # includes the schema version this build writes
 ```
 
+`doctor` and `queue` open the database read-only. `doctor` reports the schema
+version the database has now, and when that is behind this build it says which
+version a migration would reach and that it has not applied it. Neither command
+migrates the database or creates one for a mistyped `--db`, so they are safe to
+run while workers on an older build are still up.
+
 Schema state is versioned in `schema_migrations`. Each migration commits with its
 own bookkeeping row, so a failed migration leaves neither a partial schema nor a
 false record of success. A database written before migration tracking is adopted
