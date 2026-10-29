@@ -1,6 +1,6 @@
 # Checkpoints, forks and counterfactual analysis
 
-This page was moved out of the project README when the README was rewritten as the platform overview. It holds the README sections "Checkpoints and counterfactual forks", "Counterfactual analysis", unchanged except where noted. One sentence in "Counterfactual analysis" about live models was corrected. Paths in backticks are relative to the repository root. [Back to the guide index](README.md).
+This page was moved out of the project README when the README was rewritten as the Twinwright Cloud overview. It holds the README sections "Checkpoints and counterfactual forks", "Counterfactual analysis", unchanged except where noted. One sentence in "Counterfactual analysis" about live models was corrected. Paths in backticks are relative to the repository root. [Back to the guide index](README.md).
 
 ## Checkpoints and counterfactual forks
 

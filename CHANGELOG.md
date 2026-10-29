@@ -13,7 +13,6 @@ database written by a newer build is refused rather than downgraded.
 
 ### Changed
 
-- **The README's title is `Twinwright`, the repository's name.** It said "Twinwright Cloud".
 - **The design record, plans and build notes are no longer tracked.** They are kept as local
   working notes and are ignored by `.gitignore`; the one public link into them, from a `cut`
   row of `docs/claims.md`, now states the reason inline.
@@ -608,7 +607,7 @@ database written by a newer build is refused rather than downgraded.
 
 ### Added
 
-- **Documentation as a platform overview.** The README is rewritten as the overview of the
+- **Documentation as Twinwright Cloud.** The README is rewritten as the overview of the
   self-hosted platform, in under 450 lines: what it is, a 60-second quick start (`make
   demo` and `make demo-stack`), the regression gate in CI, running your own agent, real
   models and cassettes, the fleet, observability, benchmarks, limitations and
