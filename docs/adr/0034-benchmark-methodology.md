@@ -44,8 +44,8 @@ the benchmark suite run, so a figure describes code a test already proves correc
 - **`throughput`.** For each fleet size in `--workers` (default 1,2,4,8) and each of
   `--trials` trials (default 3): take a store, seed and enqueue `--runs` runs (default
   40), each in a world of its own, start that many in-process `worker.Worker`s on a
-  real clock with a 30 s lease and a 10 ms poll, and let each claim and run until
-  nothing is claimable. Each run executes under the fence of the claim that holds it,
+  real clock with a 30 s lease, and let each claim and run until its first empty claim
+  (a worker never waits for work, so no poll interval applies). Each run executes under the fence of the claim that holds it,
   which is the wiring `twinwright worker` uses. The trial's result is `--runs` divided
   by the wall time from just before the first worker starts to the return of the last,
   and worker registration is inside that time. Every run must end finished and
@@ -55,8 +55,9 @@ the benchmark suite run, so a figure describes code a test already proves correc
   enqueue one run, register a second worker that polls every 100 ms, and crash the
   first with `crashmatrix.CrashWith` at `after-tool-commit` on `createRefund`,
   occurrence 1, which is just after the refund commits. The dead worker's lease is then
-  renewed at that instant, so it expires exactly one TTL later, whatever time the run
-  took to reach its crash point. The result is the time from that instant until the
+  renewed at that instant, so it expires one TTL later, provided the run reached its
+  crash point within one TTL of its claim: the store refuses to renew an expired lease,
+  and a slower run fails the trial with an error instead of producing a figure. The result is the time from that instant until the
   second worker's claim ends finished, with the run completed and the claim a takeover
   of the expired lease. The wait gives up after five TTLs plus ten seconds. The refunds in the
   run's world beyond one are counted as `duplicate_mutations` and summed over the
@@ -267,3 +268,4 @@ backend, so a joint table would invite a conclusion they do not support.
 - 2026-10-28: `make perf` ran `go run`, whose binary carries no VCS stamp, so its report named no commit and still wrote `git_modified: false`, a statement about a tree nobody read (PERF-2). The target now depends on `build` and runs `./twinwright perf`. `git_modified` is omitted, not false, when the build recorded no tree state: the field kept its name and its meaning when present, so schema version 1 and the committed reports, which carry `git_modified: false` from stamped builds, read as before.
 - 2026-10-28: `perf` now exits 1, after writing the report, when a replay verified fewer runs than it executed (PERF-4). The ADR listed replay verification as a measured invariant ("replay verified 20 of 20") while only a duplicated mutation and a crash matrix violation could fail the run, so an unverified replay left the CI `perf` job green. The consequence recorded in the ledger ruling for the original task, that an unverified replay is reported in the JSON but does not change the exit code, is superseded.
 - 2026-10-28: `TestBenchmarkDocsMatchTheirReports` is now what the ADR said it was, a table equal to its report "row for row" (PERF-5). It checked each row that was present, so a dropped row, a table missing for a committed report and a stale `Runs per trial` all passed (a copy of the document with the PostgreSQL 8-worker row deleted and `40` changed to `400` still passed). It now also requires the worker counts of each table to equal its report's, once each, compares `Runs per trial` with the report's `runs`, and requires every committed report to be quoted; `TestBenchmarkDocsCheckNoticesWhatItWasWrittenToCatch` shows each of those edits failing.
+- 2026-10-28: the `throughput` bullet no longer says the workers ran with a 10 ms poll, and the `recovery` bullet no longer says the dead worker's lease expires "exactly one TTL later, whatever time the run took to reach its crash point" (PERF-6, PERF-9). Throughput workers stop at their first empty claim and never wait a poll interval, so the setting was never exercised and is removed; the figures were not affected. The lease pin is a renewal and the store refuses to renew an expired lease, so the sentence holds only when the run reaches its crash point within one TTL of its claim, and a slower run fails the trial with an error instead of publishing a figure. The `RecoveryResult` comment no longer calls the figure "the bound": it includes the recovering worker's poll and the rest of the run.

@@ -13,6 +13,13 @@ database written by a newer build is refused rather than downgraded.
 
 ### Fixed
 
+- **ADR 0034 and `docs/performance.md` describe the throughput and recovery workloads as they run.**
+  They said the throughput workers poll every 10 ms; they stop at their first empty claim and never
+  wait, so the setting is gone from the workload and the text. They said the recovery lease pin
+  makes the lease expire "exactly one TTL later, whatever time the run took"; the pin is a renewal
+  and the store refuses to renew an expired lease, so it holds when the run reaches its crash
+  point within one TTL and otherwise the trial fails. Documentation and an unused setting only; no
+  figure in a committed report changes.
 - **The benchmark document test holds the throughput table to its report row for row.**
   `TestBenchmarkDocsMatchTheirReports` compared the rows a table had, so a dropped row, a committed
   report that no table quotes and a stale `Runs per trial` all passed. It now requires each table

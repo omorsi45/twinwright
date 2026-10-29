@@ -272,9 +272,10 @@ type ThroughputResult struct {
 //
 // RecoveryMS runs from the moment the first worker has died, with its lease
 // renewed at that instant, to the moment a second worker reports the run
-// finished. A worker that dies right after a renewal is the longest wait a
-// lease allows, so this is the bound, not the average: a worker that died
-// earlier in its renewal period would be recovered sooner.
+// finished. A worker that dies right after a renewal waits the longest a lease
+// allows, so the figure is that longest wait plus the recovering worker's poll
+// and the rest of the run, not an average: a worker that died earlier in its
+// renewal period would be recovered sooner.
 type RecoveryResult struct {
 	LeaseTTLMS int64 `json:"lease_ttl_ms"`
 	RecoveryMS Stat  `json:"recovery_ms"`
