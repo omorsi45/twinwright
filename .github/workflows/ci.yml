@@ -133,8 +133,10 @@ jobs:
         run: go build -o twinwright ./cmd/twinwright
       # Scripted fixtures never call a provider, so a failure here is a change in
       # this repository and not a different answer from a model. The default
-      # trajectory mode is warn: a reordered tool call shows in the job summary
-      # without blocking the merge.
+      # trajectory mode is warn: the gate does not fail on a reordered tool call,
+      # which shows in the job summary. The go test jobs do:
+      # TestRegressedBenchFailsTheGate holds the committed baseline to zero
+      # warnings, so regenerate the baseline with the change that moved the calls.
       - name: bench the standard suite and gate it against the approved baseline
         run: |
           ./twinwright bench --suite standard --agent scripted --examples examples --out candidate.json > /dev/null

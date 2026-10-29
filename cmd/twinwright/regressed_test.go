@@ -46,9 +46,12 @@ func TestRegressedBenchFailsTheGate(t *testing.T) {
 			}
 			if tc.wantExit == 0 {
 				// The approved baseline is the healthy fixture's own report, so
-				// it must compare clean; a warning here is drift nobody approved.
+				// it must compare clean. The gate would exit 0 on a warning, so
+				// this is the repository's own, stricter rule (ADR 0030, "Updating
+				// the baseline"): a warning here is drift nobody approved, and the
+				// fix is to regenerate the baseline with the change that caused it.
 				if len(result.Warnings) != 0 {
-					t.Fatalf("healthy fixture compared with warnings: %+v", result.Warnings)
+					t.Fatalf("healthy fixture compared with warnings, which the gate tolerates and this repository does not; regenerate the baseline with the change that caused them: %+v", result.Warnings)
 				}
 				return
 			}

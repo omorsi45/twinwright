@@ -13,6 +13,12 @@ database written by a newer build is refused rather than downgraded.
 
 ### Fixed
 
+- **ADR 0030, the bench guide and the CI comment no longer say a trajectory change cannot block a
+  merge.** The gate does only warn on one (`--trajectory warn` exits 0), but
+  `TestRegressedBenchFailsTheGate` fails on any warning for the healthy fixture and runs in the
+  `go test` jobs, so a reordered tool call, a new case or an edited fixture fails CI in this
+  repository until the baseline is regenerated. The text and the test's failure message now say
+  so. No behaviour changed.
 - **`make gate` no longer leaves `bench-candidate.json` in the repository root.** The candidate
   report is written to a temporary directory that is removed when the recipe ends, with the
   gate's exit status unchanged (a regressed candidate still exits 1), and `bench-candidate.json`
