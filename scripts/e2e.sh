@@ -55,11 +55,15 @@ step "compile the billing service and the multi-service company world"
 
 step "run the duplicate-charge scenario"
 BILLING_DB="$(db billing)"
-RUN_ID="$("$BIN" run duplicate-charge \
+# run exits 0 when its evaluation fails and prints a "passed" per check, so a grep
+# for "passed":true matches a run in which one check passed and the rest failed.
+# --fail-on-eval makes the command itself exit 1 on a failing evaluation.
+"$BIN" run duplicate-charge \
   --manifest "$WORK/billing.manifest.json" --db "$BILLING_DB" \
-  --agent scripted --seed 42 | tee "$WORK/run.json" | run_id)"
+  --agent scripted --seed 42 --fail-on-eval > "$WORK/run.json" ||
+  { cat "$WORK/run.json"; fail "the duplicate-charge run failed or its evaluation did not pass"; }
+RUN_ID="$(run_id < "$WORK/run.json" || true)"
 [ -n "$RUN_ID" ] || { cat "$WORK/run.json"; fail "could not read a run ID"; }
-grep -q '"passed":true' "$WORK/run.json" || { cat "$WORK/run.json"; fail "duplicate-charge evaluation did not pass"; }
 printf 'run %s\n' "$RUN_ID"
 
 # doctor opens the database read-only, so it checks the one the run just created
@@ -103,8 +107,8 @@ CHILD_ID="$("$BIN" fork "$RUN_ID" --at-event "$FORK_SEQ" \
 step "chaos: the ambiguous commit, recovered safely and unsafely"
 SAFE_DB="$(db safe)"
 "$BIN" run ambiguous-commit --manifest "$WORK/billing.manifest.json" --db "$SAFE_DB" \
-  --agent scripted --recovery safe --chaos examples/chaos/ambiguous-commit.yaml > "$WORK/safe.json"
-grep -q '"passed":true' "$WORK/safe.json" || { cat "$WORK/safe.json"; fail "safe recovery did not pass evaluation"; }
+  --agent scripted --recovery safe --chaos examples/chaos/ambiguous-commit.yaml --fail-on-eval > "$WORK/safe.json" ||
+  { cat "$WORK/safe.json"; fail "safe recovery failed or did not pass evaluation"; }
 
 UNSAFE_DB="$(db unsafe)"
 # The unsafe fixture is supposed to fail evaluation: it retries a committed

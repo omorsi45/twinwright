@@ -13,6 +13,12 @@ database written by a newer build is refused rather than downgraded.
 
 ### Fixed
 
+- **`scripts/e2e.sh` fails when the run it expects to pass fails its evaluation.** It grepped the
+  output of the duplicate-charge run and of the safe ambiguous-commit run for `"passed":true`, but
+  `run` exits 0 on a failing evaluation and prints a `passed` for every check, so one passing check
+  satisfied the grep (the regressed fixture's duplicate-charge run passes it with three of four
+  checks failing). Both runs now use `--fail-on-eval` and the greps are gone
+  (`TestE2EScriptFailsWhenAnExpectedlyPassingRunFailsItsEvaluation`).
 - **Demo steps 4, 8 and 11 print only what they read, and step 11's check can fail.** Step 11 looked
   for the word "injection" in the run's output, which is in the scenario's name, so it passed on
   every run (with the security analysis removed it still passed). It now requires the run's
