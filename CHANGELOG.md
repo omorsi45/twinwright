@@ -13,6 +13,15 @@ database written by a newer build is refused rather than downgraded.
 
 ### Fixed
 
+- **Commands that take `--db` stopped printing the PostgreSQL password when it holds an
+  unencoded `/`, `#` or `?`.** The `perf` fix did not reach the store's own open, so
+  `run`, `worker`, `queue`, `trace` and the rest printed `url.Parse`'s quote of the
+  password, or, for a DSN that parsed into the wrong pieces, the rest of it inside pgx's
+  connect error. A DSN that does not parse cleanly is now refused before anything parses or
+  uses it, with a message that says to percent-encode the password and quotes no part of the
+  DSN. Both of the store's DSN opens do this, and every command opens its database through
+  one of them; the CLI test runs `enqueue`, `queue` and `doctor`
+  (`TestOpeningAMalformedDSNNeverPrintsIt`, `TestStorageCommandsNeverPrintAMalformedDSN`).
 - **`inspect`, `queue` and `doctor` no longer migrate the database or create one.** They
   opened the source for writing, so a version 2 database came out at version 3 (the
   migration ADR 0029 says must wait until older workers stop), and a mistyped `--db` left

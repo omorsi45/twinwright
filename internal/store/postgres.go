@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/url"
 	"regexp"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"twinwright/internal/pgsql"
+	"twinwright/internal/redact"
 )
 
 // PostgresDSNPrefixes are the URL schemes OpenDSN recognises as PostgreSQL.
@@ -52,12 +54,34 @@ func OpenDSN(ctx context.Context, dsn string) (*Store, error) {
 	return Open(dsn)
 }
 
+// errMalformedDSN is the whole message for a PostgreSQL URL that cannot be
+// trusted, and it quotes nothing from the URL. url.Parse quotes what it rejected,
+// and for a password holding an unencoded "/", "#" or "?" that is a piece of the
+// password inside a message about a bad port (the "/" case prints all of it).
+// pgx does the same for one that parses but means something else, putting the
+// rest of the password into the database name of its connect error. Cleaning
+// such text is a guess, so it is replaced, and the cause is not kept: it holds
+// the same quote.
+var errMalformedDSN = errors.New("the postgres DSN is not a usable postgres URL: percent-encode any %, /, # or ? in the password and remove spaces and control characters")
+
+// checkPostgresDSN refuses a DSN that url.Parse rejects or that redact.WellFormedURL
+// does not trust, before any code parses it, quotes it or connects with it.
+func checkPostgresDSN(dsn string) error {
+	if _, err := url.Parse(dsn); err != nil || !redact.WellFormedURL(dsn) {
+		return errMalformedDSN
+	}
+	return nil
+}
+
 // OpenPostgres opens a PostgreSQL-backed world store.
 //
 // A `search_path=<schema>` query parameter scopes every table to that schema
 // and is created if absent, which is how concurrent tests and several
 // independent environments share one server without colliding.
 func OpenPostgres(ctx context.Context, dsn string) (*Store, error) {
+	if err := checkPostgresDSN(dsn); err != nil {
+		return nil, err
+	}
 	pgsql.Register()
 	schema, err := searchPathSchema(dsn)
 	if err != nil {
@@ -103,9 +127,12 @@ func OpenReadOnlyDSN(ctx context.Context, dsn string) (*Store, error) {
 		return OpenReadOnly(dsn)
 	}
 	pgsql.Register()
+	if err := checkPostgresDSN(dsn); err != nil {
+		return nil, err
+	}
 	parsed, err := url.Parse(dsn)
 	if err != nil {
-		return nil, fmt.Errorf("parse postgres DSN: %w", err)
+		return nil, errMalformedDSN
 	}
 	query := parsed.Query()
 	query.Set("default_transaction_read_only", "on")
@@ -126,7 +153,7 @@ func OpenReadOnlyDSN(ctx context.Context, dsn string) (*Store, error) {
 func searchPathSchema(dsn string) (string, error) {
 	parsed, err := url.Parse(dsn)
 	if err != nil {
-		return "", fmt.Errorf("parse postgres DSN: %w", err)
+		return "", errMalformedDSN
 	}
 	schema := parsed.Query().Get("search_path")
 	if schema == "" {
@@ -144,7 +171,7 @@ func searchPathSchema(dsn string) (string, error) {
 func ensureSchema(ctx context.Context, dsn, schema string) error {
 	parsed, err := url.Parse(dsn)
 	if err != nil {
-		return err
+		return errMalformedDSN
 	}
 	query := parsed.Query()
 	query.Del("search_path")
