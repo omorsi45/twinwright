@@ -705,6 +705,12 @@ func runCLI(args []string, out io.Writer) error {
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
+		// The flag parser stops at the first argument that is not a flag, so a
+		// positional one would silently drop every flag after it and run the
+		// defaults instead.
+		if fs.NArg() > 0 {
+			return fmt.Errorf("bench takes no positional arguments, got %q (choose a suite with --suite NAME)", fs.Arg(0))
+		}
 		if *trials < 1 {
 			return fmt.Errorf("--trials must be positive, got %d", *trials)
 		}

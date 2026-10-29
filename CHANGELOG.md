@@ -13,6 +13,11 @@ database written by a newer build is refused rather than downgraded.
 
 ### Fixed
 
+- **`twinwright bench` refuses a positional argument instead of dropping every flag after it.**
+  Go's flag parser stops at the first argument that is not a flag, so
+  `bench standard --agent openai --trials 10 --out c.json` ran the scripted agent, one trial,
+  wrote no report and exited 0. It now exits 1 with an error naming the argument, as `gate`
+  already did (`TestBenchRefusesPositionalArguments`).
 - **The gate's Markdown summary no longer lets a suite name change its layout.** The suite name
   was printed raw inside a code span, so a backtick in it ended the span and a line break
   started a line of its own, which could put a second `## Twinwright gate: PASSED` heading into

@@ -1710,6 +1710,32 @@ cases:
 	}
 }
 
+// Go's flag parser stops at the first argument that is not a flag, so a
+// positional argument (the shape `run <scenario>` teaches) silently dropped
+// every flag after it: `bench standard --agent openai --trials 10 --out c.json`
+// ran the scripted agent, one trial, wrote no report and exited 0. The gate
+// refuses positionals for the same reason.
+func TestBenchRefusesPositionalArguments(t *testing.T) {
+	examples := filepath.Join("..", "..", "examples")
+	dir := t.TempDir()
+	reportPath := filepath.Join(dir, "report.json")
+	var out bytes.Buffer
+	err := runCLI([]string{"bench", "standard", "--suite", "does-not-exist", "--examples", examples,
+		"--db-dir", filepath.Join(dir, "dbs"), "--trials", "10", "--out", reportPath}, &out)
+	if err == nil {
+		t.Fatalf("a positional argument was accepted and the flags after it dropped:\n%s", out.String())
+	}
+	if !strings.Contains(err.Error(), "positional") || !strings.Contains(err.Error(), `"standard"`) {
+		t.Fatalf("error %q must say positional arguments are refused and name the argument", err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("nothing may run before the arguments are refused, got output:\n%s", out.String())
+	}
+	if _, statErr := os.Stat(reportPath); !os.IsNotExist(statErr) {
+		t.Fatalf("a report was written: %v", statErr)
+	}
+}
+
 func TestBenchCLIRefusesNonPositiveTrials(t *testing.T) {
 	examples := filepath.Join("..", "..", "examples")
 	for _, value := range []string{"0", "-1"} {
