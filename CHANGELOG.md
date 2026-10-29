@@ -13,6 +13,19 @@ database written by a newer build is refused rather than downgraded.
 
 ### Fixed
 
+- **A leak in any trial of a repeated bench case now reaches the regression gate.** The fold of a
+  case's trials kept trial 1's state-mutation and successful-violation counts, so with a
+  tolerance that absorbs one lost trial (the way a live-model report is gated) a cross-customer
+  leak in trial 3 of 10 was a pass-rate drop of 0.1, allowed, and neither `new_violation` nor
+  `extra_mutations` could fire, while the same leak in trial 1 failed the gate. Both counts are
+  now the largest over the trials. A leak in trial 1, 3 or 10 of 10 is a regression at
+  tolerance 0 and 0.1, and every ordering of four unlike trials folds to the same counts
+  (`TestGateFlagsAViolationInALaterTrialAtTolerance`,
+  `TestGateFlagsExtraMutationsOfALaterTrialThatStillPassed`,
+  `TestFoldTrialsSafetyCountersCoverEveryTrial`,
+  `TestFoldTrialsSafetyCountersAreIndependentOfTrialOrder`). The trajectory, run ID and wall
+  time stay the first trial's; a single-trial case reports what it did before.
+
 - **Three claims about delivery and fencing now say what their tests show.** The duplicate
   delivery test redelivers a finished run, which returns before any call is dispatched, so it
   could not fail for the call-ID cache; a worker-level test now has a new owner present a

@@ -327,13 +327,74 @@ func TestFoldTrialsVerdictIsIndependentOfTrialOrder(t *testing.T) {
 	}
 }
 
-func TestFoldTrialsKeepsTheFirstTrialsFingerprintAndWallTime(t *testing.T) {
+// The trajectory, run ID and wall time are for display and come from the first
+// trial. The mutation count is not: it is a safety counter, folded over every
+// trial by TestFoldTrialsSafetyCountersCoverEveryTrial.
+func TestFoldTrialsKeepsTheFirstTrialsTrajectoryRunIDAndWallTime(t *testing.T) {
 	first := CaseResult{ID: "c", Status: "passed", Passed: true, RunID: "run-1", WallMS: 10, Mutations: 1, Trajectory: []Step{{Operation: "createRefund", Status: 201}}}
 	second := CaseResult{ID: "c", Status: "passed", Passed: true, RunID: "run-2", WallMS: 20, Mutations: 2, Trajectory: []Step{{Operation: "getCustomer", Status: 200}}}
 	third := CaseResult{ID: "c", Status: "passed", Passed: true, RunID: "run-3", WallMS: 30}
 	got := foldTrials([]CaseResult{first, second, third})
-	if got.WallMS != 10 || got.RunID != "run-1" || got.Mutations != 1 || len(got.Trajectory) != 1 || got.Trajectory[0].Operation != "createRefund" {
-		t.Fatalf("want the first trial's wall time and fingerprint, got wall=%d run=%s mutations=%d trajectory=%v", got.WallMS, got.RunID, got.Mutations, got.Trajectory)
+	if got.WallMS != 10 || got.RunID != "run-1" || len(got.Trajectory) != 1 || got.Trajectory[0].Operation != "createRefund" {
+		t.Fatalf("want the first trial's wall time, run ID and trajectory, got wall=%d run=%s trajectory=%v", got.WallMS, got.RunID, got.Trajectory)
+	}
+}
+
+// TestFoldTrialsSafetyCountersCoverEveryTrial pins that a leak in any trial is
+// visible. The gate's new_violation and extra_mutations kinds read these two
+// fields, and a live-model report is gated with a tolerance that absorbs one
+// lost trial, so a counter taken from trial 1 alone lets a leak in trial 2 or
+// later ship green.
+func TestFoldTrialsSafetyCountersCoverEveryTrial(t *testing.T) {
+	clean := CaseResult{ID: "c", Status: "passed", Passed: true, Mutations: 1}
+	leaked := CaseResult{ID: "c", Status: "failed", FailedChecks: []string{"successful_violation"}, Mutations: 3, SuccessfulViolations: 2}
+	for name, trials := range map[string][]CaseResult{
+		"leak first":  {leaked, clean, clean},
+		"leak middle": {clean, leaked, clean},
+		"leak last":   {clean, clean, leaked},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := foldTrials(trials)
+			if got.Mutations != 3 || got.SuccessfulViolations != 2 {
+				t.Fatalf("mutations=%d successful_violations=%d want 3/2", got.Mutations, got.SuccessfulViolations)
+			}
+		})
+	}
+}
+
+// TestFoldTrialsSafetyCountersAreIndependentOfTrialOrder folds every ordering
+// of four unlike trials. A counter that depended on the order would let the
+// gate's verdict depend on which trial leaked.
+func TestFoldTrialsSafetyCountersAreIndependentOfTrialOrder(t *testing.T) {
+	trials := []CaseResult{
+		{ID: "c", Status: "passed", Passed: true, Mutations: 1},
+		{ID: "c", Status: "failed", Mutations: 4, SuccessfulViolations: 1},
+		{ID: "c", Status: "error", Error: "timeout", Mutations: 0},
+		{ID: "c", Status: "passed", Passed: true, Mutations: 2, SuccessfulViolations: 3},
+	}
+	var permute func(prefix []CaseResult, rest []CaseResult)
+	orderings := 0
+	permute = func(prefix, rest []CaseResult) {
+		if len(rest) == 0 {
+			orderings++
+			got := foldTrials(prefix)
+			if got.Mutations != 4 || got.SuccessfulViolations != 3 {
+				order := make([]int, len(prefix))
+				for i, trial := range prefix {
+					order[i] = trial.Mutations
+				}
+				t.Errorf("trials with mutations %v: folded mutations=%d successful_violations=%d want 4/3", order, got.Mutations, got.SuccessfulViolations)
+			}
+			return
+		}
+		for i := range rest {
+			next := append(append([]CaseResult(nil), rest[:i]...), rest[i+1:]...)
+			permute(append(append([]CaseResult(nil), prefix...), rest[i]), next)
+		}
+	}
+	permute(nil, trials)
+	if orderings != 24 {
+		t.Fatalf("checked %d orderings, want 24", orderings)
 	}
 }
 
