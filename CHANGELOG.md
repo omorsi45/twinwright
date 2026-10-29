@@ -13,6 +13,17 @@ database written by a newer build is refused rather than downgraded.
 
 ### Fixed
 
+- **Claims are counted as they ended.** A run settled without being executed (past
+  `--max-attempts`) was timed as 0 s; a claim whose read of the run failed was counted in
+  `twinwright_worker_claims_total` and in no disposition series; and a closing write refused by
+  the fence was counted as `finished` with no fencing rejection. The settlement is now timed, a
+  refused closing write is `fenced` (counted and noted in the ownership log), and a claim whose
+  closing write fails for another reason is returned as an error and not observed, so claims
+  equal the sum of the dispositions (`TestOverDeliveredClaimIsTimed`,
+  `TestOverDeliveredClaimWithAnUnreadableRunIsNotObserved`,
+  `TestClaimRefusedByTheFenceAtTheEndIsFenced`,
+  `TestClaimWhoseClosingWriteFailsIsNotObservedAsFinished`). `ClaimAndRun` no longer returns an
+  error when the fence refuses the write that ends a claim; it returns the `fenced` outcome.
 - **Run durations are measured on a monotonic clock, and a counter can no longer go down.** A
   claim's duration was the difference of two readings of the lease clock, which drops the
   monotonic reading, so a backward clock step during a claim made it negative: the run-seconds

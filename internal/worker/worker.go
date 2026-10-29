@@ -156,8 +156,11 @@ type Worker struct {
 	// error to return, so ClaimAndRun and Serve report it before they claim anything.
 	configErr error
 
-	// Observer, when set, receives every outcome. The metrics endpoint and
-	// tests both use this instead of scraping logs.
+	// Observer, when set, receives every claim that ended in a disposition. A claim
+	// whose closing write failed for a reason other than the fence ended in none and
+	// is reported by ClaimAndRun's error instead, so the observed claims and the sum
+	// of their dispositions always agree. The metrics endpoint and tests both use
+	// this instead of scraping logs.
 	Observer func(Outcome)
 }
 
@@ -173,9 +176,10 @@ const (
 	Requeued Disposition = "requeued"
 	// Failed: the attempt failed and retries are exhausted.
 	Failed Disposition = "failed"
-	// Fenced: this worker lost the run to another worker mid-flight. Nothing
-	// was committed and nothing is recorded against the queue entry, because
-	// the run is no longer ours to describe.
+	// Fenced: this worker lost the run to another worker mid-flight, or the write
+	// that was to end the claim was refused because another worker owns the run
+	// now. Nothing was committed and nothing is recorded against the queue entry,
+	// because the run is no longer ours to describe.
 	Fenced Disposition = "fenced"
 )
 
@@ -239,7 +243,7 @@ func (w *Worker) ClaimAndRun(ctx context.Context) (Outcome, error) {
 	// sees a run that kills its worker. Every claim counts as a delivery, and a
 	// run past its bound is settled here without executing it again.
 	if entry.Attempts > w.Config.MaxAttempts {
-		return w.settleOverDelivered(ctx, lease, entry, outcome)
+		return w.settleOverDelivered(ctx, lease, entry, outcome, started)
 	}
 
 	// Renewal runs alongside execution. If the lease is lost the run has moved
@@ -311,50 +315,75 @@ func (w *Worker) ClaimAndRun(ctx context.Context) (Outcome, error) {
 		if entry.Attempts >= w.Config.MaxAttempts {
 			outcome.Disposition = Failed
 			if err = w.Store.FailRun(settleCtx, lease, w.Config.Clock.Now(), reason); err != nil {
-				return w.observe(outcome), fmt.Errorf("mark run failed: %w (original error: %v)", err, execErr)
+				return w.unsettled(settleCtx, lease, outcome, err, fmt.Errorf("mark run failed: %w (original error: %v)", err, execErr))
 			}
 		} else {
 			outcome.Disposition = Requeued
 			at := w.Config.Clock.Now().Add(w.Config.Backoff)
 			if err = w.Store.RequeueRun(settleCtx, lease, w.Config.Clock.Now(), at, reason); err != nil {
-				return w.observe(outcome), fmt.Errorf("requeue run: %w (original error: %v)", err, execErr)
+				return w.unsettled(settleCtx, lease, outcome, err, fmt.Errorf("requeue run: %w (original error: %v)", err, execErr))
 			}
 		}
 		outcome.Err = reason
 	default:
 		outcome.Disposition = Finished
 		if err = w.Store.FinishRun(settleCtx, lease, w.Config.Clock.Now()); err != nil {
-			return w.observe(outcome), fmt.Errorf("mark run finished: %w", err)
+			return w.unsettled(settleCtx, lease, outcome, err, fmt.Errorf("mark run finished: %w", err))
 		}
 		outcome = w.exportTrace(ctx, outcome)
 	}
 	return w.observe(outcome), nil
 }
 
+// unsettled handles a closing write that did not land: the claim's end could not
+// be recorded, so the disposition computed for it is not true and must not be
+// counted.
+//
+// A write the fence refused means another worker owns the run now, which is the
+// fenced disposition, counted and noted in the ownership log like a lease that was
+// lost mid-run, and not an error of this worker. Any other failure leaves the
+// queue entry as it was, so its lease lapses and the run is delivered again; the
+// claim ended in no disposition, so it is returned as the error and not observed.
+// Observing it would count a claim with a disposition the store never recorded,
+// and claims_total would no longer equal the sum of the disposition series.
+func (w *Worker) unsettled(ctx context.Context, lease store.RunLease, outcome Outcome, cause, failure error) (Outcome, error) {
+	if !errors.Is(cause, store.ErrFenced) {
+		return outcome, failure
+	}
+	outcome.Disposition = Fenced
+	outcome.Err = cause.Error()
+	if recErr := w.Store.RecordFenceRejection(ctx, lease.Fence(), w.Config.Clock.Now(), outcome.Err); recErr != nil {
+		w.Config.Logger.Warn("could not record fencing rejection", "run", lease.RunID, "error", recErr)
+	}
+	return w.observe(outcome), nil
+}
+
 // settleOverDelivered ends a claim for a run that has been delivered more times
 // than MaxAttempts allows. A run that already completed lost only its final
-// bookkeeping to a crash, so it is finished; anything else is failed.
-func (w *Worker) settleOverDelivered(ctx context.Context, lease store.RunLease, entry store.QueueEntry, outcome Outcome) (Outcome, error) {
+// bookkeeping to a crash, so it is finished; anything else is failed. started is
+// when the claim began, so the settlement is timed like an executed claim.
+func (w *Worker) settleOverDelivered(ctx context.Context, lease store.RunLease, entry store.QueueEntry, outcome Outcome, started time.Time) (Outcome, error) {
 	// Settled under a context a stop request does not reach, like the end of
 	// an executed claim.
 	settleCtx, endSettle := releaseContext(ctx)
 	defer endSettle()
 	run, err := w.Store.Run(settleCtx, lease.RunID)
 	if err != nil {
-		return w.observe(outcome), fmt.Errorf("read run past delivery limit: %w", err)
+		return outcome, fmt.Errorf("read run past delivery limit: %w", err)
 	}
 	outcome.RunStatus = run.Status
+	outcome.Duration = time.Since(started)
 	if run.Status == "completed" {
 		outcome.Disposition = Finished
 		if err = w.Store.FinishRun(settleCtx, lease, w.Config.Clock.Now()); err != nil {
-			return w.observe(outcome), fmt.Errorf("mark run finished: %w", err)
+			return w.unsettled(settleCtx, lease, outcome, err, fmt.Errorf("mark run finished: %w", err))
 		}
 		return w.observe(w.exportTrace(ctx, outcome)), nil
 	}
 	outcome.Disposition = Failed
 	outcome.Err = store.DeliveryLimitReason(entry.Attempts, w.Config.MaxAttempts)
 	if err = w.Store.FailRunAtDeliveryLimit(settleCtx, lease, w.Config.Clock.Now(), entry.Attempts, w.Config.MaxAttempts); err != nil {
-		return w.observe(outcome), fmt.Errorf("fail run at delivery limit: %w", err)
+		return w.unsettled(settleCtx, lease, outcome, err, fmt.Errorf("fail run at delivery limit: %w", err))
 	}
 	outcome.RunStatus = "failed"
 	return w.observe(outcome), nil

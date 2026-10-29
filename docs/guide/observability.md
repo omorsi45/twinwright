@@ -44,6 +44,8 @@ The worker exposes a run-duration histogram (`twinwright_worker_run_duration_sec
 
 **Run durations never go backwards.** A claim is timed on the process's monotonic clock, not on the clock leases are stamped with, so a clock step during a run (NTP, a VM migration) cannot make `twinwright_worker_run_seconds_total` or the histogram's `_sum` decrease; Prometheus would read that as a counter reset. A counter ignores a negative or non-finite delta and the histogram ignores a negative or non-finite observation (`TestClaimDurationIgnoresABackwardClockStep`, `TestCountersRefuseNegativeDeltas`, `TestRunDurationIgnoresNegativeObservations`).
 
+**The claim counters add up.** `twinwright_worker_claims_total` equals the sum of the `twinwright_worker_claim_disposition_total` series. A claim settled without being executed because its run was past `--max-attempts` is timed like any other (`TestOverDeliveredClaimIsTimed`). A write that ends a claim and is refused by the fence counts as `fenced`, adds a fencing rejection and is noted in the ownership log, not as `finished` (`TestClaimRefusedByTheFenceAtTheEndIsFenced`). A claim whose closing write fails for any other reason ended in no disposition: the worker returns the error, the run's lease lapses and it is delivered again, and the claim is in neither counter (`TestClaimWhoseClosingWriteFailsIsNotObservedAsFinished`, `TestOverDeliveredClaimWithAnUnreadableRunIsNotObserved`).
+
 **The database-derived gauges are served by every worker for the database it points at.** With several workers on one database, scrape one of them or aggregate with `max`, never `sum`: a sum multiplies the queue depth by the number of workers. ADR 0032 lists this among its limits.
 
 ### The Compose stack
