@@ -1,7 +1,5 @@
 # Final Milestone: Twinwright Cloud Platform Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
-
 **Goal:** Deliver milestones 2 to 7 of the design on one branch: a regression gate with reproducible reports, real-provider recording and offline reconstruction, observability proven against a real collector and Prometheus, a bring-your-own-agent protocol with an isolation boundary, reproducible benchmarks, and Twinwright Cloud packaging.
 
 **Architecture:** Extend existing packages (`bench`, `agent`, `replay`, `trace`, `metrics`, `worker`) and add focused new ones (`buildinfo`, `gate`, `perf`); add only the infrastructure a test needs (collector, Jaeger, Prometheus, Ollama) in Compose and GitHub Actions. Each part lands with its ADR.

@@ -24,3 +24,7 @@ bench-candidate.json
 # progress snapshot. Its own README always said it was ignored while every file in
 # it was tracked. Public architectural decisions live in docs/adr/ instead.
 /design/
+# Scratch for local working notes: scripts, logs and built binaries from a working
+# session. Tracked documents call this directory git-ignored, so a fresh clone has
+# to ignore it too, not only a local .git/info/exclude.
+.superpowers/

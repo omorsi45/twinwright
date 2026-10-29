@@ -1,7 +1,5 @@
 # Milestone 1: Reliability Core Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
-
 **Goal:** A worker crash at any documented execution boundary is recovered by another worker with no duplicated world mutation, a ledger that still replays, checkpoints that still reconstruct, and a stale worker that cannot commit, proven in-process and by real process death.
 
 **Architecture:** Fix the two verified recovery defects (text-ordered lease timestamps, unbounded crash redelivery), add an `internal/crashpoint` hook at named boundaries in the runner and dispatcher, build a reusable `internal/crashmatrix` harness that enumerates and verifies every (boundary, occurrence), back it with a real `SIGKILL` test, and route local execution and the bench's distributed mode through the same fenced paths.
@@ -561,7 +559,7 @@ Content the ADR must state:
 - [ ] **Step 1: Write the documents.**
 - [ ] **Step 2: Verify**
 
-Run: `make check && go test -count=1 ./... && go test -race -count=1 ./... && ./scripts/e2e.sh && make bench-smoke && go mod tidy && git diff --exit-code go.mod go.sum && ! grep -n "—" docs/adr/0029-*.md docs/distributed.md CHANGELOG.md README.md`
+Run: `make check && go test -count=1 ./... && go test -race -count=1 ./... && ./scripts/e2e.sh && make bench-smoke && go mod tidy && git diff --exit-code go.mod go.sum && ! grep -nP '\x{2014}' docs/adr/0029-*.md docs/distributed.md CHANGELOG.md README.md`
 Expected: every command exits 0.
 
 - [ ] **Step 3: Commit** the docs, with a message saying the published guarantees now match what the tests prove, including where ADR 0020 overstated them.
