@@ -1050,6 +1050,75 @@ func TestLastSeenAgeOmitsPrunedWorkers(t *testing.T) {
 	}
 }
 
+// The first takeover, the first fencing rejection or the first denial would
+// otherwise appear in the endpoint as a new series at 1, and increase() over a
+// window that holds no earlier sample reads nothing: the first event is the one an
+// alert exists for. ADR 0021 says every series is emitted even when its value is
+// zero, so the kinds the ownership log can hold render at zero, and so do the
+// ledger event types the metrics already single out.
+func TestOwnershipEventsRenderEveryKindAtZero(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	render := func() map[string]*expoFamily {
+		t.Helper()
+		body, err := Collector{Store: s, Counters: NewCounters(), WorkerID: "w", Clock: func() time.Time { return now }}.Render(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return mustParse(t, body)
+	}
+	ownership := func(families map[string]*expoFamily, kind string) float64 {
+		t.Helper()
+		return sampleValue(t, families["twinwright_ownership_events"], "twinwright_ownership_events", map[string]string{"kind": kind})
+	}
+
+	families := render()
+	if got, want := len(families["twinwright_ownership_events"].samples), len(store.OwnershipKinds()); got != want {
+		t.Fatalf("an empty database renders %d ownership series, want %d", got, want)
+	}
+	for _, kind := range store.OwnershipKinds() {
+		if got := ownership(families, kind); got != 0 {
+			t.Fatalf("kind %q = %v on an empty database", kind, got)
+		}
+	}
+	for _, typ := range []string{"tool.response", "retry", "authorization.denied", "chaos.injected"} {
+		if got := sampleValue(t, families["twinwright_ledger_events"], "twinwright_ledger_events", map[string]string{"type": typ}); got != 0 {
+			t.Fatalf("ledger type %q = %v on an empty database", typ, got)
+		}
+	}
+
+	// The first rejection moves its own series from 0 to 1 and no other.
+	run := queuedRun(t, s, now.Add(-time.Minute))
+	if err := s.RecordFenceRejection(ctx, store.Fence{RunID: run, Owner: "worker-a", Token: 1}, now, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Append(ctx, run, "retry", map[string]any{"attempt": 1}); err != nil {
+		t.Fatal(err)
+	}
+	families = render()
+	for _, kind := range store.OwnershipKinds() {
+		want := 0.0
+		if kind == store.OwnershipFenced {
+			want = 1
+		}
+		if got := ownership(families, kind); got != want {
+			t.Fatalf("after one fencing rejection kind %q = %v want %v", kind, got, want)
+		}
+	}
+	if got := sampleValue(t, families["twinwright_ledger_events"], "twinwright_ledger_events", map[string]string{"type": "retry"}); got != 1 {
+		t.Fatalf("ledger type retry = %v after one retry event", got)
+	}
+
+	// A kind this build does not know, written by another build, is still shown.
+	if err := s.AppendOwnership(ctx, run, "lease.future-kind", "worker-a", 1, now, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := ownership(render(), "lease.future-kind"); got != 1 {
+		t.Fatalf("an unknown kind = %v, want it counted", got)
+	}
+}
+
 func TestWorkerLastSeenAge(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)

@@ -331,7 +331,7 @@ func (c Collector) Render(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("event counts: %w", err)
 	}
 	writeHelp(&b, "twinwright_ledger_events", "gauge", "Ledger events by type.")
-	for _, typ := range sortedKeys(events) {
+	for _, typ := range keysWithZeros(events, namedLedgerEventTypes) {
 		writeSample(&b, "twinwright_ledger_events", map[string]string{"type": typ}, float64(events[typ]))
 	}
 
@@ -349,7 +349,7 @@ func (c Collector) Render(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("ownership counts: %w", err)
 	}
 	writeHelp(&b, "twinwright_ownership_events", "gauge", "Ownership transitions across the fleet.")
-	for _, kind := range sortedKeys(ownership) {
+	for _, kind := range keysWithZeros(ownership, store.OwnershipKinds()) {
 		writeSample(&b, "twinwright_ownership_events", map[string]string{"kind": kind}, float64(ownership[kind]))
 	}
 
@@ -533,6 +533,25 @@ func sortedKeys[V any](m map[string]V) []string {
 	sort.Strings(keys)
 	return keys
 }
+
+// keysWithZeros is the sorted union of the keys counted and the keys declared, so
+// a declared value that has not happened yet is still rendered, at zero, and one
+// that was counted but not declared (a type another build wrote) is not dropped.
+func keysWithZeros(counts map[string]int, declared []string) []string {
+	seen := make(map[string]bool, len(counts)+len(declared))
+	for key := range counts {
+		seen[key] = true
+	}
+	for _, key := range declared {
+		seen[key] = true
+	}
+	return sortedKeys(seen)
+}
+
+// namedLedgerEventTypes are the ledger event types this package gives gauges of
+// their own. The set of types in the ledger is open, so only these are rendered at
+// zero in twinwright_ledger_events; any other type appears with its first event.
+var namedLedgerEventTypes = []string{"authorization.denied", "chaos.injected", "retry", "tool.response"}
 
 // Serve binds address and runs the endpoint on it until ctx is cancelled. A caller
 // that must know the bind worked before it starts anything else binds with

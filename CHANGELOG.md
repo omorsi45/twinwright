@@ -13,6 +13,14 @@ database written by a newer build is refused rather than downgraded.
 
 ### Fixed
 
+- **The ownership and ledger-event gauges render the first event as a step, not a new series.**
+  `twinwright_ownership_events{kind}` and `twinwright_ledger_events{type}` rendered only the values
+  that already had rows, so the first fencing rejection or takeover appeared at 1 with no earlier
+  sample for `increase()`, which ADR 0021's "every series is emitted even when its value is zero"
+  was meant to rule out. Every kind of the ownership log (`store.OwnershipKinds`, kept equal to the
+  constants by a test) now renders at zero, and so do the four ledger event types the endpoint names
+  (`TestOwnershipEventsRenderEveryKindAtZero`, `TestOwnershipKindsListsEveryOwnershipConstant`). Other
+  ledger event types, an open set, still appear with their first event.
 - **Worker rows are removed when a worker stops, and the metrics list only recent workers.** Nothing
   ever removed a `workers` row, so `twinwright_worker_last_seen_age_seconds` gained a series and
   `twinwright_workers_registered` a count for every process that ever started, and an alert on

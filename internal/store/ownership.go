@@ -36,6 +36,13 @@ const (
 	OwnershipFinished = "run.finished"
 )
 
+// OwnershipKinds lists every kind above, so a reader that counts the log by kind
+// can show the ones that have not happened yet as zero. Add a kind here when you
+// add the constant.
+func OwnershipKinds() []string {
+	return []string{OwnershipAcquired, OwnershipReleased, OwnershipRenewed, OwnershipFenced, OwnershipFailed, OwnershipFinished}
+}
+
 func appendOwnershipTx(ctx context.Context, tx *sql.Tx, runID, kind, owner string, fence int64, now time.Time, detail any) error {
 	encoded := "{}"
 	if detail != nil {
