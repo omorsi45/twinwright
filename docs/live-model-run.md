@@ -83,8 +83,8 @@ nothing about a hosted provider.
 The Integration workflow's `real-model` job (`.github/workflows/integration.yml`)
 runs the same script against the pinned `ollama/ollama:0.40.11` image, stops the
 container, replays from the cassette with the server gone, and uploads the report
-and the cassette as artifacts. The job passed on its first run on 2026-10-28 (run
-40646100050) and on every Integration run after it, ten in all through 2026-10-29.
+and the cassette as artifacts. The job passed on its first run on 2026-10-28 and on every
+Integration run after it through 2026-10-29, the `pull_request` run of that day included.
 The script exits non-zero when recording fails, when the run does not reach
 `completed` or when either replay is not verified, so a passing job means the run was
 recorded and both replays verified on the runner. It does not mean the model solved

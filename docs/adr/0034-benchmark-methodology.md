@@ -181,8 +181,8 @@ and uploads both files as the artifact `perf-postgres17`. It fails if perf exits
 non-zero. It is dispatch-only because it takes minutes and the figures mean something
 only when someone intends to record them. Running it on every push or pull request
 would spend runner time on numbers nobody reads and invite comparing two runs from
-different shared machines. Integration run 40743500240 produced the committed
-PostgreSQL report.
+different shared machines. The first manual dispatch of the job, on 2026-10-28,
+produced the committed PostgreSQL report.
 
 ## What is proven
 

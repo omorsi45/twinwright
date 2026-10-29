@@ -37,8 +37,10 @@ database written by a newer build is refused rather than downgraded.
   CI job now says what Integration showed: `real-model`, `observability` and `demo-stack` passed
   on their first runs on 2026-10-28 and on every run since, `docker` and `postgres` on every run
   from 2026-10-28, and `perf` on every manual dispatch (`docs/live-model-run.md` says so for
-  `real-model`). The demo-stack changes made after the latest run have run locally only. The
-  performance limitation says three machines, not two. Each guide
+  `real-model`). The `pull_request` runs of both workflows on 2026-10-29 passed every job except
+  `perf`, which runs on manual dispatch only. That includes `demo-stack` with the script as the
+  review fixes left it (the port checks, `TW_DEMO_PG_PORT`, the saved failure files and the
+  cleanup). The performance limitation says three machines, not two. Each guide
   page's opening paragraph lists its corrections. The path of one tool call gains the two
   branches it left out (a call that fails validation records no authorization event, and the
   legacy `--fault` option). `SECURITY.md` no longer says the container of a timed-out agent
@@ -60,8 +62,10 @@ database written by a newer build is refused rather than downgraded.
   now read `TW_DEMO_PG_PORT`, default 5432 (`TestDemoStackPostgresPortComesFromOneVariable`). The
   files its failure messages point to (`bench.err`, `bench.out`, `enqueue.err` as well as the worker
   logs) are copied to `TW_DEMO_LOGS`, and the CI job prints and uploads all of them
-  (`TestDemoStackSavesAndShowsEveryFileItsFailuresPointTo`); the changed job has not run on
-  GitHub Actions. `make demo` and `make demo-stack` each
+  (`TestDemoStackSavesAndShowsEveryFileItsFailuresPointTo`); the changed job passed on the
+  `pull_request` run of the Integration workflow on 2026-10-29, which did not run the steps that
+  print and upload those files, because they run only when the job fails. `make demo` and
+  `make demo-stack` each
   removed nothing; both now remove their temporary directory when they succeed and keep it, printing
   its path, when they fail (`TestDemoStackRemovesItsWorkDirectoryOnlyOnSuccess`,
   `TestMakeDemoRemovesItsDirectoryOnlyOnSuccess`).
@@ -126,7 +130,8 @@ database written by a newer build is refused rather than downgraded.
   assertion; both queries now name the test's instance (`host.docker.internal:9095`) and the check
   requires the label on the answer (`TestWaitForScrapeReadsOnlyTheTestsOwnInstance`,
   `TestWaitForScrapeRefusesWhatIsNotTheServedStore`). Run once locally against the Compose stack
-  with the CI step, both gated tests passed.
+  with the CI step, both gated tests passed, and the `observability` job passed with the changed
+  tests on the `pull_request` run of the Integration workflow on 2026-10-29.
 - **The ownership and ledger-event gauges render the first event as a step, not a new series.**
   `twinwright_ownership_events{kind}` and `twinwright_ledger_events{type}` rendered only the values
   that already had rows, so the first fencing rejection or takeover appeared at 1 with no earlier
@@ -199,8 +204,9 @@ database written by a newer build is refused rather than downgraded.
   `--- PASS:` line for `TestSpansAreQueryableInJaeger` and `TestPrometheusScrapesAWorker` in the
   `-v` output. Run locally against the extracted step it exits 1 with the variable unset (both
   tests skip) and with a pattern that matches no test, and with canned output it exits 0 only
-  when both print a pass. The job passed on a runner in Integration run 40814472427, the first
-  with the step.
+  when both print a pass. The job passed on a runner in the first Integration run with the step,
+  and again on the `pull_request` run on 2026-10-29, where the step found the `--- PASS:` line of
+  both tests.
 - **`twinwright_queue_oldest_runnable_age_seconds` now answers for what a worker can claim.** The
   gauge counted every `runnable` row with a past `available_at`, so it read 0 while a crashed
   worker's run sat claimable behind an expired lease (the recovery path) and reported minutes of
@@ -216,8 +222,8 @@ database written by a newer build is refused rather than downgraded.
   now require that case as `newly_failing` with a detail saying the candidate failed, and the
   candidate's case at `failed` with no mutations; the CI step does it with `jq`
   (`TestRegressedBenchFailsTheGate`,
-  `TestMissingWriteRegressionNeedsTheFailedCaseNotAnyRegression`). The CI step has not run on a
-  runner.
+  `TestMissingWriteRegressionNeedsTheFailedCaseNotAnyRegression`). The `regression-gate` job,
+  with the new `jq` check, passed on the `pull_request` run of the CI workflow on 2026-10-29.
 - **ADR 0030, the bench guide and the CI comment no longer say a trajectory change cannot block a
   merge.** The gate does only warn on one (`--trajectory warn` exits 0), but
   `TestRegressedBenchFailsTheGate` fails on any warning for the healthy fixture and runs in the
@@ -523,7 +529,8 @@ database written by a newer build is refused rather than downgraded.
   isolation test requires errno 101 (network unreachable), and a bridge-network control shows
   that the same probe connects; the step's shell was run against the real daemon, against a
   skipped run and against a renamed test, and failed on the last two. The `docker` job with the
-  new step passed on a runner in Integration run 40797818415.
+  new step passed on a runner in the first Integration run with it, and again on the
+  `pull_request` run on 2026-10-29, where the step found every `--- PASS:` line it requires.
 - **A provider turn that reuses a call ID now fails the turn.** A call ID already
   used in the run, or repeated within one turn, used to be skipped; it is refused
   with an explicit error. See `TestProviderCallIDReuseFailsTheTurn`.

@@ -217,9 +217,9 @@ What each test is:
   PostgreSQL when `TWINWRIGHT_TEST_POSTGRES_DSN` is set. It is skipped without a
   server. The `postgres` job of the Integration workflow sets the DSN and runs
   `go test -count=1 ./...` against PostgreSQL 16 and 17, so every PostgreSQL-gated test
-  runs there. That job passed on every Integration run on 2026-10-28 and 2026-10-29
-  (the latest is run 40814472427), so the PostgreSQL half of the table has been run
-  against a server.
+  runs there. That job passed on every Integration run on 2026-10-28 and 2026-10-29,
+  the `pull_request` run of 2026-10-29 included, so the PostgreSQL half of the table has
+  been run against a server.
 - `TestRealProcessDeathIsRecovered` (unix only) re-executes the test binary as a
   worker that sends itself `SIGKILL` at the crash point, so the database has to
   cope with a client that vanished, possibly mid-transaction. It covers four
