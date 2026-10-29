@@ -1812,6 +1812,7 @@ func TestGateExitCodes(t *testing.T) {
 	// A baseline in which every case errored, as a bench without credentials
 	// writes, gates nothing just as an empty one does.
 	errored := writeGateReport(t, dir, "errored.json", "standard", "error")
+	unknownStatus := writeGateReport(t, dir, "unknown-status.json", "standard", "skipped")
 	tests := []struct {
 		name string
 		args []string
@@ -1820,6 +1821,7 @@ func TestGateExitCodes(t *testing.T) {
 		{"identical reports", []string{"--baseline", good, "--candidate", good}, 0},
 		{"empty baseline", []string{"--baseline", empty, "--candidate", good}, 2},
 		{"baseline with no measured case", []string{"--baseline", errored, "--candidate", good}, 2},
+		{"candidate case with a status the gate does not know", []string{"--baseline", good, "--candidate", unknownStatus}, 2},
 		{"regression", []string{"--baseline", good, "--candidate", bad}, 1},
 		{"missing candidate file", []string{"--baseline", good, "--candidate", filepath.Join(dir, "absent.json")}, 2},
 		{"missing baseline file", []string{"--baseline", filepath.Join(dir, "absent.json"), "--candidate", good}, 2},

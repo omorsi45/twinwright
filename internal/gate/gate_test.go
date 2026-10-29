@@ -509,6 +509,53 @@ func TestGateRefusesABaselineWithNoMeasuredCase(t *testing.T) {
 	}
 }
 
+// The gate's contract is to exit 2 on input it cannot judge. A status it does
+// not know is neither a pass nor a failure, so a passed baseline case would
+// "regress" to it silently; an empty case ID regresses without a JUnit testcase
+// to carry the failure; and more passes than trials is not a count.
+func TestGateRefusesAnUnjudgeableCase(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*bench.CaseResult)
+		want   string
+	}{
+		{"empty status", func(c *bench.CaseResult) { c.Status = "" }, `status ""`},
+		{"unknown status", func(c *bench.CaseResult) { c.Status = "skipped" }, `status "skipped"`},
+		{"status in the wrong case", func(c *bench.CaseResult) { c.Status = "PASSED" }, `status "PASSED"`},
+		{"timeout status", func(c *bench.CaseResult) { c.Status = "timeout" }, `status "timeout"`},
+		{"empty ID", func(c *bench.CaseResult) { c.ID = "" }, "no ID"},
+		{"more passes than trials", func(c *bench.CaseResult) { c.Trials, c.Passes = 2, 3 }, "3 passes in 2 trials"},
+		{"passes with no trial count", func(c *bench.CaseResult) { c.Trials, c.Passes = 0, 2 }, "2 passes"},
+		{"negative passes", func(c *bench.CaseResult) { c.Passes = -1 }, "-1 passes"},
+		{"negative trials", func(c *bench.CaseResult) { c.Trials = -1 }, "-1 trials"},
+	}
+	for _, side := range []string{"baseline", "candidate"} {
+		for _, tc := range tests {
+			t.Run(side+"/"+tc.name, func(t *testing.T) {
+				bad := passing("bad")
+				tc.mutate(&bad)
+				base, cand := report(2, passing("a"), passing("bad")), report(2, passing("a"), passing("bad"))
+				if side == "baseline" {
+					base = report(2, passing("a"), bad)
+				} else {
+					cand = report(2, passing("a"), bad)
+				}
+				_, err := Compare(base, cand, Options{})
+				if err == nil || !strings.Contains(err.Error(), side) || !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("want an error naming the %s and %q, got %v", side, tc.want, err)
+				}
+			})
+		}
+	}
+
+	// A version 1 report has no trial counts at all, and those are not invalid.
+	v1 := passing("a")
+	v1.Trials, v1.Passes = 0, 0
+	if _, err := Compare(report(1, v1), report(1, v1), Options{}); err != nil {
+		t.Fatalf("a version 1 case without trial counts is valid: %v", err)
+	}
+}
+
 func TestGateRefusesDuplicateCaseIDs(t *testing.T) {
 	// Which duplicate wins would decide the verdict, so neither is allowed to.
 	dup := report(2, passing("a"), passing("twice"), passing("twice"))

@@ -188,16 +188,46 @@ func Compare(baseline, candidate bench.Report, opts Options) (Result, error) {
 }
 
 // index keys cases by ID. A repeated ID is an error, not a tie to break: either
-// copy could be the one the author meant, and the verdict would depend on it.
+// copy could be the one the author meant, and the verdict would depend on it. A
+// case the gate cannot judge is an error too: bench never writes one, so it came
+// from a hand-edited, truncated or foreign report, and the gate's contract for
+// input it cannot judge is to refuse it rather than guess.
 func index(side string, cases []bench.CaseResult) (map[string]bench.CaseResult, error) {
 	out := make(map[string]bench.CaseResult, len(cases))
 	for _, c := range cases {
+		if err := checkCase(c); err != nil {
+			return nil, fmt.Errorf("the %s report: %w", side, err)
+		}
 		if _, seen := out[c.ID]; seen {
 			return nil, fmt.Errorf("the %s report repeats case ID %q", side, c.ID)
 		}
 		out[c.ID] = c
 	}
 	return out, nil
+}
+
+// checkCase refuses what the comparison would misread. A status other than the
+// three bench writes is neither a pass nor a failure, so a passed baseline case
+// would regress to it without a finding. An empty ID cannot carry a JUnit
+// testcase. A pass count above the trial count is not a measurement; a report
+// from before trial counts has zero trials and zero passes, and a trial total
+// of zero measured one run.
+func checkCase(c bench.CaseResult) error {
+	if c.ID == "" {
+		return fmt.Errorf("a case has no ID")
+	}
+	switch c.Status {
+	case "passed", "failed", "error":
+	default:
+		return fmt.Errorf("case %q has status %q, want passed, failed or error", c.ID, c.Status)
+	}
+	if c.Trials < 0 {
+		return fmt.Errorf("case %q has %d trials", c.ID, c.Trials)
+	}
+	if c.Passes < 0 || c.Passes > max(c.Trials, 1) {
+		return fmt.Errorf("case %q has %d passes in %d trials", c.ID, c.Passes, c.Trials)
+	}
+	return nil
 }
 
 func compareCase(r *Result, b, c bench.CaseResult, v2 bool, opts Options) {

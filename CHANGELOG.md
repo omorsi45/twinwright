@@ -13,6 +13,13 @@ database written by a newer build is refused rather than downgraded.
 
 ### Fixed
 
+- **The gate refuses a case it cannot judge instead of passing it.** A candidate case whose
+  status was anything but `passed`, `failed` or `error` (`skipped`, `PASSED`, `timeout`, empty)
+  made a passed baseline case "regress" to it silently and the gate exited 0; a case with an
+  empty ID failed the gate while the JUnit file carried no testcase for it and said
+  `failures="0"`; more passes than trials was accepted. `gate` now exits 2 for each, naming the
+  report and the case; a report from before trial counts stays valid
+  (`TestGateRefusesAnUnjudgeableCase`, `TestGateExitCodes`).
 - **A baseline in which every case errored is refused, and a bench run that measured nothing
   exits non-zero.** `bench` with a missing provider key errored all 21 cases, exited 0 and wrote
   a report that looked like any other; the gate then marked every case `baseline_unmeasured`
