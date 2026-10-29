@@ -424,10 +424,13 @@ func (h *harness) recoveryTrial(ctx context.Context, s *store.Store, ttl time.Du
 
 // awaitRecovery polls for the crashed run until a claim ends finished, giving
 // up after five TTLs and ten seconds. A run that was requeued or fenced is tried
-// again; one that exhausted its retries is final and fails the trial at once.
-func awaitRecovery(ctx context.Context, w *worker.Worker, ttl time.Duration) (worker.Outcome, error) {
+// again; one that exhausted its retries is final and fails the trial at once. If
+// the caller's context ends first, as Ctrl-C does, the error says so and unwraps
+// to the context's own, instead of describing the interruption as a run that
+// never recovered.
+func awaitRecovery(parent context.Context, w *worker.Worker, ttl time.Duration) (worker.Outcome, error) {
 	limit := ttl*5 + 10*time.Second
-	ctx, cancel := context.WithTimeout(ctx, limit)
+	ctx, cancel := context.WithTimeout(parent, limit)
 	defer cancel()
 	last := "no claim"
 	for {
@@ -446,6 +449,9 @@ func awaitRecovery(ctx context.Context, w *worker.Worker, ttl time.Duration) (wo
 		}
 		select {
 		case <-ctx.Done():
+			if cause := parent.Err(); cause != nil {
+				return worker.Outcome{}, fmt.Errorf("the wait for the run's recovery was cancelled (last claim: %s): %w", last, cause)
+			}
 			return worker.Outcome{}, fmt.Errorf("the run was not recovered within %s (last claim: %s)", limit, last)
 		case <-time.After(recoveryPoll):
 		}

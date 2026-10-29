@@ -13,6 +13,14 @@ database written by a newer build is refused rather than downgraded.
 
 ### Fixed
 
+- **`twinwright perf` refuses an `--out` it cannot write before it measures, and a Ctrl-C during a
+  recovery wait is reported as a cancellation.** The report is written after the whole measurement,
+  so a mistyped directory cost over a minute and the figures; the command now opens the path first
+  and exits 2, leaving no file behind and an existing report untouched
+  (`TestPerfCLIRejectsAnOutPathItCannotWriteBeforeMeasuring`,
+  `TestPerfCLICheckingTheOutPathLeavesNoFileAndKeepsAnExistingReport`). An interrupted wait said
+  "the run was not recovered within 35s"; it now says it was cancelled and unwraps to
+  `context.Canceled` (`TestAwaitRecoveryReportsACancellationAsOne`).
 - **`twinwright perf` fails when a replay does not verify.** A replay that verified fewer runs than
   it executed was recorded in the report and the command still exited 0, so the dispatch-only
   `perf` CI job stayed green on it. It now writes the report and exits 1, like a duplicated

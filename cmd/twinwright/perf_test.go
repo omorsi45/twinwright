@@ -124,6 +124,67 @@ func TestPerfCLIRejectsBadInput(t *testing.T) {
 	}
 }
 
+// The report is written after the whole measurement, which with the defaults is
+// over a minute, so a path that cannot be written has to be found before it
+// starts. The unreachable database below would make a started measurement fail
+// with exit 1; seeing exit 2 means the command stopped at the path.
+func TestPerfCLIRejectsAnOutPathItCannotWriteBeforeMeasuring(t *testing.T) {
+	dir := t.TempDir()
+	tests := []struct {
+		name string
+		out  string
+	}{
+		{"missing parent directory", filepath.Join(dir, "no-such-dir", "nested", "perf.json")},
+		{"a directory", dir},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			err := runCLI([]string{
+				"perf", "--examples", perfExamples(),
+				"--db", "postgres://perf:test-not-a-secret@127.0.0.1:1/perf?sslmode=disable",
+				"--workloads", "replay", "--replay-runs", "1", "--out", tc.out,
+			}, &out)
+			if err == nil {
+				t.Fatal("perf accepted an --out it cannot write")
+			}
+			if got := exitCode(err); got != exitBadInput {
+				t.Errorf("exit code=%d (%v) want %d: the path should have been refused before any measurement", got, err, exitBadInput)
+			}
+			if !strings.Contains(err.Error(), "--out") {
+				t.Errorf("the error does not name the flag: %v", err)
+			}
+			if out.Len() != 0 {
+				t.Errorf("a refused path still printed a summary: %s", out.String())
+			}
+		})
+	}
+}
+
+// Checking the path must not leave anything behind, and must not touch a report
+// that is already there: the old one stays until a new one replaces it.
+func TestPerfCLICheckingTheOutPathLeavesNoFileAndKeepsAnExistingReport(t *testing.T) {
+	dir := t.TempDir()
+	fresh := filepath.Join(dir, "fresh.json")
+	if err := checkReportPath(fresh); err != nil {
+		t.Fatalf("a path in an existing directory was refused: %v", err)
+	}
+	if _, err := os.Stat(fresh); err == nil {
+		t.Error("checking a new path left a file behind")
+	}
+
+	existing := filepath.Join(dir, "existing.json")
+	if err := os.WriteFile(existing, []byte("previous report\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkReportPath(existing); err != nil {
+		t.Fatalf("an existing report was refused: %v", err)
+	}
+	if got, _ := os.ReadFile(existing); string(got) != "previous report\n" {
+		t.Errorf("checking the path changed the existing report: %q", got)
+	}
+}
+
 // A report that records a duplicated mutation or a recovery violation is the
 // finding the command exists to produce, so the file must exist before the
 // command fails, or the failure would leave nothing to look at.

@@ -524,6 +524,40 @@ func TestRunNeverPrintsTheDSNOnAConnectionFailure(t *testing.T) {
 	}
 }
 
+// Ctrl-C cancels the measurement through the context, and the wait for a
+// recovery is where that usually lands. Reporting it as a timeout would send
+// the reader looking for a recovery bug in a run they interrupted themselves.
+func TestAwaitRecoveryReportsACancellationAsOne(t *testing.T) {
+	sc := duplicateCharge(t)
+	s := openSQLite(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w := worker.New(s, fleetExecute(s, sc), worker.Config{
+		ID: "perf-await", LeaseTTL: time.Second, PollInterval: time.Millisecond, Logger: quietLogger(),
+	})
+	if err := w.Register(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// The queue is empty, so the wait would run to its limit of five TTLs and ten
+	// seconds if nothing cancelled it.
+	time.AfterFunc(200*time.Millisecond, cancel)
+
+	started := time.Now()
+	_, err := awaitRecovery(ctx, w, time.Second)
+	if err == nil {
+		t.Fatal("awaitRecovery returned no error with nothing to recover")
+	}
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Errorf("awaitRecovery ran for %s after the context was cancelled", elapsed)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("a cancelled wait must unwrap to context.Canceled, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "not recovered within") {
+		t.Errorf("a cancelled wait is reported as a timeout: %v", err)
+	}
+}
+
 func TestRequireIdleQueue(t *testing.T) {
 	ctx := context.Background()
 	sc := duplicateCharge(t)

@@ -175,7 +175,9 @@ make perf                                                    # builds ./twinwrig
 ```
 
 The defaults are fleet sizes 1,2,4,8, 40 runs per trial, 3 trials, lease TTLs
-1s,2s,5s, 20 replay runs, seed 42 and all four workloads. `--out` is required. The
+1s,2s,5s, 20 replay runs, seed 42 and all four workloads. `--out` is required, and the
+command checks that it can write there (exit 2 otherwise) before it measures anything, since the report is
+written only at the end. The
 command writes the report, prints a short summary, and then exits 1 if a recovery
 duplicated a committed mutation, a replay did not verify every run or the crash matrix reported a violation, or 2 for
 bad input.
