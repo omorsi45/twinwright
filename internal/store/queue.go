@@ -407,6 +407,27 @@ func (s *Store) TouchWorker(ctx context.Context, id string, now time.Time) error
 	return err
 }
 
+// RemoveWorker takes a worker's row out of the fleet table when the worker stops
+// cleanly, and reports whether it removed one. A worker that still owns a live
+// lease at now keeps its row: the lease is an unfinished run, and the row is how an
+// operator finds who holds it. The row of a worker that was killed instead of
+// stopped stays, and the metrics leave it out once it has not been seen for their
+// window. Removing a row that is not there is not an error.
+func (s *Store) RemoveWorker(ctx context.Context, id string, now time.Time) (bool, error) {
+	result, err := s.DB.ExecContext(ctx, `
+DELETE FROM workers
+WHERE id=? AND NOT EXISTS (SELECT 1 FROM run_leases WHERE owner=? AND expires_at > ?)`,
+		id, id, CoordinationTime(now))
+	if err != nil {
+		return false, err
+	}
+	removed, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return removed > 0, nil
+}
+
 // WorkerRecord is one registered worker.
 type WorkerRecord struct {
 	ID         string `json:"id"`

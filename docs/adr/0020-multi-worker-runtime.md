@@ -32,7 +32,10 @@ different guarantees is a trap for whoever reads the code next.
 - `run_leases` holds one row per run: current owner, current fence, the highest
   fence that has committed, and expiry.
 - `run_ownership_log` is an append-only audit of ownership transitions.
-- `workers` records the fleet for operators.
+- `workers` records the fleet for operators: a worker registers when it starts,
+  refreshes its row when it claims, renews a lease or polls an empty queue, and
+  removes it when it stops cleanly, unless it still owns a live lease. The row of a
+  worker that was killed stays.
 - `twinwright run --enqueue` creates a run and queues it. `twinwright worker`
   claims, executes and finishes runs. `twinwright queue` reports depth, fleet
   and per-run ownership.
@@ -174,3 +177,4 @@ and against real PostgreSQL when a DSN is configured.
 
 - 2026-10-28: the fence check is described as three conditions, not two that are both needed. The first version credited `committed_fence` with keeping fencing correct under clock skew, but the owner-and-token match in the lease row involves no clock either and already refuses every token the mark would refuse while the row's fence only goes up. A mutation that removes the mark passed every suite until `TestGuardFenceRefusesATokenBelowTheCommittedMarkWhenTheFenceWasRewound` was added for the case where it matters (CORE-6).
 - 2026-10-28: "byte-identical ledgers" became "the same agent events, tool results and world rows". Replay compares event types and payloads by decoded value, saved results and world tables, and skips `recorded_at`, which differs in every event, so the property that holds and is measured is the narrower one (CORE-10).
+- 2026-10-28: nothing ever removed a `workers` row, so the table and the metrics read from it gained a row for every process that ever started (OBS-11). A worker that stops cleanly (`Serve` returning, or the worker command ending after `--drain` or `--max-runs`) now removes its own row through `Worker.Close`, unless it still owns a live lease, and a worker waiting for work refreshes its row at most once a minute. The row of a killed worker stays; the metrics leave it out ten minutes after it was last seen. `twinwright queue` still lists every row.

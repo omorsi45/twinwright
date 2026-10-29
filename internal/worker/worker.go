@@ -25,6 +25,7 @@ import (
 	"log/slog"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"twinwright/internal/store"
@@ -41,6 +42,11 @@ const (
 
 // minRenewEvery is the shortest default renewal interval. See withDefaults.
 const minRenewEvery = 100 * time.Millisecond
+
+// IdleHeartbeatEvery is how often a worker that finds nothing to claim refreshes
+// its row, so a window over the row's last_seen_at does not drop a healthy idle
+// worker. The metrics window is many times longer.
+const IdleHeartbeatEvery = time.Minute
 
 // ExecuteFunc runs one claimed run to a stopping point: completion, a step
 // budget pause, or an error. It receives a context that is cancelled if the
@@ -163,6 +169,10 @@ type Worker struct {
 	exportMu sync.Mutex
 	inFlight chan struct{}
 
+	// heartbeatAt is when an idle poll last refreshed this worker's row, as Unix
+	// nanoseconds by Config.Clock; zero means it has not.
+	heartbeatAt atomic.Int64
+
 	// Observer, when set, receives every claim that ended in a disposition. A claim
 	// whose closing write failed for a reason other than the fence ended in none and
 	// is reported by ClaimAndRun's error instead, so the observed claims and the sum
@@ -220,11 +230,28 @@ type Outcome struct {
 // for longer than it takes to end, and one that ignores it cannot hold shutdown.
 var exportDrainTimeout = trace.DefaultExportTimeout
 
-// Close finishes the worker's shutdown after its last claim: it waits at most
-// exportDrainTimeout for the trace export in flight, if any. Serve calls it before
-// it returns; a caller that drives ClaimAndRun itself calls it when it is done, or
-// the process may end before the last trace has been sent.
+// Close ends the worker's life after its last claim. It waits at most
+// exportDrainTimeout for the trace export in flight, if any, and then takes the
+// worker's row out of the fleet table, so the table and the metrics read from it do
+// not gain a row for every restart. A row whose worker still owns a live lease (a
+// claim that could not be handed back) stays until the lease lapses; see
+// store.RemoveWorker. A worker that is killed instead never gets here.
+//
+// Serve calls it before it returns; a caller that drives ClaimAndRun itself calls
+// it when it is done, or the process may end before the last trace has been sent.
+// Calling it again does nothing.
 func (w *Worker) Close() {
+	w.drainExport()
+	ctx, cancel := context.WithTimeout(context.Background(), releaseTimeout)
+	defer cancel()
+	if _, err := w.Store.RemoveWorker(ctx, w.Config.ID, w.Config.Clock.Now()); err != nil {
+		w.Config.Logger.Warn("could not remove the worker's row on stop", "worker", w.Config.ID, "error", err)
+	}
+}
+
+// drainExport waits for the trace export in flight, if any, for at most
+// exportDrainTimeout.
+func (w *Worker) drainExport() {
 	w.exportMu.Lock()
 	done := w.inFlight
 	w.exportMu.Unlock()
@@ -266,6 +293,9 @@ func (w *Worker) ClaimAndRun(ctx context.Context) (Outcome, error) {
 	now := w.Config.Clock.Now()
 	lease, entry, err := w.Store.ClaimRun(ctx, w.Config.ID, w.Config.LeaseTTL, now)
 	if err != nil {
+		if errors.Is(err, store.ErrNoWork) {
+			w.idleHeartbeat(ctx, now)
+		}
 		return Outcome{WorkerID: w.Config.ID}, err
 	}
 	outcome := Outcome{WorkerID: w.Config.ID, RunID: lease.RunID, Fence: lease.Token, Attempt: entry.Attempts, Takeover: entry.Takeover,
@@ -392,6 +422,23 @@ func (w *Worker) unsettled(ctx context.Context, lease store.RunLease, outcome Ou
 		w.Config.Logger.Warn("could not record fencing rejection", "run", lease.RunID, "error", recErr)
 	}
 	return w.observe(outcome), nil
+}
+
+// idleHeartbeat refreshes this worker's row after a poll that found nothing, at
+// most once per IdleHeartbeatEvery. A claim and a lease renewal already refresh it;
+// without this a healthy worker waiting for work would look unseen to anything
+// that reads last_seen_at, such as the metrics window.
+func (w *Worker) idleHeartbeat(ctx context.Context, now time.Time) {
+	if last := w.heartbeatAt.Load(); last != 0 && now.Sub(time.Unix(0, last)) < IdleHeartbeatEvery {
+		return
+	}
+	if err := w.Store.TouchWorker(ctx, w.Config.ID, now); err != nil {
+		if ctx.Err() == nil {
+			w.Config.Logger.Warn("worker heartbeat failed", "worker", w.Config.ID, "error", err)
+		}
+		return
+	}
+	w.heartbeatAt.Store(now.UnixNano())
 }
 
 // settleOverDelivered ends a claim for a run that has been delivered more times

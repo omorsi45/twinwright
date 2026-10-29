@@ -158,7 +158,7 @@ func TestExportDoesNotDelayTheNextClaim(t *testing.T) {
 
 	// Once the export ends the slot is free again.
 	close(exports.release)
-	w.Close()
+	w.drainExport()
 	third, err := w.ClaimAndRun(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -166,7 +166,7 @@ func TestExportDoesNotDelayTheNextClaim(t *testing.T) {
 	if !third.TraceExportQueued {
 		t.Fatalf("third outcome=%+v, want its export queued now that none is in flight", third)
 	}
-	w.Close()
+	w.drainExport()
 	if got := exports.calls.Load(); got != 2 {
 		t.Fatalf("the hook ran %d times, want 2", got)
 	}

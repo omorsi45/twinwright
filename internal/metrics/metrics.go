@@ -254,7 +254,17 @@ type Collector struct {
 	WorkerID string
 	// Clock is for deterministic tests; nil means time.Now.
 	Clock store.Clock
+	// WorkerWindow is how recently a worker must have been seen to be counted by
+	// twinwright_workers_registered and to have a last-seen series. Zero means
+	// DefaultWorkerWindow.
+	WorkerWindow time.Duration
 }
+
+// DefaultWorkerWindow is the window the metrics use for which workers to list:
+// ten minutes, many times the worker's idle heartbeat (a minute), so a healthy
+// worker, idle or busy, is always inside it, and a process that was killed is out
+// of the series ten minutes after its last sign of life.
+const DefaultWorkerWindow = 10 * time.Minute
 
 // Handler serves the Prometheus text exposition format.
 func (c Collector) Handler() http.Handler {
@@ -347,20 +357,40 @@ func (c Collector) Render(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("workers: %w", err)
 	}
-	writeHelp(&b, "twinwright_workers_registered", "gauge", "Workers that have registered against this database.")
-	writeSample(&b, "twinwright_workers_registered", nil, float64(len(workers)))
-
-	// A worker's stamp moves when it registers, claims a run or renews a lease.
-	// It does not move on an idle poll, so an idle worker's age keeps growing.
-	sort.Slice(workers, func(i, j int) bool { return workers[i].ID < workers[j].ID })
-	writeHelp(&b, workerLastSeenAge, "gauge",
-		"Seconds since each registered worker last registered, claimed a run or renewed a lease.")
+	// Only workers seen within the window are listed. Every process with a default
+	// ID adds a row and a killed worker never removes its own, so without a window
+	// the series and the count grow by one per restart and an alert on last-seen
+	// age fires forever for each past process. The count and the series use the
+	// same set.
+	window := c.WorkerWindow
+	if window <= 0 {
+		window = DefaultWorkerWindow
+	}
+	type seenWorker struct {
+		id  string
+		age float64
+	}
+	var seen []seenWorker
 	for _, worker := range workers {
 		age, err := ageSeconds(worker.LastSeenAt, now)
 		if err != nil {
 			return "", fmt.Errorf("worker %q last seen: %w", worker.ID, err)
 		}
-		writeSample(&b, workerLastSeenAge, map[string]string{"worker": worker.ID}, age)
+		if age <= window.Seconds() {
+			seen = append(seen, seenWorker{id: worker.ID, age: age})
+		}
+	}
+	writeHelp(&b, "twinwright_workers_registered", "gauge",
+		fmt.Sprintf("Workers seen within the last %s: registered, claimed a run, renewed a lease or polled an empty queue. A worker that stopped cleanly removed itself.", window))
+	writeSample(&b, "twinwright_workers_registered", nil, float64(len(seen)))
+
+	// A worker's stamp moves when it registers, claims a run, renews a lease or
+	// polls an empty queue (at most once a minute).
+	sort.Slice(seen, func(i, j int) bool { return seen[i].id < seen[j].id })
+	writeHelp(&b, workerLastSeenAge, "gauge",
+		fmt.Sprintf("Seconds since each worker seen within the last %s last registered, claimed a run, renewed a lease or polled an empty queue.", window))
+	for _, worker := range seen {
+		writeSample(&b, workerLastSeenAge, map[string]string{"worker": worker.id}, worker.age)
 	}
 
 	writeHelp(&b, "twinwright_scrape_timestamp_seconds", "gauge", "When this document was produced.")

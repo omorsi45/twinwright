@@ -988,6 +988,68 @@ func TestOldestRunnableAgeAgreesWithClaimRun(t *testing.T) {
 	}
 }
 
+// Every worker process with the default ID adds a row, and nothing used to remove
+// one, so the last-seen series and the registered count grew by one per restart and
+// an alert on last-seen age fired forever for each past process. A worker not seen
+// within the window is left out of both. The count and the gauge agree on which
+// workers there are.
+func TestLastSeenAgeOmitsPrunedWorkers(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	for id, seen := range map[string]time.Time{
+		"seen-now":      now.Add(-5 * time.Second),
+		"inside":        now.Add(-DefaultWorkerWindow + time.Second),
+		"on-the-edge":   now.Add(-DefaultWorkerWindow),
+		"just-outside":  now.Add(-DefaultWorkerWindow - time.Second),
+		"long-gone":     now.Add(-72 * time.Hour),
+		"clock-skewed":  now.Add(30 * time.Second),
+		"older-restart": now.Add(-24 * time.Hour),
+	} {
+		if err := s.RegisterWorker(ctx, id, "host", seen); err != nil {
+			t.Fatal(err)
+		}
+	}
+	render := func(window time.Duration) (map[string]float64, float64, string) {
+		t.Helper()
+		body, err := Collector{Store: s, Counters: NewCounters(), WorkerID: "w", Clock: func() time.Time { return now }, WorkerWindow: window}.Render(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		families := mustParse(t, body)
+		ages := map[string]float64{}
+		for _, sample := range families[workerLastSeenAge].samples {
+			ages[sample.labels["worker"]] = sample.value
+		}
+		return ages, sampleValue(t, families["twinwright_workers_registered"], "twinwright_workers_registered", map[string]string{}), body
+	}
+
+	ages, registered, body := render(0)
+	want := []string{"clock-skewed", "inside", "on-the-edge", "seen-now"}
+	if len(ages) != len(want) {
+		t.Fatalf("last seen series = %v, want exactly %v", ages, want)
+	}
+	for _, id := range want {
+		if _, ok := ages[id]; !ok {
+			t.Fatalf("last seen series = %v, want %s in it", ages, id)
+		}
+	}
+	if registered != float64(len(want)) {
+		t.Fatalf("registered = %v, want %d: the count must agree with the series", registered, len(want))
+	}
+	if !strings.Contains(body, DefaultWorkerWindow.String()) {
+		t.Fatalf("the HELP text does not state the window %s\n%s", DefaultWorkerWindow, body)
+	}
+
+	// A narrower window drops more, and a wider one keeps the day-old restart.
+	if ages, registered, _ = render(time.Minute); len(ages) != 2 || registered != 2 {
+		t.Fatalf("one minute window: series=%v registered=%v, want seen-now and clock-skewed", ages, registered)
+	}
+	if ages, registered, _ = render(48 * time.Hour); len(ages) != 6 || registered != 6 {
+		t.Fatalf("48 hour window: series=%v registered=%v, want every worker but long-gone", ages, registered)
+	}
+}
+
 func TestWorkerLastSeenAge(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)

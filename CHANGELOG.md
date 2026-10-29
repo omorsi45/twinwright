@@ -13,6 +13,17 @@ database written by a newer build is refused rather than downgraded.
 
 ### Fixed
 
+- **Worker rows are removed when a worker stops, and the metrics list only recent workers.** Nothing
+  ever removed a `workers` row, so `twinwright_worker_last_seen_age_seconds` gained a series and
+  `twinwright_workers_registered` a count for every process that ever started, and an alert on
+  last-seen age fired forever for a worker that had stopped. A worker that stops cleanly now removes
+  its own row (`Worker.Close`, called by `Serve` and by the worker command), unless it still owns a
+  live lease; both gauges list only workers seen within the last ten minutes, and say so in their
+  HELP text. A worker waiting for work refreshes its row once a minute so a healthy idle worker
+  stays in the window. The row of a killed worker stays in the table (and in `twinwright queue`) and
+  leaves the metrics ten minutes after its last sign of life (`TestLastSeenAgeOmitsPrunedWorkers`,
+  `TestRemoveWorker`, `TestCloseRemovesTheWorkersRow`, `TestServeRemovesItsRowOnACleanStop`,
+  `TestAnIdleWorkerStaysSeen`).
 - **A worker whose `--metrics-addr` cannot be bound now exits instead of running without
   metrics.** The endpoint started in a goroutine and a bind failure was one stderr line while the
   worker claimed on, so with another process on the port Prometheus scraped that process and the

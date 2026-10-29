@@ -42,7 +42,8 @@ it occurs.
 
 **Gauges are read from the database at scrape time**: queue depth by state, runs
 by status, and ledger-derived counts (tool responses, retries, authorization
-denials, chaos injections, ownership transitions, registered workers). These are
+denials, chaos injections, ownership transitions, workers seen in the last ten
+minutes). These are
 computed from the ledger on every scrape rather than maintained as separate
 counters, which keeps the ledger the single source of truth. A separately
 maintained counter can disagree with the ledger; a query cannot.
@@ -83,3 +84,7 @@ provider cost accounting beyond the token usage a provider actually reports. Liv
 delivery to a collector is exercised against a real HTTP server in tests; the
 docker-compose collector is offered for manual confirmation and is not part of
 CI.
+
+## Corrections
+
+- 2026-10-28: `twinwright_workers_registered` counted every row in `workers` and `twinwright_worker_last_seen_age_seconds` had a series for each, so both grew by one for every process that ever started, and an alert on last-seen age fired forever for a worker that had stopped (OBS-11). Both now list only workers seen within the last ten minutes (`metrics.DefaultWorkerWindow`), a worker that stops cleanly removes its own row, and a worker waiting for work refreshes its row once a minute so it stays inside the window. The HELP text of both gauges states the window.
