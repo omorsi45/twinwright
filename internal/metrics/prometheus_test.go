@@ -11,6 +11,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -51,6 +52,22 @@ const (
 	// scrapeWorker labels the worker's own counters so the test can tell that the
 	// series it found came from the listener it started.
 	scrapeWorker = "prometheus-scrape-test"
+
+	// scrapeInstance is the instance label Prometheus gives the series it scrapes
+	// from scrapeAddress: the static target in deploy/prometheus.yml. The config
+	// has a second target (host.docker.internal:9096, the demo's second worker), and
+	// a worker listening there serves its own twinwright_queue_entries, so a query
+	// that does not name the instance can read a series this test did not start.
+	scrapeInstance = "host.docker.internal:9095"
+)
+
+// The two instant queries the check makes, each narrowed to the test's own
+// listener. checkScrape also requires the instance label on what comes back, so a
+// series from another target cannot satisfy or break the check even if the answer
+// contains it.
+const (
+	queueQuery  = `twinwright_queue_entries{instance="` + scrapeInstance + `"}`
+	claimsQuery = `twinwright_worker_claims_total{instance="` + scrapeInstance + `"}`
 )
 
 // promSample is one series of an instant-vector query answer.
@@ -145,36 +162,42 @@ func query(ctx context.Context, client *http.Client, base, expression string) ([
 	return samples, body, err
 }
 
-// checkScrape asks Prometheus for the two series the test depends on. It returns
-// nil when both are what the served store implies: a runnable queue entry count
-// of 1, and this worker's claims counter present. Otherwise it returns the
-// problem and the answer that showed it, for a failure message.
+// checkScrape asks Prometheus for the two series the test depends on, each
+// narrowed to the instance the test's own listener is scraped as (scrapeInstance),
+// and requires that instance on what comes back. It returns nil when both are what
+// the served store implies: a runnable queue entry count of 1, and this worker's
+// claims counter present. Otherwise it returns the problem and the answer that
+// showed it, for a failure message.
+//
+// The instance matters because deploy/prometheus.yml has a second target, 9096:
+// a worker listening there (the demo's second worker) is scraped into the same
+// metric names, and its runnable count could satisfy or break the check.
 func checkScrape(ctx context.Context, client *http.Client, base string) ([]byte, error) {
-	samples, body, err := query(ctx, client, base, "twinwright_queue_entries")
+	samples, body, err := query(ctx, client, base, queueQuery)
 	if err != nil {
 		return body, err
 	}
-	value, found, err := findSample(samples, map[string]string{"state": "runnable"})
+	value, found, err := findSample(samples, map[string]string{"state": "runnable", "instance": scrapeInstance})
 	if err != nil {
 		return body, err
 	}
 	if !found {
-		return body, fmt.Errorf(`no twinwright_queue_entries sample has state="runnable"`)
+		return body, fmt.Errorf(`no twinwright_queue_entries sample has state="runnable" and instance=%q`, scrapeInstance)
 	}
 	if value != 1 {
-		return body, fmt.Errorf(`twinwright_queue_entries{state="runnable"} is %v, want 1`, value)
+		return body, fmt.Errorf(`twinwright_queue_entries{state="runnable",instance=%q} is %v, want 1`, scrapeInstance, value)
 	}
 
-	samples, body, err = query(ctx, client, base, "twinwright_worker_claims_total")
+	samples, body, err = query(ctx, client, base, claimsQuery)
 	if err != nil {
 		return body, err
 	}
-	_, found, err = findSample(samples, map[string]string{"worker": scrapeWorker})
+	_, found, err = findSample(samples, map[string]string{"worker": scrapeWorker, "instance": scrapeInstance})
 	if err != nil {
 		return body, err
 	}
 	if !found {
-		return body, fmt.Errorf("no twinwright_worker_claims_total sample has worker=%q", scrapeWorker)
+		return body, fmt.Errorf("no twinwright_worker_claims_total sample has worker=%q and instance=%q", scrapeWorker, scrapeInstance)
 	}
 	return nil, nil
 }
@@ -279,9 +302,14 @@ func vector(samples ...string) string {
 
 const (
 	runnableOne = `{"metric":{"__name__":"twinwright_queue_entries","instance":"host.docker.internal:9095","job":"twinwright-workers","state":"runnable"},"value":[1730000000.5,"1"]}`
-	runnableTwo = `{"metric":{"__name__":"twinwright_queue_entries","state":"runnable"},"value":[1730000000.5,"2"]}`
-	leasedOne   = `{"metric":{"__name__":"twinwright_queue_entries","state":"leased"},"value":[1730000000.5,"1"]}`
-	claimsZero  = `{"metric":{"__name__":"twinwright_worker_claims_total","worker":"prometheus-scrape-test"},"value":[1730000000.5,"0"]}`
+	runnableTwo = `{"metric":{"__name__":"twinwright_queue_entries","instance":"host.docker.internal:9095","state":"runnable"},"value":[1730000000.5,"2"]}`
+	leasedOne   = `{"metric":{"__name__":"twinwright_queue_entries","instance":"host.docker.internal:9095","state":"leased"},"value":[1730000000.5,"1"]}`
+	claimsZero  = `{"metric":{"__name__":"twinwright_worker_claims_total","instance":"host.docker.internal:9095","worker":"prometheus-scrape-test"},"value":[1730000000.5,"0"]}`
+
+	// The same series as served by the other target in deploy/prometheus.yml.
+	runnableOneElsewhere = `{"metric":{"__name__":"twinwright_queue_entries","instance":"host.docker.internal:9096","job":"twinwright-workers","state":"runnable"},"value":[1730000000.5,"1"]}`
+	runnableTwoElsewhere = `{"metric":{"__name__":"twinwright_queue_entries","instance":"host.docker.internal:9096","job":"twinwright-workers","state":"runnable"},"value":[1730000000.5,"2"]}`
+	claimsElsewhere      = `{"metric":{"__name__":"twinwright_worker_claims_total","instance":"host.docker.internal:9096","worker":"prometheus-scrape-test"},"value":[1730000000.5,"0"]}`
 )
 
 func TestDecodeQuery(t *testing.T) {
@@ -337,9 +365,9 @@ func TestWaitForScrapeOutlastsTheFirstScrape(t *testing.T) {
 			return http.StatusOK, vector()
 		}
 		switch expression {
-		case "twinwright_queue_entries":
+		case queueQuery:
 			return http.StatusOK, vector(leasedOne, runnableOne)
-		case "twinwright_worker_claims_total":
+		case claimsQuery:
 			return http.StatusOK, vector(claimsZero)
 		}
 		t.Errorf("unexpected query %q", expression)
@@ -365,11 +393,17 @@ func TestWaitForScrapeRefusesWhatIsNotTheServedStore(t *testing.T) {
 		{"another state only", vector(leasedOne), vector(claimsZero), `no twinwright_queue_entries sample has state="runnable"`},
 		{"no claims counter", vector(runnableOne), vector(), `no twinwright_worker_claims_total sample has worker="prometheus-scrape-test"`},
 		{"another worker's counter", vector(runnableOne),
-			vector(`{"metric":{"worker":"someone-else"},"value":[1730000000.5,"0"]}`), `no twinwright_worker_claims_total sample`},
+			vector(`{"metric":{"instance":"host.docker.internal:9095","worker":"someone-else"},"value":[1730000000.5,"0"]}`), `no twinwright_worker_claims_total sample`},
+		// deploy/prometheus.yml has a second target. A runnable entry or a claims
+		// counter that Prometheus scraped from it is not the test's listener's, and
+		// neither satisfies the check nor breaks it.
+		{"the other target's runnable entry alone", vector(runnableOneElsewhere), vector(claimsZero), `no twinwright_queue_entries sample has state="runnable"`},
+		{"the other target's runnable entry first, ours is 2", vector(runnableOneElsewhere, runnableTwo), vector(claimsZero), `is 2, want 1`},
+		{"the claims counter of the other target alone", vector(runnableOne), vector(claimsElsewhere), `no twinwright_worker_claims_total sample`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			server := fakePrometheus(t, func(expression string, _ int32) (int, string) {
-				if expression == "twinwright_queue_entries" {
+				if expression == queueQuery {
 					return http.StatusOK, tc.queue
 				}
 				return http.StatusOK, tc.claims
@@ -383,6 +417,43 @@ func TestWaitForScrapeRefusesWhatIsNotTheServedStore(t *testing.T) {
 				t.Fatalf("err = %q, want it to mention %q and the last body", err, tc.problem)
 			}
 		})
+	}
+}
+
+// A worker listening on the other target in deploy/prometheus.yml (the demo's
+// second worker) is scraped into the same metric names. Its series, listed before
+// the test's own and with a value that would fail the check, must be ignored, and
+// the queries must name the test's instance.
+func TestWaitForScrapeReadsOnlyTheTestsOwnInstance(t *testing.T) {
+	var asked []string
+	var mu sync.Mutex
+	server := fakePrometheus(t, func(expression string, _ int32) (int, string) {
+		mu.Lock()
+		asked = append(asked, expression)
+		mu.Unlock()
+		switch expression {
+		case queueQuery:
+			return http.StatusOK, vector(runnableTwoElsewhere, leasedOne, runnableOne)
+		case claimsQuery:
+			return http.StatusOK, vector(claimsElsewhere, claimsZero)
+		}
+		t.Errorf("unexpected query %q", expression)
+		return http.StatusBadRequest, ""
+	})
+	stopped := make(chan struct{})
+	if err := waitForScrape(context.Background(), server.Client(), server.URL, stopped, 5*time.Millisecond, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, want := range []string{queueQuery, claimsQuery} {
+		found := false
+		for _, got := range asked {
+			found = found || got == want
+		}
+		if !found || !strings.Contains(want, `instance="host.docker.internal:9095"`) {
+			t.Fatalf("the check asked %v, want %q, which names the instance", asked, want)
+		}
 	}
 }
 

@@ -13,6 +13,16 @@ database written by a newer build is refused rather than downgraded.
 
 ### Fixed
 
+- **ADR 0032 no longer claims more than the gated tests read, and names both Prometheus targets.**
+  Its Consequences section said a change to the OTLP encoding, the span attributes or the exposition
+  document is checked against real software on every integration run; the tests read the span
+  count, the root's name, one tag key and two series. It also named one Prometheus target where
+  `deploy/prometheus.yml` has two. `TestPrometheusScrapesAWorker` took the first runnable queue
+  sample from any target, so a worker on the demo's second port could satisfy or break its
+  assertion; both queries now name the test's instance (`host.docker.internal:9095`) and the check
+  requires the label on the answer (`TestWaitForScrapeReadsOnlyTheTestsOwnInstance`,
+  `TestWaitForScrapeRefusesWhatIsNotTheServedStore`). Run once locally against the Compose stack
+  with the CI step, both gated tests passed.
 - **The ownership and ledger-event gauges render the first event as a step, not a new series.**
   `twinwright_ownership_events{kind}` and `twinwright_ledger_events{type}` rendered only the values
   that already had rows, so the first fencing rejection or takeover appeared at 1 with no earlier
