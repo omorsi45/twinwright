@@ -13,6 +13,14 @@ database written by a newer build is refused rather than downgraded.
 
 ### Fixed
 
+- **A worker whose `--metrics-addr` cannot be bound now exits instead of running without
+  metrics.** The endpoint started in a goroutine and a bind failure was one stderr line while the
+  worker claimed on, so with another process on the port Prometheus scraped that process and the
+  worker's counters were never seen. The address is bound before the worker registers or claims
+  anything, and the command returns an error naming `--metrics-addr` and the address
+  (`TestWorkerFailsWhenTheMetricsAddressIsTaken`; `metrics.ServeListener` serves on a bound
+  listener). `TestWorkerMetricsEndpointServesTheCompleteSet` no longer finds a free port, closes
+  it and lets the command bind it later: it hands the command a listener it holds.
 - **A collector that does not answer no longer stalls a worker after every run.** The worker
   exported a finished run's trace inside the claim, so a blackholed collector held it for the
   10 second export bound per completed run and the run-duration metrics did not show it. The export

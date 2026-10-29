@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/signal"
 	"syscall"
@@ -177,6 +178,14 @@ func localRunError(runID string, err error) error {
 	return fmt.Errorf("run %s failed: %w", runID, err)
 }
 
+// listenMetrics binds the address given to --metrics-addr. It is a variable so a
+// test can hand the command a listener it already holds, on a port the system chose,
+// instead of finding a free port, closing it and hoping nothing else takes it
+// before the command binds.
+var listenMetrics = func(address string) (net.Listener, error) {
+	return net.Listen("tcp", address)
+}
+
 // workerCommand runs a worker process that claims and executes queued runs.
 func workerCommand(ctx context.Context, args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("worker", flag.ContinueOnError)
@@ -208,6 +217,19 @@ func workerCommand(ctx context.Context, args []string, out io.Writer) error {
 			return err
 		}
 		otlpHeaders = headers
+	}
+	// Bound here, before the worker registers or claims anything, so an address that
+	// cannot be served is an error and not a worker that runs without the metrics it
+	// was asked for. With another process on the port, Prometheus would otherwise
+	// scrape that process and never see this worker's counters.
+	var metricsListener net.Listener
+	if *metricsAddr != "" {
+		listener, err := listenMetrics(*metricsAddr)
+		if err != nil {
+			return fmt.Errorf("--metrics-addr %s cannot be served: %w", *metricsAddr, err)
+		}
+		defer listener.Close()
+		metricsListener = listener
 	}
 	manifest, err := readManifest(*manifestPath)
 	if err != nil {
@@ -268,10 +290,10 @@ func workerCommand(ctx context.Context, args []string, out io.Writer) error {
 	signalCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if *metricsAddr != "" {
+	if metricsListener != nil {
 		collector := metrics.Collector{Store: s, Counters: counters, WorkerID: w.ID()}
 		go func() {
-			if err := metrics.Serve(signalCtx, *metricsAddr, collector); err != nil {
+			if err := metrics.ServeListener(signalCtx, metricsListener, collector); err != nil {
 				fmt.Fprintf(os.Stderr, "twinwright: metrics endpoint stopped: %v\n", err)
 			}
 		}()

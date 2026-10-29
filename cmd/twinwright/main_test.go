@@ -2735,6 +2735,11 @@ func TestInstrumentedWorkerCountsRenewalsAndTimesEveryClaim(t *testing.T) {
 
 // The wiring test above covers the pieces; this one runs the command itself and
 // scrapes the endpoint it serves.
+//
+// The command is handed a listener the test already holds, on a port the system
+// chose, instead of an address the test found free, closed and hoped to find free
+// again: another process could take the port in between, and the command then
+// served nothing while the test waited for a body that never came.
 func TestWorkerMetricsEndpointServesTheCompleteSet(t *testing.T) {
 	dir := t.TempDir()
 	manifestPath := buildBillingManifest(t, dir)
@@ -2744,10 +2749,11 @@ func TestWorkerMetricsEndpointServesTheCompleteSet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = listener.Close() })
 	addr := listener.Addr().String()
-	if err = listener.Close(); err != nil {
-		t.Fatal(err)
-	}
+	previous := listenMetrics
+	listenMetrics = func(string) (net.Listener, error) { return listener, nil }
+	t.Cleanup(func() { listenMetrics = previous })
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)

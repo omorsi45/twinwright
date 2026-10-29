@@ -30,7 +30,7 @@ for claims, dispositions, takeovers, fencing rejections and execution seconds,
 plus gauges read from the database at scrape time for queue depth, run statuses,
 tool calls, retries, authorization denials, chaos injections and ownership
 transitions. **The endpoint is
-unauthenticated and off by default: bind it to loopback.** See
+unauthenticated and off by default: bind it to loopback.** The address is bound before the worker registers or claims anything: if it cannot be bound (another process holds the port, say) the worker exits with an error naming `--metrics-addr` and the address, instead of running without the metrics it was asked for (`TestWorkerFailsWhenTheMetricsAddressIsTaken`). See
 `docs/adr/0021-otlp-and-metrics.md`.
 
 ### Exporting from a worker

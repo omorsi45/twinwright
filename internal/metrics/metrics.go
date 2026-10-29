@@ -29,6 +29,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"net"
 	"net/http"
 	"sort"
 	"strconv"
@@ -503,7 +504,9 @@ func sortedKeys[V any](m map[string]V) []string {
 	return keys
 }
 
-// Serve runs the metrics endpoint until ctx is cancelled.
+// Serve binds address and runs the endpoint on it until ctx is cancelled. A caller
+// that must know the bind worked before it starts anything else binds with
+// net.Listen and calls ServeListener.
 //
 // It binds exactly where the caller asks. Callers pass a loopback address by
 // default: these counters describe internal runtime state and there is no
@@ -511,6 +514,17 @@ func sortedKeys[V any](m map[string]V) []string {
 // hand queue and run topology to anyone who asked. The docstring says so
 // because the code cannot enforce an operator's choice of address.
 func Serve(ctx context.Context, address string, collector Collector) error {
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		return err
+	}
+	return ServeListener(ctx, listener, collector)
+}
+
+// ServeListener runs the endpoint on a listener the caller bound, until ctx is
+// cancelled, and closes the listener when it returns. See Serve for what the
+// address should be.
+func ServeListener(ctx context.Context, listener net.Listener, collector Collector) error {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", collector.Handler())
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -518,12 +532,11 @@ func Serve(ctx context.Context, address string, collector Collector) error {
 		_, _ = w.Write([]byte("ok\n"))
 	})
 	server := &http.Server{
-		Addr:              address,
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	done := make(chan error, 1)
-	go func() { done <- server.ListenAndServe() }()
+	go func() { done <- server.Serve(listener) }()
 	select {
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

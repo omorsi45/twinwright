@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -120,6 +122,61 @@ func TestHandlerFailsRatherThanReturningPartialMetrics(t *testing.T) {
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusInternalServerError {
 		t.Fatalf("status=%d want 500", response.StatusCode)
+	}
+}
+
+// ServeListener answers on the listener it is given and closes it when the
+// context ends, and Serve reports a bind failure to its caller instead of
+// swallowing it in a goroutine.
+func TestServeListenerServesOnTheListenerItWasGiven(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := listener.Addr().String()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- ServeListener(ctx, listener, Collector{Counters: NewCounters(), WorkerID: "w"})
+	}()
+
+	for path, want := range map[string]string{"/healthz": "ok", "/metrics": "twinwright_worker_claims_total"} {
+		response, err := http.Get("http://" + address + path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		body, _ := io.ReadAll(response.Body)
+		response.Body.Close()
+		if response.StatusCode != http.StatusOK || !strings.Contains(string(body), want) {
+			t.Fatalf("GET %s = %d %q, want 200 and %q", path, response.StatusCode, body, want)
+		}
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("ServeListener returned %v after its context ended", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("ServeListener did not return after its context ended")
+	}
+	if conn, err := net.DialTimeout("tcp", address, time.Second); err == nil {
+		conn.Close()
+		t.Fatal("the listener is still accepting connections after ServeListener returned")
+	}
+}
+
+func TestServeReportsAnAddressThatCannotBeBound(t *testing.T) {
+	held, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	address := held.Addr().String()
+	err = Serve(context.Background(), address, Collector{Counters: NewCounters(), WorkerID: "w"})
+	if err == nil || !strings.Contains(err.Error(), address) {
+		t.Fatalf("Serve on a taken address returned %v, want an error naming %s", err, address)
 	}
 }
 
