@@ -13,6 +13,17 @@ database written by a newer build is refused rather than downgraded.
 
 ### Fixed
 
+- **Demo steps 4, 8 and 11 print only what they read, and step 11's check can fail.** Step 11 looked
+  for the word "injection" in the run's output, which is in the scenario's name, so it passed on
+  every run (with the security analysis removed it still passed). It now requires the run's
+  `security` analysis to show the injected instruction attempted and refused and none carried out,
+  prints the counts it read, and fails when the over-privileged control's output is not a readable
+  run with a violation that succeeded (`TestDemoSecurityStepFailsWithoutAnInjectionFinding`,
+  `TestDemoSecurityControlFailsWhenItCannotBeRead`). Step 8 printed "fence 1 -> 2" whatever the
+  fences were and now prints the pairs the takeovers showed (`TestDemoCrashStepPrintsTheFencesItRead`);
+  step 4 accepted an OTLP document with no span and now fails on it
+  (`TestDemoTraceStepFailsWithoutSpans`). A truncated failure message ended in mojibake and now ends
+  in `...` (`TestDemoExcerptTruncatesWithAnASCIIEllipsis`). The demo is still twelve steps.
 - **ADR 0034 and `docs/performance.md` describe the throughput and recovery workloads as they run.**
   They said the throughput workers poll every 10 ms; they stop at their first empty claim and never
   wait, so the setting is gone from the workload and the text. They said the recovery lease pin

@@ -110,6 +110,8 @@ func TestDemo(t *testing.T) {
 			"replay verified",  // the ledger still reproduces after the chaos
 			"fence 1 -> 2",     // the takeover is fenced, not merely retried
 			"stale commit refused",
+			"was attempted at", // the injection step names the calls it read from the security analysis
+			"none got through",
 			"resourceSpans",  // the trace is real OTLP, not a prose summary
 			"counterfactual", // the failure is explained, not just reported
 			"regressed case", // the gate named the case the regression broke
