@@ -13,6 +13,15 @@ database written by a newer build is refused rather than downgraded.
 
 ### Fixed
 
+- **`make perf` writes a report that names its commit, and a build with no VCS stamp no longer
+  claims a clean tree.** The target ran `go run`, whose binary carries neither a git revision nor a
+  version, so its report had neither and still said `git_modified: false`. `make perf` now builds
+  `./twinwright` first (`TestMakePerfBuildsAStampedBinary`). `git_modified` is omitted, not false,
+  from the `environment` block of a bench or perf report whose build recorded no tree state
+  (`TestInfoOmitsGitModifiedWhenTheTreeStateIsUnknown`,
+  `TestReportFromABuildWithoutVCSSettingsDoesNotAssertACleanTree`); a stamped build still records
+  true or false (`TestReportFromAStampedBuildRecordsTheTreeState`), and the committed reports read
+  as before. `twinwright version` still prints `git_modified` as a boolean.
 - **ADR 0032 no longer claims more than the gated tests read, and names both Prometheus targets.**
   Its Consequences section said a change to the OTLP encoding, the span attributes or the exposition
   document is checked against real software on every integration run; the tests read the span

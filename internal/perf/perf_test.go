@@ -8,10 +8,12 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"twinwright/internal/buildinfo"
 	"twinwright/internal/crashmatrix"
 	"twinwright/internal/dispatch"
 	"twinwright/internal/pgtest"
@@ -160,6 +162,65 @@ func TestPerfReportShape(t *testing.T) {
 	}
 	if keys := keysNamed(generic["config"], "examples"); len(keys) != 0 {
 		t.Errorf("config JSON exposes the examples path: %v", keys)
+	}
+}
+
+// environmentKeys runs the replay workload alone, which is the quickest, with
+// the given build description, and returns the keys of the report's environment
+// block as they are written to disk.
+func environmentKeys(t *testing.T, buildJSON string) map[string]any {
+	t.Helper()
+	var build buildinfo.Info
+	if err := json.Unmarshal([]byte(buildJSON), &build); err != nil {
+		t.Fatalf("build info %s: %v", buildJSON, err)
+	}
+	report, err := Run(context.Background(), Config{
+		Examples:   examplesRoot,
+		Workloads:  []string{WorkloadReplay},
+		ReplayRuns: 1,
+		Build:      build,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	encoded, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var generic struct {
+		Environment map[string]any `json:"environment"`
+	}
+	if err = json.Unmarshal(encoded, &generic); err != nil {
+		t.Fatal(err)
+	}
+	return generic.Environment
+}
+
+// A build with no VCS settings, such as a go run binary, never read the tree. A
+// report from it must not say the tree was clean, and it must not look as if it
+// had a revision either.
+func TestReportFromABuildWithoutVCSSettingsDoesNotAssertACleanTree(t *testing.T) {
+	env := environmentKeys(t, `{"twinwright_version":"dev","go_version":"go1.27.3"}`)
+	if value, present := env["git_modified"]; present {
+		t.Errorf("git_modified = %v in a report whose build recorded no tree state: %v", value, env)
+	}
+	if value, present := env["git_revision"]; present {
+		t.Errorf("git_revision = %v in a report whose build recorded none: %v", value, env)
+	}
+}
+
+// A stamped build keeps both answers, including a recorded false: that is the
+// statement the committed reports make.
+func TestReportFromAStampedBuildRecordsTheTreeState(t *testing.T) {
+	for _, modified := range []bool{false, true} {
+		raw := `{"twinwright_version":"v0.1.2","git_revision":"abc123","git_modified":` + strconv.FormatBool(modified) + `,"go_version":"go1.27.3"}`
+		env := environmentKeys(t, raw)
+		if env["git_revision"] != "abc123" {
+			t.Errorf("git_revision = %v, want abc123: %v", env["git_revision"], env)
+		}
+		if got, present := env["git_modified"]; !present || got != modified {
+			t.Errorf("git_modified = %v (present %v), want the recorded %v", got, present, modified)
+		}
 	}
 }
 

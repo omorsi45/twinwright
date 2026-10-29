@@ -29,7 +29,10 @@ func versionCommand(out io.Writer) error {
 		"platform":       runtime.GOOS + "/" + runtime.GOARCH,
 		"schema_version": store.CurrentSchemaVersion,
 		"delivery":       "at_least_once",
-		"git_modified":   info.Modified,
+		// Always present, as it has been since the field was added. Where the
+		// build recorded no tree state it is false, which with no git_revision
+		// below means "nothing recorded"; the bench and perf reports omit it instead.
+		"git_modified": info.Modified != nil && *info.Modified,
 	}
 	// Omitted rather than empty when the build recorded no VCS settings, so a
 	// reader never mistakes a missing revision for a real one.

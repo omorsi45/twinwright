@@ -70,8 +70,8 @@ bench-smoke: ## run every benchmark once, to prove they still compile and pass
 	go test -run '^$$' -bench . -benchtime=1x -timeout 900s ./internal/store ./internal/worker ./internal/replay
 
 .PHONY: perf
-perf: ## measure the platform workloads on SQLite into perf.json (results are documented in docs/performance.md)
-	go run ./cmd/twinwright perf --out perf.json
+perf: build ## measure the platform workloads on SQLite into perf.json (results are documented in docs/performance.md)
+	./twinwright perf --out perf.json
 
 .PHONY: gate
 gate: build ## bench the scripted suite and gate it against the approved baseline

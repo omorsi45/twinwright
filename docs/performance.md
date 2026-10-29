@@ -171,7 +171,7 @@ database, not an agent.
 ```bash
 twinwright perf --out perf.json                              # every workload, temporary SQLite file
 twinwright perf --db "postgres://user:pw@host/db" --out perf.json
-make perf                                                    # the first form, via go run, into the git-ignored perf.json
+make perf                                                    # builds ./twinwright first, so the report names its commit; writes the git-ignored perf.json
 ```
 
 The defaults are fleet sizes 1,2,4,8, 40 runs per trial, 3 trials, lease TTLs
@@ -210,7 +210,9 @@ uploads both files as the artifact `perf-postgres17`.
 - **The environment travels with the figures.** Each report records the build
   version, git revision and whether the tree was modified, the Go version, `goos`,
   `goarch`, the CPU count, the seed and the start time (UTC), plus the backend and the
-  measurement settings. The host operating system, CPU model, memory and PostgreSQL
+  measurement settings. A binary started with `go run` carries no VCS information, so
+  its report has neither a revision nor `git_modified`; only a built binary (`make
+  perf` builds one) records both. The host operating system, CPU model, memory and PostgreSQL
   server version are not in the JSON; they are quoted beside each report below, from
   what was read off the machine or, for the runner, from its `runner.txt`.
 - **The database address is never recorded.** The report names the backend (`sqlite`

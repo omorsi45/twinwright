@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -205,6 +206,56 @@ func TestPerfCLINeverPrintsTheDSN(t *testing.T) {
 				t.Error("a run that could not start still wrote a report")
 			}
 		})
+	}
+}
+
+// makeRecipe returns the prerequisites and the recipe lines of one Makefile
+// target, read from the repository's Makefile.
+func makeRecipe(t *testing.T, target string) (prerequisites []string, recipe []string) {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "..", "Makefile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	inside := false
+	for _, line := range strings.Split(strings.ReplaceAll(string(raw), "\r\n", "\n"), "\n") {
+		switch {
+		case strings.HasPrefix(line, target+":"):
+			inside = true
+			rest, _, _ := strings.Cut(strings.TrimPrefix(line, target+":"), "##")
+			prerequisites = strings.Fields(rest)
+		case inside && strings.HasPrefix(line, "\t"):
+			recipe = append(recipe, strings.TrimSpace(line))
+		case inside:
+			return prerequisites, recipe
+		}
+	}
+	if !inside {
+		t.Fatalf("the Makefile has no %q target", target)
+	}
+	return prerequisites, recipe
+}
+
+// A binary started with go run carries no VCS settings and no linker version, so
+// the report it writes names no revision and, before the build information said
+// so, asserted a clean tree it never read. The documented command has to run a
+// built binary, which is what the build target produces.
+func TestMakePerfBuildsAStampedBinary(t *testing.T) {
+	prerequisites, recipe := makeRecipe(t, "perf")
+	if !slices.Contains(prerequisites, "build") {
+		t.Errorf("make perf depends on %v, want build so the binary carries the toolchain's VCS stamp", prerequisites)
+	}
+	ran := false
+	for _, line := range recipe {
+		if strings.Contains(line, "go run") {
+			t.Errorf("make perf runs %q: a go run binary records no git revision", line)
+		}
+		if strings.Contains(line, "./twinwright perf") && strings.Contains(line, "--out") {
+			ran = true
+		}
+	}
+	if !ran {
+		t.Errorf("make perf never runs ./twinwright perf --out: %v", recipe)
 	}
 }
 

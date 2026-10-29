@@ -99,6 +99,11 @@ first PostgreSQL report) is reported as it is, not explained.
 Each report records the build version and git revision, whether the tree was modified,
 the Go version, `goos`, `goarch`, the CPU count, the seed and the start time in UTC,
 beside the backend and the settings. Those are what the binary can read about itself.
+The git revision and the modified flag are the toolchain's VCS stamp, so a binary
+started with `go run`, which carries none, writes a report with neither key, and
+`make perf` builds the binary first for that reason. `TestMakePerfBuildsAStampedBinary`
+holds the Makefile to it, and `TestReportFromABuildWithoutVCSSettingsDoesNotAssertACleanTree`
+holds the report to omitting `git_modified` when nothing was recorded.
 The host operating system and its version, the CPU model, the memory, the PostgreSQL
 server version and how busy the machine was are not in the report. Each published
 report is documented with them, read off the machine when it was taken, or, for the
@@ -254,3 +259,4 @@ backend, so a joint table would invite a conclusion they do not support.
 ## Corrections
 
 - 2026-10-28: "The database address is never recorded" claimed that an error from `perf.Run` has the DSN and its password removed, and cited two tests for it that pass with the scrubber removed. That held only for a DSN that parses: for a PostgreSQL password with an unencoded `/`, `#` or `?` the error quoted a piece of the password, and `redact.URL` kept the userinfo of such a string. The scrubber now replaces the text of an error about a DSN that does not parse cleanly, and the cited tests now use such DSNs.
+- 2026-10-28: `make perf` ran `go run`, whose binary carries no VCS stamp, so its report named no commit and still wrote `git_modified: false`, a statement about a tree nobody read (PERF-2). The target now depends on `build` and runs `./twinwright perf`. `git_modified` is omitted, not false, when the build recorded no tree state: the field kept its name and its meaning when present, so schema version 1 and the committed reports, which carry `git_modified: false` from stamped builds, read as before.
