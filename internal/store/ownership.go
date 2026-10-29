@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"time"
 )
 
@@ -55,16 +56,43 @@ func appendOwnershipTx(ctx context.Context, tx *sql.Tx, runID, kind, owner strin
 }
 
 // AppendOwnership records an ownership transition in its own transaction.
+//
+// The next sequence number is MAX(seq)+1, which is only unique if the appenders
+// of one run are ordered. Every other writer already holds the run's lease row
+// (acquire and the fenced completions lock it FOR UPDATE, release has just
+// updated it), so this one takes the same lock first. Without it, a stale worker
+// recording its fence rejection raced a legitimate owner for the same number, and
+// the loser failed on the primary key.
 func (s *Store) AppendOwnership(ctx context.Context, runID, kind, owner string, fence int64, now time.Time, detail any) error {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err = lockOwnershipLog(ctx, tx, s.Dialect, runID); err != nil {
+		return err
+	}
 	if err = appendOwnershipTx(ctx, tx, runID, kind, owner, fence, now, detail); err != nil {
 		return err
 	}
 	return tx.Commit()
+}
+
+// lockOwnershipLog takes the lease row of runID for the rest of the transaction
+// on PostgreSQL, where appenders run on separate connections. SQLite has one
+// writer, so the transaction itself orders them and the clause is not valid
+// there. A run with no lease row has nothing to lock, and nothing else appends
+// to its log either.
+func lockOwnershipLog(ctx context.Context, tx *sql.Tx, dialect Dialect, runID string) error {
+	if dialect != DialectPostgres {
+		return nil
+	}
+	var locked string
+	err := tx.QueryRowContext(ctx, "SELECT run_id FROM run_leases WHERE run_id=? FOR UPDATE", runID).Scan(&locked)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	return err
 }
 
 // RecordFenceRejection notes that a worker was fenced out.

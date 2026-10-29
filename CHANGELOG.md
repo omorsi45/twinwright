@@ -13,6 +13,18 @@ database written by a newer build is refused rather than downgraded.
 
 ### Fixed
 
+- **On PostgreSQL, two workers could both take a never-leased run at fence 1, and ownership
+  writes could collide.** A run with no lease row has nothing to lock, so concurrent first
+  acquisitions both read "no lease" and the later one overwrote the earlier one's live lease
+  without `ErrLeaseHeld`: in the new test eight workers all won. Acquisition now creates an
+  unowned row first and re-reads it under the lock, so exactly one wins
+  (`TestConcurrentFirstAcquireYieldsOneHolderPostgres`). The ownership log picked
+  `MAX(seq)+1` with no lock, so a stale worker recording a fence rejection collided with a
+  legitimate owner's write on the primary key and one of them failed (78 failures in the new
+  test); appends now take the run's lease row first
+  (`TestConcurrentOwnershipAppendsNeverCollidePostgres`). A release and its log row now commit
+  in one transaction, so a failed log write no longer reports "lease not released" for a lease
+  that was released (`TestReleaseAndItsOwnershipRowCommitTogether`).
 - **A lease renewal that fails no longer abandons a healthy run, and a one second lease no
   longer fences its own worker.** Any renewal error was treated as a lost lease, so a
   database blip cancelled the run, reported the claim as fenced and wrote a false

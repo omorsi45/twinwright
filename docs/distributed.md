@@ -139,6 +139,16 @@ Every acquisition increments the fence, including re-acquisition by the same
 owner. A worker that lost contact and reconnected must not keep using its old
 token, because the run may have been taken over and handed back in between.
 
+A run that has never been leased has no lease row to lock, so two workers that
+reached it together could both read "no lease" and both take fence 1. Acquisition
+therefore creates an unowned row first, in the same transaction, and re-reads it
+under the lock: the later worker waits for the earlier one and then finds a live
+lease (`TestConcurrentFirstAcquireYieldsOneHolderPostgres`, which needs a
+PostgreSQL server, since SQLite has one writer). The same lock orders every
+writer of a run's `run_ownership_log`, so its sequence numbers cannot collide
+(`TestConcurrentOwnershipAppendsNeverCollidePostgres`), and a release commits
+together with its log row (`TestReleaseAndItsOwnershipRowCommitTogether`).
+
 While a run executes the worker renews on a timer, and a rejected renewal
 cancels the execution context immediately. Continuing would spend model calls on
 work this worker is no longer permitted to commit.
