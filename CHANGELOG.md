@@ -13,6 +13,43 @@ database written by a newer build is refused rather than downgraded.
 
 ### Fixed
 
+- **The claims table can no longer put an opt-in test in the local suite, link to a heading that
+  does not exist, or cite a test that only a stray checkout has.** `TestClaimsTableReferencesExist`
+  now reads the Go source of every cited test and requires a row whose test skips unless a
+  `TWINWRIGHT_TEST_` variable is set to name that variable or Integration;
+  `TestDocLinksResolve` checks `page.md#heading` against the headings of the target by GitHub's
+  rules, same-page anchors included; test functions under `.worktrees` and `.tools` no longer
+  count. Each check has a test that feeds it the mistake it exists to catch
+  (`TestClaimsChecksCatchTheReviewedMutations`, `TestDocLinkAnchorsAreChecked`,
+  `TestHeadingAnchorsFollowGitHubsRules`, `TestGateReaderFindsTheVariableATestNeeds`,
+  `TestGateReaderOnASyntheticModule`, `TestCollectTestsIgnoresWorktreesAndTools`). The reader
+  works on names, not types, so a test that reaches its skip through a method call, a callback or
+  a branch is not seen.
+- **Claims rows say what their tests assert, and README claims that had no row have one.** The
+  rows for a worker's metrics endpoint, the exec agent's process, the README's links, the opt-in
+  tests of the hosted providers and the 120 crash cases claimed more than their tests assert and
+  now say less or cite a count (`TestCrashMatrixCasesAreTheOnesTheDocumentsCount`,
+  `TestReadmeLinksTheDocumentationSet`). `MaxAttempts` (default 3), `--provider-timeout` and an
+  OTLP rejection each have a row (`TestDocumentedDeliveryBoundMatchesTheCode`), and the rows the
+  fixes above made stale cite the current tests.
+- **The README, the guide, `SECURITY.md` and three ADRs agree with the code after the review
+  fixes.** The README said `make demo-stack` had no recorded CI result; every statement about a
+  CI job now says what Integration showed: `real-model`, `observability` and `demo-stack` passed
+  on their first runs on 2026-10-28 and on every run since, `docker` and `postgres` on every run
+  from 2026-10-28, and `perf` on every manual dispatch (`docs/live-model-run.md` says so for
+  `real-model`). The demo-stack changes made after the latest run have run locally only. The
+  performance limitation says three machines, not two. Each guide
+  page's opening paragraph lists its corrections. The path of one tool call gains the two
+  branches it left out (a call that fails validation records no authorization event, and the
+  legacy `--fault` option). `SECURITY.md` no longer says the container of a timed-out agent
+  keeps running. ADRs 0019 and 0029 no longer say replay compares a ledger event's timestamp (it
+  compares an event's type and decoded payload and the world tables' `created_at`), and ADR 0021
+  no longer says there are no histograms and that the Compose collector is not in CI. The
+  retries are listed by status, with the Anthropic 529, where the README said "a 5xx".
+- **Two tracked plan files no longer open with an instruction block that names a development
+  tool, one verification command no longer contains an em dash, and `.superpowers/` is in
+  `.gitignore`.** The documents call that directory git-ignored, which was true only through a
+  local exclude file.
 - **`make demo-stack` no longer trusts whatever answers on the workers' metrics ports, follows the
   PostgreSQL port Compose published, shows its failure files in CI, and cleans up after a success.**
   Checks 3 and 4 read Prometheus, which scrapes ports 9095 and 9096 on the host, so a worker left
@@ -23,7 +60,8 @@ database written by a newer build is refused rather than downgraded.
   now read `TW_DEMO_PG_PORT`, default 5432 (`TestDemoStackPostgresPortComesFromOneVariable`). The
   files its failure messages point to (`bench.err`, `bench.out`, `enqueue.err` as well as the worker
   logs) are copied to `TW_DEMO_LOGS`, and the CI job prints and uploads all of them
-  (`TestDemoStackSavesAndShowsEveryFileItsFailuresPointTo`). `make demo` and `make demo-stack` each
+  (`TestDemoStackSavesAndShowsEveryFileItsFailuresPointTo`); the changed job has not run on
+  GitHub Actions. `make demo` and `make demo-stack` each
   removed nothing; both now remove their temporary directory when they succeed and keep it, printing
   its path, when they fail (`TestDemoStackRemovesItsWorkDirectoryOnlyOnSuccess`,
   `TestMakeDemoRemovesItsDirectoryOnlyOnSuccess`).
@@ -161,7 +199,8 @@ database written by a newer build is refused rather than downgraded.
   `--- PASS:` line for `TestSpansAreQueryableInJaeger` and `TestPrometheusScrapesAWorker` in the
   `-v` output. Run locally against the extracted step it exits 1 with the variable unset (both
   tests skip) and with a pattern that matches no test, and with canned output it exits 0 only
-  when both print a pass; the job itself has not run on a runner.
+  when both print a pass. The job passed on a runner in Integration run 40814472427, the first
+  with the step.
 - **`twinwright_queue_oldest_runnable_age_seconds` now answers for what a worker can claim.** The
   gauge counted every `runnable` row with a past `available_at`, so it read 0 while a crashed
   worker's run sat claimable behind an expired lease (the recovery path) and reported minutes of
@@ -230,8 +269,8 @@ database written by a newer build is refused rather than downgraded.
   (`TestGateRatesAnErroredRepeatedCandidate`, `TestGateRatesARepeatedBaselineWithAnErroredTrial`,
   `TestGateToleratesOneErroredTrialLikeOneFailedTrial`,
   `TestGateComparesSafetyCountersOfACandidateWithAnErroredTrial`).
- The fold of a
-  case's trials kept trial 1's state-mutation and successful-violation counts, so with a
+- **A leak in a later trial of a repeated bench case is no longer hidden by the pass-rate
+  tolerance.** The fold of a case's trials kept trial 1's state-mutation and successful-violation counts, so with a
   tolerance that absorbs one lost trial (the way a live-model report is gated) a cross-customer
   leak in trial 3 of 10 was a pass-rate drop of 0.1, allowed, and neither `new_violation` nor
   `extra_mutations` could fire, while the same leak in trial 1 failed the gate. Both counts are
@@ -242,7 +281,6 @@ database written by a newer build is refused rather than downgraded.
   `TestFoldTrialsSafetyCountersCoverEveryTrial`,
   `TestFoldTrialsSafetyCountersAreIndependentOfTrialOrder`). The trajectory, run ID and wall
   time stay the first trial's; a single-trial case reports what it did before.
-
 - **Three claims about delivery and fencing now say what their tests show.** The duplicate
   delivery test redelivers a finished run, which returns before any call is dispatched, so it
   could not fail for the call-ID cache; a worker-level test now has a new owner present a
@@ -302,15 +340,6 @@ database written by a newer build is refused rather than downgraded.
   of the seven writes is reached on its own (`TestStaleRunnerWritesNothingAfterTakeover`),
   and the crash matrix has the dead worker attempt a model turn and a status change in
   every case. No behaviour changed.
-- **Commands that take `--db` stopped printing the PostgreSQL password when it holds an
-  unencoded `/`, `#` or `?`.** The `perf` fix did not reach the store's own open, so
-  `run`, `worker`, `queue`, `trace` and the rest printed `url.Parse`'s quote of the
-  password, or, for a DSN that parsed into the wrong pieces, the rest of it inside pgx's
-  connect error. A DSN that does not parse cleanly is now refused before anything parses or
-  uses it, with a message that says to percent-encode the password and quotes no part of the
-  DSN. Both of the store's DSN opens do this, and every command opens its database through
-  one of them; the CLI test runs `enqueue`, `queue` and `doctor`
-  (`TestOpeningAMalformedDSNNeverPrintsIt`, `TestStorageCommandsNeverPrintAMalformedDSN`).
 - **`inspect`, `queue` and `doctor` no longer migrate the database or create one.** They
   opened the source for writing, so a version 2 database came out at version 3 (the
   migration ADR 0029 says must wait until older workers stop), and a mistyped `--db` left
@@ -340,14 +369,20 @@ database written by a newer build is refused rather than downgraded.
   its command line; the flag still works and wins. A malformed variable is refused before the
   database is opened, without repeating a value (`TestResolveOTLPHeaders`,
   `TestWorkerReadsTheOTLPHeaderFromTheEnvironment`).
-- **`perf` no longer prints the PostgreSQL password when it holds an unencoded `/`, `#` or
-  `?`.** `url.Parse` rejects such a DSN and quotes a piece of the password in its error,
-  which the scrubber's search for the whole DSN never found, so `perf --db` printed it
-  (the `/` case printed the complete password). An error about a PostgreSQL DSN that does
-  not parse cleanly now has its text replaced by a fixed message, and the two tests that
-  cited the guarantee used a DSN whose error never held the password, so they passed
-  without the scrubber; they now use malformed DSNs and fail without it
-  (`TestRunNeverPrintsAMalformedDSN`, `TestPerfCLINeverPrintsTheDSN`).
+- **A PostgreSQL password holding an unencoded `/`, `#` or `?` is no longer printed by `perf`
+  or by any command that takes `--db`.** `url.Parse` rejects such a DSN and quotes a piece of
+  the password in its error (the `/` case, the complete password). `perf`'s scrubber searched
+  for the whole DSN and never found it, so `perf --db` printed it; the store's own open passed
+  the same text on, so `run`, `worker`, `queue`, `trace` and the rest printed it too, or, for a
+  DSN that parsed into the wrong pieces, the rest of it inside pgx's connect error. An error
+  about a PostgreSQL DSN that does not parse cleanly now has its text replaced by a fixed
+  message in `perf`, and both of the store's DSN opens refuse such a DSN before anything uses
+  it, with a message that says to percent-encode the password and quotes no part of the DSN;
+  every command opens its database through one of them, and the CLI test runs `enqueue`,
+  `queue` and `doctor`. The two tests that cited `perf`'s guarantee used a DSN whose error
+  never held the password, so they passed without the scrubber; they now use malformed DSNs
+  and fail without it (`TestRunNeverPrintsAMalformedDSN`, `TestPerfCLINeverPrintsTheDSN`,
+  `TestOpeningAMalformedDSNNeverPrintsIt`, `TestStorageCommandsNeverPrintAMalformedDSN`).
 - **A base URL that does not parse no longer puts its credentials into errors, the ledger
   or a trace.** The three HTTP adapters redacted only the error from sending a request.
   The error from building one quoted the whole URL, so an unencoded `%` in a password, a
@@ -449,7 +484,9 @@ database written by a newer build is refused rather than downgraded.
   which is what the goroutine is for, was in no test. It is now: the turn must end with a
   timeout within its deadline and the agent must be gone
   (`TestExecProviderTimesOutAnAgentThatNeverReadsALargeRequest`, which blocks and fails
-  against a build with the synchronous write). `worker` applied
+  against a build with the synchronous write).
+- **A worker given `--agent-command` no longer fails every run in its queue that is not an exec
+  run.** `worker` applied
   `--agent-command` to every run it claimed, and the provider refuses those flags for any
   provider but exec, so a worker configured to serve an exec run failed every scripted or
   hosted run in the same queue until it was marked failed. The agent flags now apply to
@@ -485,7 +522,77 @@ database written by a newer build is refused rather than downgraded.
   each leaving a green step. The step now requires the passes by name in the `-v` output, the
   isolation test requires errno 101 (network unreachable), and a bridge-network control shows
   that the same probe connects; the step's shell was run against the real daemon, against a
-  skipped run and against a renamed test, and failed on the last two.
+  skipped run and against a renamed test, and failed on the last two. The `docker` job with the
+  new step passed on a runner in Integration run 40797818415.
+- **A provider turn that reuses a call ID now fails the turn.** A call ID already
+  used in the run, or repeated within one turn, used to be skipped; it is refused
+  with an explicit error. See `TestProviderCallIDReuseFailsTheTurn`.
+- **`run` and `resume` execute under a fenced lease.** Without `--enqueue` they ran
+  with no fence and could write to a run at the same time as a fleet worker that
+  had claimed it. They now hold a lease owned by `local-<host>-<pid>` with a 15
+  second TTL, renewed while they run and released on exit including Ctrl-C and
+  `SIGTERM`. A run leased by a live fleet worker is refused, naming the owner and
+  expiry; after `kill -9` the lease has to expire before `resume` is accepted;
+  a failed release is reported rather than swallowed. Command output and exit
+  codes are otherwise unchanged.
+- **Lease expiry and queue availability now order by time, not by text.** Both are
+  compared inside SQL as text, and `time.RFC3339Nano` trims trailing zeros, so
+  `12:00:01Z` sorted after `12:00:01.5Z`. Within one second a renewal could revive
+  an expired lease, and a claim could miss an expired lease or a run that had
+  become available. Times in `run_leases`, `work_queue` and `workers` are now
+  written in a fixed-width form with nine fractional digits, and migration 3
+  (schema version 3) rewrites existing rows. A stored time that does not parse
+  fails the migration, which rolls back, and names the table, column and row.
+  Ledger event timestamps are unchanged. **Upgrading:** stop workers running an
+  older build before applying migration 3. An older build keeps writing the
+  variable-width form, and a database holding both forms misorders times within a
+  second.
+- **A run that kills its worker is now failed at the delivery limit, and a takeover
+  means a displaced lease.** `MaxAttempts` was checked only when `Execute` returned
+  an error, and a crash returns nothing, so a poison run was taken over forever.
+  A claim past `MaxAttempts` deliveries now fails the run without executing it,
+  with an `error` ledger event `{"kind":"delivery_limit","deliveries":N,"max_attempts":M}`
+  and the queue entry `failed`. A run that had already completed is finished
+  instead. `Outcome.Takeover` was `attempts > 1`, so an ordinary requeue after an
+  error counted as a takeover; it is now true only when the claim displaced an
+  expired lease. Re-enqueueing a run resets its delivery count, so an operator
+  retry of a run that failed at the limit executes instead of being refused
+  again. Delivery remains at-least-once. **Known limit:** a run retried after
+  hitting the delivery limit can complete but cannot be verified by replay,
+  because its ledger records the `delivery_limit` error and an unanswered model
+  request. A test pins the behaviour and ADR 0029 lists it under remaining
+  limits.
+- **A key echoed by a model, and a base URL that carries credentials, no longer
+  reach the ledger or an error message.** Error bodies were masked but a
+  successful response was not, so a model that repeated the configured key in its
+  content or in a tool argument had it written to the ledger and the stored
+  transcript. Every adapter now masks the key in each output item before the item
+  is interpreted, so the content, the tool arguments and the raw items kept for
+  replay all derive from the masked text (`TestSuccessfulOutputIsRedacted`). A
+  failed request returned the standard library's error, which prints the full
+  request URL with its userinfo and query; transport errors now go through
+  `redact.URL` and their cause text is masked
+  (`TestTransportErrorHidesURLQueryAndUserinfo`). Only the configured key is
+  masked on the success path, and `redact.Secrets` ignores a secret shorter than 8
+  characters. See ADR 0031.
+- **The metrics document is well formed, and its counters can be alerted on.** The
+  counters' `HELP` and `TYPE` lines were all written first and their samples after,
+  so no family was contiguous, which the Prometheus text format requires.
+  Each family is now `HELP`, `TYPE`, then its samples
+  (`TestExpositionIsWellFormed`). A counter's label name was guessed from whichever
+  value was passed to it, so any non-empty label became `disposition`; each counter
+  now declares its label, and only `twinwright_worker_claim_disposition_total`
+  carries `disposition` (`TestCounterLabelNamesAreDeclaredPerMetric`, and
+  `TestMetricsDispositionLabelsMatchTheWorkerDispositions` keeps the four
+  dispositions equal to the worker's). A counter existed only after its first
+  increment, so `rate()` had no earlier sample to start from; every counter now
+  renders a zero sample from the first scrape (`TestCountersRenderZeroBeforeFirstUse`).
+  `twinwright_worker_lease_renewals_total` could never move, because nothing counted
+  a renewal; the worker now counts each successful renewal
+  (`TestRenewalsAreCounted`). Label values went through `%q` after their own
+  escaping, which doubled backslashes in worker IDs; they are escaped once. Metric
+  names, and the labels of `twinwright_queue_entries` and the run-status gauges,
+  are unchanged. See ADR 0032.
 
 ### Added
 
@@ -857,78 +964,6 @@ database written by a newer build is refused rather than downgraded.
   only in that test. The job passed on GitHub Actions on 2026-10-28: the spans were
   queried from Jaeger by trace ID, and a real Prometheus scrape and query succeeded.
   The two tests had also passed against the stack on a developer machine. See ADR 0032.
-
-### Fixed
-
-- **A provider turn that reuses a call ID now fails the turn.** A call ID already
-  used in the run, or repeated within one turn, used to be skipped; it is refused
-  with an explicit error. See `TestProviderCallIDReuseFailsTheTurn`.
-- **`run` and `resume` execute under a fenced lease.** Without `--enqueue` they ran
-  with no fence and could write to a run at the same time as a fleet worker that
-  had claimed it. They now hold a lease owned by `local-<host>-<pid>` with a 15
-  second TTL, renewed while they run and released on exit including Ctrl-C and
-  `SIGTERM`. A run leased by a live fleet worker is refused, naming the owner and
-  expiry; after `kill -9` the lease has to expire before `resume` is accepted;
-  a failed release is reported rather than swallowed. Command output and exit
-  codes are otherwise unchanged.
-- **Lease expiry and queue availability now order by time, not by text.** Both are
-  compared inside SQL as text, and `time.RFC3339Nano` trims trailing zeros, so
-  `12:00:01Z` sorted after `12:00:01.5Z`. Within one second a renewal could revive
-  an expired lease, and a claim could miss an expired lease or a run that had
-  become available. Times in `run_leases`, `work_queue` and `workers` are now
-  written in a fixed-width form with nine fractional digits, and migration 3
-  (schema version 3) rewrites existing rows. A stored time that does not parse
-  fails the migration, which rolls back, and names the table, column and row.
-  Ledger event timestamps are unchanged. **Upgrading:** stop workers running an
-  older build before applying migration 3. An older build keeps writing the
-  variable-width form, and a database holding both forms misorders times within a
-  second.
-- **A run that kills its worker is now failed at the delivery limit, and a takeover
-  means a displaced lease.** `MaxAttempts` was checked only when `Execute` returned
-  an error, and a crash returns nothing, so a poison run was taken over forever.
-  A claim past `MaxAttempts` deliveries now fails the run without executing it,
-  with an `error` ledger event `{"kind":"delivery_limit","deliveries":N,"max_attempts":M}`
-  and the queue entry `failed`. A run that had already completed is finished
-  instead. `Outcome.Takeover` was `attempts > 1`, so an ordinary requeue after an
-  error counted as a takeover; it is now true only when the claim displaced an
-  expired lease. Re-enqueueing a run resets its delivery count, so an operator
-  retry of a run that failed at the limit executes instead of being refused
-  again. Delivery remains at-least-once. **Known limit:** a run retried after
-  hitting the delivery limit can complete but cannot be verified by replay,
-  because its ledger records the `delivery_limit` error and an unanswered model
-  request. A test pins the behaviour and ADR 0029 lists it under remaining
-  limits.
-- **A key echoed by a model, and a base URL that carries credentials, no longer
-  reach the ledger or an error message.** Error bodies were masked but a
-  successful response was not, so a model that repeated the configured key in its
-  content or in a tool argument had it written to the ledger and the stored
-  transcript. Every adapter now masks the key in each output item before the item
-  is interpreted, so the content, the tool arguments and the raw items kept for
-  replay all derive from the masked text (`TestSuccessfulOutputIsRedacted`). A
-  failed request returned the standard library's error, which prints the full
-  request URL with its userinfo and query; transport errors now go through
-  `redact.URL` and their cause text is masked
-  (`TestTransportErrorHidesURLQueryAndUserinfo`). Only the configured key is
-  masked on the success path, and `redact.Secrets` ignores a secret shorter than 8
-  characters. See ADR 0031.
-- **The metrics document is well formed, and its counters can be alerted on.** The
-  counters' `HELP` and `TYPE` lines were all written first and their samples after,
-  so no family was contiguous, which the Prometheus text format requires.
-  Each family is now `HELP`, `TYPE`, then its samples
-  (`TestExpositionIsWellFormed`). A counter's label name was guessed from whichever
-  value was passed to it, so any non-empty label became `disposition`; each counter
-  now declares its label, and only `twinwright_worker_claim_disposition_total`
-  carries `disposition` (`TestCounterLabelNamesAreDeclaredPerMetric`, and
-  `TestMetricsDispositionLabelsMatchTheWorkerDispositions` keeps the four
-  dispositions equal to the worker's). A counter existed only after its first
-  increment, so `rate()` had no earlier sample to start from; every counter now
-  renders a zero sample from the first scrape (`TestCountersRenderZeroBeforeFirstUse`).
-  `twinwright_worker_lease_renewals_total` could never move, because nothing counted
-  a renewal; the worker now counts each successful renewal
-  (`TestRenewalsAreCounted`). Label values went through `%q` after their own
-  escaping, which doubled backslashes in worker IDs; they are escaped once. Metric
-  names, and the labels of `twinwright_queue_entries` and the run-status gauges,
-  are unchanged. See ADR 0032.
 
 ### Changed
 
