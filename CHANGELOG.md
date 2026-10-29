@@ -13,6 +13,15 @@ database written by a newer build is refused rather than downgraded.
 
 ### Fixed
 
+- **The "the gate fails" checks now require the missing-write regression, not any regression.**
+  Two cases error under `fixture-regressed-v1` and regress by themselves, so the CI step (exit
+  code 1 only) would have passed with the failed-status path broken, and the test and demo step
+  12 accepted any regression on `billing-duplicate-charge`, an errored one included. All three
+  now require that case as `newly_failing` with a detail saying the candidate failed, and the
+  candidate's case at `failed` with no mutations; the CI step does it with `jq`
+  (`TestRegressedBenchFailsTheGate`,
+  `TestMissingWriteRegressionNeedsTheFailedCaseNotAnyRegression`). The CI step has not run on a
+  runner.
 - **ADR 0030, the bench guide and the CI comment no longer say a trajectory change cannot block a
   merge.** The gate does only warn on one (`--trajectory warn` exits 0), but
   `TestRegressedBenchFailsTheGate` fails on any warning for the healthy fixture and runs in the

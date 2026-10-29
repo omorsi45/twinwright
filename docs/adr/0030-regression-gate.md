@@ -159,6 +159,16 @@ benches `fixture-regressed-v1` and requires the gate to exit exactly 1. Any othe
 exit code, including 0 and 2, fails the job. `TestRegressedBenchFailsTheGate`
 holds the same pair in `go test`, and the demo's twelfth step shows it.
 
+Exit 1 is not by itself the evidence. Two cases error under the fixture (no crash
+is injected into the distributed case, and the counterfactual's parent has no call
+to remove) and each is a `newly_failing` regression on its own, so the gate would
+exit 1 even if its failed-status path were broken. The CI step, the test and the
+demo therefore also require the regression the fixture is built to cause:
+`billing-duplicate-charge` as `newly_failing` with a detail saying the candidate
+failed, and the candidate's case at `status: failed` with `mutations: 0`.
+`missingWriteRegression` states that check in Go for the test and the demo, and
+the CI step states it with `jq`.
+
 `twinwright run --fail-on-eval` exits non-zero after printing the result when the
 run's evaluation fails. It is opt-in; without it a failed evaluation still exits
 0 as before.
@@ -211,3 +221,4 @@ and committed with the change.
 - 2026-10-28: a baseline in which every case errored is refused like an empty one, with exit 2, and `twinwright bench` exits 1 when every case of the run errored (GATE-3). The section on the empty baseline said it would "compare against nothing and pass", and the same was true of a baseline whose cases all errored: every case became `baseline_unmeasured`, the gate exited 0, and the deliberately regressed candidate passed against it. A bench run with a missing provider key reached exactly that state, with exit 0 and a report that looked like any other. The gate's exit codes keep their meaning; `bench` uses the ordinary 1 and names the first case's error.
 - 2026-10-28: the gate refuses a case it cannot judge with exit 2 (GATE-6). The exit-code table already said exit 2 covered invalid input, but the report decoder checked only the suite name and the case list. A status other than `passed`, `failed` or `error` is neither a pass nor a failure, so a passed baseline case moved to it without a finding and the gate exited 0. An empty case ID made the gate fail while the JUnit file carried no testcase for it and said `failures="0"`. A pass count above the trial count was accepted as a measurement. `Compare` now returns an error naming the report and the case for each of these. A report from before trial counts, with zero trials and zero passes, stays valid.
 - 2026-10-28: the paragraph under "Updating the baseline" no longer says a cosmetic change to tool-call order is visible in the job summary "without blocking a merge" (GATE-4). That holds for the gate: `--trajectory warn` exits 0 and the `regression-gate` job passes. It did not hold for the repository, because `TestRegressedBenchFailsTheGate` fails on any warning for the healthy fixture and runs under `go test` in the `build` and `race` jobs, so a reordered call, a new case or an edited fixture turned CI red until the baseline was regenerated. The paragraph, the `ci.yml` comment and `docs/guide/bench.md` now say that, and the test's failure message says it too.
+- 2026-10-28: the three end-to-end checks that the gate is shown to fail now require the missing-write regression, not any regression (GATE-5). The CI step required exit 1, and the test and the demo required some regression on `billing-duplicate-charge`, but two other cases error under `fixture-regressed-v1` and regress by themselves, and an errored `billing-duplicate-charge` would have satisfied the test and the demo as well. They now require `billing-duplicate-charge` as `newly_failing` with a detail saying the candidate failed, and the candidate case at `status: failed` with `mutations: 0`. The limits paragraph's claim that the fixture proves the gate fails on a missing write is now backed by those checks.

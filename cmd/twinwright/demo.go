@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"twinwright/internal/agent"
+	"twinwright/internal/bench"
 	"twinwright/internal/gate"
 )
 
@@ -657,15 +658,58 @@ func demoRegressionGate(ctx *demoContext) (string, error) {
 	if err := json.Unmarshal([]byte(output), &result); err != nil {
 		return "", fmt.Errorf("the gate printed no verdict: %w", err)
 	}
+	regressed, err := readBenchReport(candidate)
+	if err != nil {
+		return "", err
+	}
+	if result.Passed {
+		return "", fmt.Errorf("the gate passed the regressed fixture: %s", demoExcerpt(output))
+	}
+	if err := missingWriteRegression(result, regressed); err != nil {
+		return "", fmt.Errorf("%w: %s", err, demoExcerpt(output))
+	}
 	cases := map[string]bool{}
 	for _, r := range result.Regressions {
 		cases[r.Case] = true
 	}
-	if result.Passed || !cases["billing-duplicate-charge"] {
-		return "", fmt.Errorf("the gate did not name billing-duplicate-charge as regressed: %s", demoExcerpt(output))
-	}
 	return fmt.Sprintf("exit %d: %d regressed cases in %d compared, including billing-duplicate-charge",
 		exitRegression, len(cases), result.Compared), nil
+}
+
+// missingWriteRegression checks the one regression the regressed fixture is
+// built to cause: billing-duplicate-charge, which needs a refund, is judged
+// newly failing because the candidate failed it without writing. Any other
+// regression would not do. Two other cases error under the fixture (no crash is
+// injected, and a counterfactual's parent has no call to remove), and each of
+// those is a regression on its own, so a check that accepted any regression, or
+// any regression naming the case, would pass even if the failed-status path were
+// broken. The demo step, the CI step and TestRegressedBenchFailsTheGate state
+// the same requirement; this is the Go form of it.
+func missingWriteRegression(result gate.Result, candidate bench.Report) error {
+	const id = "billing-duplicate-charge"
+	var finding *gate.Finding
+	for i := range result.Regressions {
+		if r := result.Regressions[i]; r.Case == id && r.Kind == gate.KindNewlyFailing {
+			finding = &result.Regressions[i]
+			break
+		}
+	}
+	if finding == nil {
+		return fmt.Errorf("the gate has no %s regression for %s", gate.KindNewlyFailing, id)
+	}
+	if !strings.Contains(finding.Detail, "candidate failed") {
+		return fmt.Errorf("the %s regression for %s says %q, not that the candidate failed", gate.KindNewlyFailing, id, finding.Detail)
+	}
+	for _, c := range candidate.Cases {
+		if c.ID != id {
+			continue
+		}
+		if c.Status != "failed" || c.Mutations != 0 {
+			return fmt.Errorf("the candidate's %s has status %q and %d mutations, want failed with none", id, c.Status, c.Mutations)
+		}
+		return nil
+	}
+	return fmt.Errorf("the candidate report has no case %s", id)
 }
 
 // demoBenchReport parses the bench report the CLI prints after its text summary.
