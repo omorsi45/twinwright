@@ -13,6 +13,14 @@ database written by a newer build is refused rather than downgraded.
 
 ### Fixed
 
+- **Run durations are measured on a monotonic clock, and a counter can no longer go down.** A
+  claim's duration was the difference of two readings of the lease clock, which drops the
+  monotonic reading, so a backward clock step during a claim made it negative: the run-seconds
+  counter and the histogram's `_sum` decreased, which Prometheus reads as a counter reset. The
+  worker now times a claim with `time.Since` on a reading taken in the process, `Counters.Add`
+  drops a negative or non-finite delta and `Observe` drops a negative value
+  (`TestClaimDurationIgnoresABackwardClockStep`, `TestCountersRefuseNegativeDeltas`,
+  `TestRunDurationIgnoresNegativeObservations`).
 - **The `observability` CI job fails when either gated test is skipped or does not run.** `go test`
   exits 0 when a test skips and when the `-run` pattern matches nothing, so a renamed test or
   environment variable left the job green with nothing checked. The step now requires a

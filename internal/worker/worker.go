@@ -230,7 +230,10 @@ func (w *Worker) ClaimAndRun(ctx context.Context) (Outcome, error) {
 	}
 	outcome := Outcome{WorkerID: w.Config.ID, RunID: lease.RunID, Fence: lease.Token, Attempt: entry.Attempts, Takeover: entry.Takeover,
 		TraceID: trace.TraceIDFor(lease.RunID)}
-	started := now
+	// The claim is timed on the process's monotonic clock. Config.Clock is for
+	// leases and may be a wall clock converted to UTC, which has no monotonic
+	// reading, so a backward step during a claim would make its duration negative.
+	started := time.Now()
 
 	// A crash reports no error, so the retry bound in the error path below never
 	// sees a run that kills its worker. Every claim counts as a delivery, and a
@@ -256,7 +259,7 @@ func (w *Worker) ClaimAndRun(ctx context.Context) (Outcome, error) {
 	cancel()
 	<-renewalDone
 
-	outcome.Duration = w.Config.Clock.Now().Sub(started)
+	outcome.Duration = time.Since(started)
 	outcome.RunStatus = run.Status
 
 	// A stop request cancels ctx, but the claim still has to be settled: a run

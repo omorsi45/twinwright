@@ -632,6 +632,69 @@ func TestRunDurationIgnoresNonFiniteObservations(t *testing.T) {
 	}
 }
 
+// Prometheus reads any decrease of a counter as a reset, so rate() and increase()
+// jump by the whole accumulated total. A counter therefore only goes up: a
+// negative delta (a duration measured across a backward clock step, say) and a
+// delta that is not a finite number are dropped.
+func TestCountersRefuseNegativeDeltas(t *testing.T) {
+	counters := NewCounters()
+	counters.Add(WorkerRunSeconds, "", 5)
+	counters.Add(WorkerRunSeconds, "", -2)
+	counters.Add(WorkerRunSeconds, "", math.NaN())
+	counters.Add(WorkerRunSeconds, "", math.Inf(1))
+	counters.Add(WorkerRunSeconds, "", math.Inf(-1))
+	counters.Add(WorkerClaims, "", 1)
+	counters.Add(WorkerClaims, "", -1)
+	counters.Add(WorkerDispositions, "finished", 2)
+	counters.Add(WorkerDispositions, "finished", -1)
+	counters.Add(WorkerClaims, "", 0) // a zero delta is a valid no-op, not a refusal
+
+	body, err := Collector{Counters: counters, WorkerID: "w"}.Render(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	families := mustParse(t, body)
+	worker := map[string]string{"worker": "w"}
+	if got := sampleValue(t, families[WorkerRunSeconds], WorkerRunSeconds, worker); got != 5 {
+		t.Fatalf("run seconds=%v want 5: a negative or non-finite delta was applied", got)
+	}
+	if got := sampleValue(t, families[WorkerClaims], WorkerClaims, worker); got != 1 {
+		t.Fatalf("claims=%v want 1", got)
+	}
+	if got := sampleValue(t, families[WorkerDispositions], WorkerDispositions, map[string]string{"disposition": "finished", "worker": "w"}); got != 2 {
+		t.Fatalf("finished=%v want 2", got)
+	}
+}
+
+// A histogram's sum is a counter too, so a negative observation would lower it,
+// and an average-duration query built on sum and count would go wrong with it.
+// The observation is dropped whole: counting it without summing it would skew the
+// average the other way. Zero is a real duration and is kept.
+func TestRunDurationIgnoresNegativeObservations(t *testing.T) {
+	counters := NewCounters()
+	counters.Observe(WorkerRunDuration, 2)
+	counters.Observe(WorkerRunDuration, -2)
+	counters.Observe(WorkerRunDuration, math.Inf(-1))
+	counters.Observe(WorkerRunDuration, 0)
+	body, err := Collector{Counters: counters, WorkerID: "w"}.Render(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	family := mustParse(t, body)[WorkerRunDuration]
+	worker := map[string]string{"worker": "w"}
+	if sum := sampleValue(t, family, WorkerRunDuration+"_sum", worker); sum != 2 {
+		t.Fatalf("sum=%v want 2", sum)
+	}
+	if count := sampleValue(t, family, WorkerRunDuration+"_count", worker); count != 2 {
+		t.Fatalf("count=%v want 2 (the 2s run and the 0s run)", count)
+	}
+	// The first bucket holds the zero observation only, so a negative one did not
+	// land there.
+	if first := sampleValue(t, family, WorkerRunDuration+"_bucket", map[string]string{"le": "0.05", "worker": "w"}); first != 1 {
+		t.Fatalf("le=0.05 bucket=%v want 1", first)
+	}
+}
+
 func TestOldestRunnableAge(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)

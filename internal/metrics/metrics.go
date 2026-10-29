@@ -162,8 +162,13 @@ func NewCounters() *Counters {
 // on its one series. An undeclared metric, or a labelled counter given no
 // label, is dropped: Render writes only declared families, which is what keeps
 // the document well formed.
+//
+// A counter only goes up. Prometheus reads any decrease as a reset, so rate()
+// and increase() jump by the whole accumulated total after one. A negative delta
+// is therefore dropped, and so is one that is not a finite number, which would
+// turn the counter into NaN or +Inf for the life of the process.
 func (c *Counters) Add(metric, label string, delta float64) {
-	if c == nil {
+	if c == nil || delta < 0 || math.IsNaN(delta) || math.IsInf(delta, 0) {
 		return
 	}
 	spec, ok := counterSpecFor(metric)
@@ -185,9 +190,12 @@ func (c *Counters) Add(metric, label string, delta float64) {
 
 // Observe records one value, in seconds, against a declared histogram. An
 // undeclared metric is dropped. A value that is not a finite number is dropped
-// too: one NaN or infinity would poison the sum for the life of the process.
+// too: one NaN or infinity would poison the sum for the life of the process. So
+// is a negative value, because the sum is a counter and must not decrease; a
+// duration is never negative, and one that comes out so is a clock fault, which
+// would also put a run in the smallest bucket.
 func (c *Counters) Observe(metric string, value float64) {
-	if c == nil || math.IsNaN(value) || math.IsInf(value, 0) {
+	if c == nil || value < 0 || math.IsNaN(value) || math.IsInf(value, 0) {
 		return
 	}
 	spec, ok := histogramSpecFor(metric)
