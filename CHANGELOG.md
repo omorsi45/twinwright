@@ -13,6 +13,17 @@ database written by a newer build is refused rather than downgraded.
 
 ### Fixed
 
+- **Stopping a worker with Ctrl-C or SIGTERM during `--drain` or `--max-runs` is a clean stop
+  and no longer spends an attempt.** The cut-short run was requeued with the cancelled
+  context, the requeue failed, and the command exited with `requeue run: context canceled` (at
+  the last attempt, `mark run failed`) and no summary; the lease stayed held until its TTL and
+  the delivery stayed counted, so rolling restarts could fail a long run at the delivery limit.
+  The claim is now handed back under a context the stop does not reach, runnable at once with
+  its delivery given back, and the command exits 0 with its summary and `"stopped": true`.
+  A worker that is killed still leaves its delivery counted. Delivering a real signal is not
+  tested; the test ends the context the handler is derived from
+  (`TestWorkerStoppedMidRunReleasesAndReportsStopped`,
+  `TestWorkerStopDuringADrainIsACleanStop`).
 - **On PostgreSQL, two workers could both take a never-leased run at fence 1, and ownership
   writes could collide.** A run with no lease row has nothing to lock, so concurrent first
   acquisitions both read "no lease" and the later one overwrote the earlier one's live lease

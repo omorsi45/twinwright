@@ -257,9 +257,10 @@ func workerCommand(ctx context.Context, args []string, out io.Writer) error {
 	counters := metrics.NewCounters()
 	instrumentWorker(w, counters)
 
-	// Ctrl-C and SIGTERM cancel the context. An in-flight run is abandoned
-	// rather than force-committed; its lease lapses and another worker picks it
-	// up, which is the same path as a crash and is already tested.
+	// Ctrl-C and SIGTERM cancel the context. A run in flight is not committed
+	// half way: ClaimAndRun hands its claim back (runnable at once, the delivery
+	// it counted given back) and returns, and the worker then stops. Only a worker
+	// that is killed leaves its lease to lapse, which is the crash path.
 	signalCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -283,32 +284,46 @@ func workerCommand(ctx context.Context, args []string, out io.Writer) error {
 		return err
 	}
 	var outcomes []worker.Outcome
+	// A stop request (Ctrl-C or SIGTERM) ends the loop cleanly, like Serve: the
+	// claim in flight has already been handed back by ClaimAndRun, so there is
+	// nothing to report as an error. The summary says it stopped.
+	stopped := false
+claims:
 	for *maxRuns == 0 || len(outcomes) < *maxRuns {
 		outcome, err := w.ClaimAndRun(signalCtx)
-		if errors.Is(err, store.ErrNoWork) {
+		switch {
+		case errors.Is(err, store.ErrNoWork):
 			if *drain {
-				break
+				break claims
 			}
 			select {
 			case <-signalCtx.Done():
-				break
 			case <-time.After(*poll):
-				continue
+				continue claims
 			}
-			break
+		case err != nil:
+			if signalCtx.Err() == nil || !errors.Is(err, context.Canceled) {
+				return err
+			}
+		default:
+			outcomes = append(outcomes, outcome)
 		}
-		if err != nil {
-			return err
+		if signalCtx.Err() != nil {
+			stopped = true
+			break claims
 		}
-		outcomes = append(outcomes, outcome)
 	}
-	return writeJSON(out, map[string]any{
+	summary := map[string]any{
 		"worker":   w.ID(),
 		"claims":   len(outcomes),
 		"outcomes": outcomes,
 		"delivery": "at_least_once",
 		"backend":  string(s.Dialect),
-	})
+	}
+	if stopped {
+		summary["stopped"] = true
+	}
+	return writeJSON(out, summary)
 }
 
 // instrumentWorker connects a worker's events to the in-process counters the

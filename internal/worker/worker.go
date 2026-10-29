@@ -167,7 +167,9 @@ type Disposition string
 const (
 	// Finished: the run reached completion or its step budget.
 	Finished Disposition = "finished"
-	// Requeued: the attempt failed and the run will be tried again.
+	// Requeued: the attempt failed, or the worker was stopped while it ran, and
+	// the run will be tried again. A stop gives its delivery back and does not wait
+	// out the backoff.
 	Requeued Disposition = "requeued"
 	// Failed: the attempt failed and retries are exhausted.
 	Failed Disposition = "failed"
@@ -257,6 +259,13 @@ func (w *Worker) ClaimAndRun(ctx context.Context) (Outcome, error) {
 	outcome.Duration = w.Config.Clock.Now().Sub(started)
 	outcome.RunStatus = run.Status
 
+	// A stop request cancels ctx, but the claim still has to be settled: a run
+	// that finished has to be marked so, and a run that was cut short has to be
+	// handed back. Those writes use a context the stop does not reach and a bound
+	// of their own, the way ExecuteLocal releases after Ctrl-C.
+	settleCtx, endSettle := releaseContext(ctx)
+	defer endSettle()
+
 	switch {
 	case errors.Is(execErr, store.ErrFenced) || loss.lost:
 		outcome.Disposition = Fenced
@@ -276,28 +285,42 @@ func (w *Worker) ClaimAndRun(ctx context.Context) (Outcome, error) {
 		// by anyone, and a row saying so would be false. The run is not ours, so a
 		// failure to record must not turn into a reported error.
 		if errors.Is(loss.cause, store.ErrFenced) || errors.Is(execErr, store.ErrFenced) {
-			if recErr := w.Store.RecordFenceRejection(ctx, lease.Fence(), w.Config.Clock.Now(), outcome.Err); recErr != nil {
+			if recErr := w.Store.RecordFenceRejection(settleCtx, lease.Fence(), w.Config.Clock.Now(), outcome.Err); recErr != nil {
 				w.Config.Logger.Warn("could not record fencing rejection", "run", lease.RunID, "error", recErr)
 			}
+		}
+	case ctx.Err() != nil && (errors.Is(execErr, context.Canceled) || errors.Is(execErr, context.DeadlineExceeded)):
+		// The worker was told to stop and the work ended because of that, which
+		// says nothing about the run. It goes back to the queue at once and the
+		// delivery this claim counted is given back, so that restarting workers
+		// cannot use up a run's attempts. A worker that dies instead of stopping
+		// never gets here, and its delivery stays counted: that is the crash path.
+		outcome.Disposition = Requeued
+		outcome.Err = "worker stopped; the run was returned to the queue"
+		if err = w.Store.ReleaseClaim(settleCtx, lease, w.Config.Clock.Now(), outcome.Err); err != nil {
+			// The lease then lapses on its own TTL and the run is taken over, which
+			// is the path a crash takes. A stop is still a clean stop.
+			outcome.Err = fmt.Sprintf("worker stopped; releasing the claim failed, so its lease lapses on its own: %v", err)
+			w.Config.Logger.Warn("could not release the claim on stop", "run", lease.RunID, "error", err)
 		}
 	case execErr != nil:
 		reason := execErr.Error()
 		if entry.Attempts >= w.Config.MaxAttempts {
 			outcome.Disposition = Failed
-			if err = w.Store.FailRun(ctx, lease, w.Config.Clock.Now(), reason); err != nil {
+			if err = w.Store.FailRun(settleCtx, lease, w.Config.Clock.Now(), reason); err != nil {
 				return w.observe(outcome), fmt.Errorf("mark run failed: %w (original error: %v)", err, execErr)
 			}
 		} else {
 			outcome.Disposition = Requeued
 			at := w.Config.Clock.Now().Add(w.Config.Backoff)
-			if err = w.Store.RequeueRun(ctx, lease, w.Config.Clock.Now(), at, reason); err != nil {
+			if err = w.Store.RequeueRun(settleCtx, lease, w.Config.Clock.Now(), at, reason); err != nil {
 				return w.observe(outcome), fmt.Errorf("requeue run: %w (original error: %v)", err, execErr)
 			}
 		}
 		outcome.Err = reason
 	default:
 		outcome.Disposition = Finished
-		if err = w.Store.FinishRun(ctx, lease, w.Config.Clock.Now()); err != nil {
+		if err = w.Store.FinishRun(settleCtx, lease, w.Config.Clock.Now()); err != nil {
 			return w.observe(outcome), fmt.Errorf("mark run finished: %w", err)
 		}
 		outcome = w.exportTrace(ctx, outcome)
@@ -309,21 +332,25 @@ func (w *Worker) ClaimAndRun(ctx context.Context) (Outcome, error) {
 // than MaxAttempts allows. A run that already completed lost only its final
 // bookkeeping to a crash, so it is finished; anything else is failed.
 func (w *Worker) settleOverDelivered(ctx context.Context, lease store.RunLease, entry store.QueueEntry, outcome Outcome) (Outcome, error) {
-	run, err := w.Store.Run(ctx, lease.RunID)
+	// Settled under a context a stop request does not reach, like the end of
+	// an executed claim.
+	settleCtx, endSettle := releaseContext(ctx)
+	defer endSettle()
+	run, err := w.Store.Run(settleCtx, lease.RunID)
 	if err != nil {
 		return w.observe(outcome), fmt.Errorf("read run past delivery limit: %w", err)
 	}
 	outcome.RunStatus = run.Status
 	if run.Status == "completed" {
 		outcome.Disposition = Finished
-		if err = w.Store.FinishRun(ctx, lease, w.Config.Clock.Now()); err != nil {
+		if err = w.Store.FinishRun(settleCtx, lease, w.Config.Clock.Now()); err != nil {
 			return w.observe(outcome), fmt.Errorf("mark run finished: %w", err)
 		}
 		return w.observe(w.exportTrace(ctx, outcome)), nil
 	}
 	outcome.Disposition = Failed
 	outcome.Err = store.DeliveryLimitReason(entry.Attempts, w.Config.MaxAttempts)
-	if err = w.Store.FailRunAtDeliveryLimit(ctx, lease, w.Config.Clock.Now(), entry.Attempts, w.Config.MaxAttempts); err != nil {
+	if err = w.Store.FailRunAtDeliveryLimit(settleCtx, lease, w.Config.Clock.Now(), entry.Attempts, w.Config.MaxAttempts); err != nil {
 		return w.observe(outcome), fmt.Errorf("fail run at delivery limit: %w", err)
 	}
 	outcome.RunStatus = "failed"

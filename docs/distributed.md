@@ -167,6 +167,16 @@ about every 333 ms (`TestOneSecondLeaseRenewsAtLeastTwiceDuringALongerRun`). An
 explicit interval at or above the TTL is an error, reported before anything is
 claimed (`TestRenewEveryAtOrAboveTheTTLIsRefused`).
 
+A worker that is stopped (Ctrl-C or `SIGTERM`) while a run executes is not a dead
+worker. It hands its claim back: the run is runnable at once, the lease is
+released, and the delivery that claim counted is given back, so restarting
+workers cannot use up a run's attempts (`TestWorkerStoppedMidRunReleasesAndReportsStopped`).
+`worker --drain` and `--max-runs` then exit normally and print their summary with
+`"stopped": true` (`TestWorkerStopDuringADrainIsACleanStop`). A worker that is
+killed instead of stopped leaves its lease to lapse and its delivery stays
+counted, which is the crash path below. No test delivers a real signal to the
+process; the CLI test ends the context the signal handler is derived from.
+
 ## Crash boundaries
 
 A process can die at seven places in a run. Each is a named point in

@@ -207,6 +207,35 @@ func (s *Store) RequeueRun(ctx context.Context, lease RunLease, now, availableAt
 	return s.completeQueueEntry(ctx, lease, now, QueueRunnable, OwnershipReleased, reason, availableAt)
 }
 
+// ReleaseClaim hands a claimed run back to the queue, runnable at once, and gives
+// back the delivery that claim counted. It is for a worker that was told to stop
+// while the run was executing: the work was cut short by the worker's own
+// shutdown, which says nothing about the run, so it must not count toward the
+// delivery bound or wait out a backoff. A few rolling restarts during one long run
+// would otherwise fail it at the limit.
+//
+// The release is fenced like every completion, in one transaction with the queue
+// update, the lease release and the ownership row, so only the current owner can
+// undo its own delivery. A worker that was killed instead of stopped never gets
+// here, and its delivery stays counted: that is the path a crash takes.
+func (s *Store) ReleaseClaim(ctx context.Context, lease RunLease, now time.Time, reason string) error {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err = GuardFenceTx(ctx, tx, s.Dialect, lease.Fence(), now); err != nil {
+		return err
+	}
+	if err = completeQueueEntryTx(ctx, tx, lease, now, QueueRunnable, OwnershipReleased, reason, now); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, "UPDATE work_queue SET attempts=CASE WHEN attempts>0 THEN attempts-1 ELSE 0 END WHERE run_id=?", lease.RunID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (s *Store) completeQueueEntry(ctx context.Context, lease RunLease, now time.Time, state, kind, reason string, availableAt time.Time) error {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {

@@ -134,6 +134,16 @@ dies returns nothing, so a run that killed its worker every time was taken over
 forever. The claim count is the one signal a crash leaves behind, so a delivery
 that never reports back now counts toward the bound.
 
+A worker that is told to stop (Ctrl-C or `SIGTERM`) while a run executes does
+report back. It releases its claim under a context the stop does not reach, the
+run becomes runnable at once, and the delivery that claim counted is given back
+(`store.ReleaseClaim`, fenced like every completion), so rolling restarts cannot
+use up a run's attempts. A worker that is killed instead of stopped reports
+nothing and its delivery stays counted. If the release itself fails, the lease
+lapses on its TTL and the delivery stays counted, which is the crash path.
+`TestWorkerStoppedMidRunReleasesAndReportsStopped` and
+`TestWorkerStopDuringADrainIsACleanStop` hold this.
+
 When a claim's attempts exceed `MaxAttempts` (default 3, so the fourth delivery):
 
 - the run is not executed;
@@ -271,4 +281,5 @@ believes the cause was transient re-enqueues it and gets a fresh budget.
 
 ## Corrections
 
+- 2026-10-28: a worker told to stop while a run executes now hands its claim back and gives the delivery back instead of leaving the lease to lapse with the delivery counted, because a review found that `worker --drain` and `--max-runs` exited with a requeue error on SIGTERM and every graceful stop burned an attempt (CORE-9). The sentence "a delivery that never reports back now counts toward the bound" is unchanged for a worker that dies.
 - 2026-10-28: the crash matrix's stale-worker check covers the runner's own writes (a model turn and a status change) as well as the dispatcher's, because a review found that dropping the fence from every runner write passed all suites (CORE-1). `TestStaleRunnerWritesNothingAfterTakeover` reaches each of the runner's seven durable writes with a superseded fence.
