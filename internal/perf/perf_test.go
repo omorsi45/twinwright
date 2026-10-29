@@ -677,6 +677,18 @@ func TestProblems(t *testing.T) {
 	if got := both.Problems(); len(got) != 2 {
 		t.Errorf("want one problem per finding, got %v", got)
 	}
+
+	// Replay verification has a right answer, like the other two: a run the ledger
+	// cannot reproduce is a finding, not a slower figure.
+	allVerified := Report{Replay: &ReplayResult{Runs: 2, Verified: 2}}
+	if got := allVerified.Problems(); len(got) != 0 {
+		t.Errorf("a replay that verified every run is not a problem: %v", got)
+	}
+	unverified := Report{Replay: &ReplayResult{Runs: 2, Verified: 1}}
+	got = unverified.Problems()
+	if len(got) != 1 || !strings.Contains(got[0], "replay") || !strings.Contains(got[0], "1 of 2") {
+		t.Errorf("an unverified replay must be named with its counts: %v", got)
+	}
 }
 
 func TestFormatTextSummarisesEverySection(t *testing.T) {

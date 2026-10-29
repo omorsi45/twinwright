@@ -314,9 +314,10 @@ type Report struct {
 }
 
 // Problems lists the findings that should fail a run: a recovery that repeated
-// a committed effect, and a crash matrix that reported a violation. An empty
-// list means nothing the report measured broke an invariant. It does not judge
-// the speed figures, which have no pass mark.
+// a committed effect, a replay that did not verify, and a crash matrix that
+// reported a violation. Each has a right answer, which is why each is a finding
+// and a slow figure is not. An empty list means nothing the report measured broke
+// an invariant. It does not judge the speed figures, which have no pass mark.
 func (r Report) Problems() []string {
 	var problems []string
 	for _, row := range r.Recovery {
@@ -324,6 +325,10 @@ func (r Report) Problems() []string {
 			problems = append(problems, fmt.Sprintf(
 				"recovery with a %d ms lease duplicated %d committed mutation(s)", row.LeaseTTLMS, row.DuplicateMutations))
 		}
+	}
+	if rep := r.Replay; rep != nil && rep.Verified != rep.Runs {
+		problems = append(problems, fmt.Sprintf(
+			"replay verified %d of %d run(s)", rep.Verified, rep.Runs))
 	}
 	if m := r.CrashMatrix; m != nil && m.Violations > 0 {
 		problems = append(problems, fmt.Sprintf(

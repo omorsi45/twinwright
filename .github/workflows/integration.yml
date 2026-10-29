@@ -355,8 +355,8 @@ jobs:
     # only when someone intends to record them. A run on every push or pull
     # request would spend runner time on numbers nobody reads and would invite
     # comparing two runs from different shared machines. The job also fails when
-    # perf exits non-zero, which it does on a duplicated mutation or a
-    # crash-matrix violation.
+    # perf exits non-zero, which it does on a duplicated mutation, a replay
+    # that did not verify or a crash-matrix violation.
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30

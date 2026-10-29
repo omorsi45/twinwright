@@ -23,8 +23,9 @@ import (
 //
 // Input mistakes are exit 2, as in gate, so a script can tell "fix the command
 // line" from "the measurement found a problem" (exit 1). The report is written
-// before the exit code is decided, so a run that found a duplicated mutation or
-// a crash matrix violation leaves the evidence behind.
+// before the exit code is decided, so a run that found a duplicated mutation, a
+// replay that did not verify or a crash matrix violation leaves the evidence
+// behind.
 func perfCommand(ctx context.Context, args []string, out io.Writer) error {
 	defaults := perf.DefaultConfig()
 	fs := flag.NewFlagSet("perf", flag.ContinueOnError)

@@ -138,6 +138,8 @@ func TestPerfFinishWritesTheReportBeforeFailingOnAProblem(t *testing.T) {
 			Recovery: []perf.RecoveryResult{{LeaseTTLMS: 1000, DuplicateMutations: 1}}}, 1},
 		{"crash matrix violation", perf.Report{SchemaVersion: 1, Backend: "sqlite",
 			CrashMatrix: &perf.MatrixResult{Scenario: "duplicate-charge", Cases: 9, Violations: 2}}, 1},
+		{"unverified replay", perf.Report{SchemaVersion: 1, Backend: "sqlite",
+			Replay: &perf.ReplayResult{Runs: 20, Verified: 19}}, 1},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

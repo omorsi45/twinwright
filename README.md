@@ -139,7 +139,7 @@ The `observability` job of the Integration workflow checks two claims against th
 
 ## Benchmarks
 
-`twinwright perf --out perf.json` measures four workloads on the scripted `duplicate-charge` scenario: fleet throughput at 1, 2, 4 and 8 in-process workers, crash recovery time against the lease TTL, replay verification, and the crash matrix. Each report records the backend, configuration, build, Go version, operating system, CPU count and seed, and exits 1 if a recovery duplicated a mutation. [docs/performance.md](docs/performance.md) holds the methodology, the results copied from two committed reports in `docs/benchmarks/`, and what was not measured.
+`twinwright perf --out perf.json` measures four workloads on the scripted `duplicate-charge` scenario: fleet throughput at 1, 2, 4 and 8 in-process workers, crash recovery time against the lease TTL, replay verification, and the crash matrix. Each report records the backend, configuration, build, Go version, operating system, CPU count and seed, and exits 1 if a recovery duplicated a mutation, a replay did not verify or the crash matrix reported a violation. [docs/performance.md](docs/performance.md) holds the methodology, the results copied from two committed reports in `docs/benchmarks/`, and what was not measured.
 
 One result is unfavourable: **SQLite throughput did not scale with workers on the measured machine** (two workers were slower than one, eight faster than four), and its cause was not investigated. PostgreSQL throughput rose with workers on a GitHub runner. The two reports come from different machines and operating system layers, so they are not a comparison of the backends, and each is one machine with three trials. See ADR 0034.
 

@@ -21,8 +21,8 @@ Newer commands, and what has to stay aligned with them:
   `TestRegressedBenchFailsTheGate`. The gate must stay able to fail: the CI job
   requires exit 1 on `--model fixture-regressed-v1`.
 - `run --fail-on-eval`: opt-in, and refused with `--enqueue`.
-- `perf`: writes its report before it exits 1 on a duplicated mutation or a
-  crash-matrix violation, exits 2 on bad input, and never prints a DSN. The
+- `perf`: writes its report before it exits 1 on a duplicated mutation, a replay
+  that did not verify or a crash-matrix violation, exits 2 on bad input, and never prints a DSN. The
   throughput table in `docs/performance.md` is held to the committed reports in
   `docs/benchmarks/` by `TestBenchmarkDocsMatchTheirReports`.
 - `run --record-cassette` and `replay --cassette`: the recording flag exists on

@@ -13,6 +13,11 @@ database written by a newer build is refused rather than downgraded.
 
 ### Fixed
 
+- **`twinwright perf` fails when a replay does not verify.** A replay that verified fewer runs than
+  it executed was recorded in the report and the command still exited 0, so the dispatch-only
+  `perf` CI job stayed green on it. It now writes the report and exits 1, like a duplicated
+  mutation or a crash matrix violation (`TestProblems`,
+  `TestPerfFinishWritesTheReportBeforeFailingOnAProblem`).
 - **`make perf` writes a report that names its commit, and a build with no VCS stamp no longer
   claims a clean tree.** The target ran `go run`, whose binary carries neither a git revision nor a
   version, so its report had neither and still said `git_modified: false`. `make perf` now builds

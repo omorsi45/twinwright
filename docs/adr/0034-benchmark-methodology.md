@@ -70,7 +70,7 @@ the benchmark suite run, so a figure describes code a test already proves correc
   per-case store setup included. It is one pass and has no spread.
 
 The command writes the report, prints a short summary, and then exits 1 if any recovery
-duplicated a committed mutation or the matrix reported a violation, and 2 for bad
+duplicated a committed mutation, a replay did not verify every run or the matrix reported a violation, and 2 for bad
 input. Speed has no pass mark. A mark would have to come from a measurement, and the
 two published so far are one run each on two different machines.
 
@@ -237,7 +237,7 @@ shared machines. It stays on demand.
 
 **A threshold on speed.** It would fail on the noise of a shared runner, and it would
 turn a measurement into a target. The command's findings are the invariants that
-have a right answer: no duplicated mutation, no crash matrix violation.
+have a right answer: no duplicated mutation, no unverified replay, no crash matrix violation.
 
 **One table comparing the backends.** The two reports differ in machine as well as
 backend, so a joint table would invite a conclusion they do not support.
@@ -260,3 +260,4 @@ backend, so a joint table would invite a conclusion they do not support.
 
 - 2026-10-28: "The database address is never recorded" claimed that an error from `perf.Run` has the DSN and its password removed, and cited two tests for it that pass with the scrubber removed. That held only for a DSN that parses: for a PostgreSQL password with an unencoded `/`, `#` or `?` the error quoted a piece of the password, and `redact.URL` kept the userinfo of such a string. The scrubber now replaces the text of an error about a DSN that does not parse cleanly, and the cited tests now use such DSNs.
 - 2026-10-28: `make perf` ran `go run`, whose binary carries no VCS stamp, so its report named no commit and still wrote `git_modified: false`, a statement about a tree nobody read (PERF-2). The target now depends on `build` and runs `./twinwright perf`. `git_modified` is omitted, not false, when the build recorded no tree state: the field kept its name and its meaning when present, so schema version 1 and the committed reports, which carry `git_modified: false` from stamped builds, read as before.
+- 2026-10-28: `perf` now exits 1, after writing the report, when a replay verified fewer runs than it executed (PERF-4). The ADR listed replay verification as a measured invariant ("replay verified 20 of 20") while only a duplicated mutation and a crash matrix violation could fail the run, so an unverified replay left the CI `perf` job green. The consequence recorded in the ledger ruling for the original task, that an unverified replay is reported in the JSON but does not change the exit code, is superseded.
