@@ -78,14 +78,17 @@ constraint is therefore documented rather than enforced.
 
 ## What is not claimed
 
-There is no metrics push, no exemplars, no histograms (durations are exposed as
-counters of seconds, which is honest about what is measured), and no live
-provider cost accounting beyond the token usage a provider actually reports. Live
-delivery to a collector is exercised against a real HTTP server in tests; the
-docker-compose collector is offered for manual confirmation and is not part of
-CI.
+There is no metrics push, no exemplars, and no live provider cost accounting beyond
+the token usage a provider actually reports. There is one histogram,
+`twinwright_worker_run_duration_seconds`, the seconds from claim to the end of the
+claim for every disposition; the total execution time is also kept as a counter of
+seconds (`twinwright_worker_run_seconds_total`). Live delivery to a collector is
+exercised against a real HTTP server in tests, and against the Compose collector,
+Jaeger and Prometheus by the `observability` job of the Integration workflow
+(ADR 0032).
 
 ## Corrections
 
 - 2026-10-28: `twinwright_workers_registered` counted every row in `workers` and `twinwright_worker_last_seen_age_seconds` had a series for each, so both grew by one for every process that ever started, and an alert on last-seen age fired forever for a worker that had stopped (OBS-11). Both now list only workers seen within the last ten minutes (`metrics.DefaultWorkerWindow`), a worker that stops cleanly removes its own row, and a worker waiting for work refreshes its row once a minute so it stays inside the window. The HELP text of both gauges states the window.
 - 2026-10-28: "Every series is emitted even when its value is zero" held for the counters and not for `twinwright_ownership_events{kind}` or `twinwright_ledger_events{type}`, which rendered only the values that already had rows, so the first fencing rejection or the first takeover appeared as a new series at 1 (OBS-15). Every kind the ownership log can hold (`store.OwnershipKinds`) is now rendered at zero, and so are the four ledger event types the package gives gauges of (`tool.response`, `retry`, `authorization.denied`, `chaos.injected`). The set of ledger event types is open, so any other type still appears with its first event.
+- 2026-10-28: "What is not claimed" said there are no histograms and that the Compose collector is not part of CI. Both stopped being true: a run-duration histogram (`twinwright_worker_run_duration_seconds`) was added with the observability work, and the `observability` job of the Integration workflow runs the Compose collector, Jaeger and Prometheus (ADR 0032), where it has passed on every run since its first on 2026-10-28 (F5-C8). The paragraph now says what exists.

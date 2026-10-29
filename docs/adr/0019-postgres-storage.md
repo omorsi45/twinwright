@@ -47,8 +47,8 @@ Event sequence allocation now groups explicitly; the grouped form is identical
 on SQLite because the join yields at most one world row per run.
 
 Timestamps stay `TEXT` in RFC 3339 on both backends rather than becoming
-`timestamptz`. Determinism is the reason: the ledger's recorded and world clocks
-are compared byte-for-byte during replay, and a backend that normalises,
+`timestamptz`. Determinism is the reason: the world tables' `created_at` values are
+compared byte-for-byte during replay, and a backend that normalises,
 rounds or re-zones a timestamp would make a PostgreSQL run and a SQLite run of
 the same fixture diverge for no semantic reason.
 
@@ -101,3 +101,7 @@ PostgreSQL tests are opt-in behind `TWINWRIGHT_TEST_POSTGRES_DSN` and skip when
 it is unset, so `go test ./...` stays hermetic. They run against a real server,
 never a mock: a mock cannot reproduce the integer width, grouping and type
 strictness differences that are the entire reason these tests exist.
+
+## Corrections
+
+- 2026-10-28: the paragraph on timestamps said "the ledger's recorded and world clocks are compared byte-for-byte during replay". Replay compares the world tables' `created_at` columns, and does not compare a ledger event's `recorded_at`: `replay.compareEvents` compares an event's type and decoded payload only (F3-C4). The paragraph now names the world tables' `created_at` values, and the reason for keeping `TEXT` stands for them.

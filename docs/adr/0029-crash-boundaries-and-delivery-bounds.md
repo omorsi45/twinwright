@@ -111,8 +111,9 @@ a claim could miss an expired lease or a run that had become available.
 Every time written to `run_leases`, `work_queue` and `workers` now uses
 `store.CoordinationLayout`, `2006-01-02T15:04:05.000000000Z`, in UTC. It is still
 RFC 3339, so existing parsers read it, and lexical order equals time order.
-Ledger `events` timestamps are not coordination times and are unchanged, because
-replay compares them byte for byte.
+Ledger `events` timestamps are not coordination times and are unchanged. Replay does
+not compare them either: it compares an event's type and decoded payload and never
+its `recorded_at`.
 
 Migration 3, "canonical coordination timestamps" (`store.CurrentSchemaVersion` is
 now 3), rewrites existing rows into the new form. It leaves an empty value alone,
@@ -287,3 +288,4 @@ believes the cause was transient re-enqueues it and gets a fresh budget.
 - 2026-10-28: the paragraph on the call-ID cache no longer credits `TestDuplicateDeliveryDoesNotDuplicateCommittedEffects` with showing the saved-result lookup, because that test redelivers a finished run, which returns before any call is dispatched, and a mutation that disables the cache passes it (CORE-5). `TestCommittedCallIsAnsweredFromTheCacheUnderTheNewOwner` is the test of the lookup under a new owner, and fails under that mutation.
 - 2026-10-28: a worker told to stop while a run executes now hands its claim back and gives the delivery back instead of leaving the lease to lapse with the delivery counted, because a review found that `worker --drain` and `--max-runs` exited with a requeue error on SIGTERM and every graceful stop burned an attempt (CORE-9). The sentence "a delivery that never reports back now counts toward the bound" is unchanged for a worker that dies.
 - 2026-10-28: the crash matrix's stale-worker check covers the runner's own writes (a model turn and a status change) as well as the dispatcher's, because a review found that dropping the fence from every runner write passed all suites (CORE-1). `TestStaleRunnerWritesNothingAfterTakeover` reaches each of the runner's seven durable writes with a superseded fence.
+- 2026-10-28: the paragraph on coordination timestamps gave "replay compares them byte for byte" as the reason ledger `events` timestamps were left unchanged, and the design spec repeats it. Replay does not compare them: `replay.compareEvents` compares an event's type and its decoded payload and never `recorded_at`, which differs in every event of a recovered run. The conclusion stands, since ledger timestamps are not coordination times and migration 3 does not touch them, and the sentence now says what replay compares (F3-C4). The world tables' `created_at` columns are compared, but they are not ledger timestamps. The design spec is a dated record of the design and is not edited.
