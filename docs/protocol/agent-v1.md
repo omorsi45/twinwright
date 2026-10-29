@@ -24,9 +24,15 @@ twinwright run duplicate-charge \
 | `--provider-timeout D` | the deadline of one turn, default 90 seconds |
 
 The flags are accepted by every command that can reach a provider (`run`,
-`resume`, `fork`, `counterfactual`, `bench`, `shadow`, `worker`). `--agent-command`
-and `--agent-env` with any provider other than `exec` are refused, and so are
-`--record-cassette` and `--cassette` with `exec`, which makes no HTTP calls.
+`resume`, `fork`, `counterfactual`, `bench`, `shadow`, `worker`). Where the
+operator names the provider (`run`, `bench`, `shadow`, and `fork --agent`),
+`--agent-command` and `--agent-env` with any provider other than `exec` are
+refused. Where the provider comes from the run's own record (`worker`, `resume`,
+and `fork` and `counterfactual` for the run they start from), the agent flags apply
+to the runs whose provider is `exec` and are not applied to the others, so one
+worker started with `--agent-command` serves scripted, hosted and exec runs from
+the same queue. `--record-cassette` and `--cassette` are refused with `exec`, which
+makes no HTTP calls.
 
 ## Starting the agent
 
@@ -36,10 +42,12 @@ word. There are no escapes, variables, globs, substitutions or operators, and th
 result is executed directly, never through a shell. An unterminated quote or an
 empty command is an error.
 
-The agent is started once per turn and nothing survives between turns except the
+The agent is started once per turn and carries nothing between turns except the
 history it is sent. Its environment is exactly `PATH` and `HOME` from the
 Twinwright process, plus the variables named with `--agent-env`. Provider keys,
-database addresses and the rest of the operator's environment are not passed.
+database addresses and the rest of the operator's environment are not passed. If
+Twinwright has neither `PATH` nor `HOME` and nothing is named, the environment is
+empty, not inherited.
 Its working directory is the one Twinwright was started in.
 
 ## Framing
@@ -102,7 +110,10 @@ Schema: [`agent-v1-response.schema.json`](agent-v1-response.schema.json).
 ```
 
 - `protocol`, `content` and `tool_calls` are required. `usage` (`input_tokens`,
-  `output_tokens`, `total_tokens`) is optional and is recorded with the turn.
+  `output_tokens`, `total_tokens`) is optional and is recorded with the turn. When
+  it is there it must be an object with all three counts as integers, as the schema
+  says: `null`, `{}` and an object with some of the counts are refused, where they
+  used to be recorded as zeros.
 - With one or more `tool_calls` the calls are proposed. The run executes them and
   the next turn is the agent started again with their results in `history`.
 - With `tool_calls: []` the turn is the final answer and `content` is it. The run
@@ -123,7 +134,7 @@ All of these are enforced by the provider and covered by tests in
 | Exit status other than 0 | provider error naming the status, with the last 4 KiB of stderr |
 | stdout is empty, is not one JSON object, has data after the object, has an unknown field, or lacks `protocol`, `content` or `tool_calls` | provider error |
 | `protocol` is missing or is not `twinwright.agent.v1` | provider error (protocol mismatch) |
-| stdout over 1 MiB (1,048,576 bytes) | provider error, and the process is killed |
+| stdout over 1 MiB (1,048,576 bytes) | provider error, and the process is killed; in container mode the container is removed as well (below) |
 | No answer within the turn deadline | the process group gets SIGTERM, then SIGKILL after 500 ms, and the turn is recorded as an interrupted attempt of kind `timeout` |
 | The command cannot be started | provider error |
 
@@ -131,14 +142,42 @@ A timeout is the only failure the runner retries: it makes up to two attempts at
 a turn and records each interrupted one. Every other failure ends the run as
 `failed`, with the error in the ledger.
 
-On unix the agent runs in a process group of its own, so a timeout ends the agent
-and anything it started, and the child is always waited for, so no zombie is left.
-On other platforms the agent alone is killed.
+On unix the agent runs in a process group of its own, and every turn ends by
+killing that group, whether the turn succeeded, failed or timed out (a timeout
+sends SIGTERM first). A process the agent started and left in its group does not
+outlive the turn, and the child is always waited for, so no zombie is left. What
+this does not reach: a process that left the group (`setsid`, a daemon, a double
+fork into a new session), and on platforms other than unix anything the agent
+started, since there only the agent itself is killed.
+
+If Twinwright itself dies mid-turn, the agent is killed too on Linux, where the
+kernel is asked to send it SIGKILL when its parent goes. That covers the agent
+process only: what the agent started is not reached when Twinwright is killed
+rather than stopped, and on other platforms a hung agent outlives a dead
+Twinwright.
 
 stderr is kept to its last 4 KiB. The error text, including that tail, is
 redacted: the values of the variables passed with `--agent-env` are masked, as are
-key-like tokens. Passed values are also masked in the agent's own stdout before it
-is read, so an agent that echoes one back does not put it in the ledger.
+key-like tokens. A passed value is masked in the tail as the agent wrote it, as a
+JSON string and as a Go quoted string, before the tail is quoted for the error text
+and before it is cut to 4 KiB, so a value holding a quote, a backslash or a newline
+is masked, and so is one that the 4 KiB window would have cut in two. When stderr is
+longer than the window, the tail starts at a line boundary: the first, partial line
+is dropped.
+
+Passed values are also masked in what the agent answers, after the response is
+decoded and not in its bytes: in `content` and in every string of each call (the
+`id`, the `operation_id`, and the names and values of `arguments` at any depth).
+Numbers, booleans and `null` are not strings and are never masked, so a passed
+value cannot make a valid response invalid, and the agent's own escaping (`\u00e4`
+for `ä` as Python's `json.dumps` writes it, `\"`, `\/`) does not matter. The
+masking is done before the runner records or dispatches a call, so a passed value
+that the agent uses as an argument is recorded in the ledger as `[REDACTED]` and the
+tool receives `[REDACTED]` too, never the value: that changes what the tool
+receives, and it is the only way the tool does not receive the secret.
+
+A passed value shorter than 8 characters is never masked, in stderr or in the
+answer, so that ordinary words are not; do not pass a secret that short.
 
 ## Trust boundary
 
@@ -184,18 +223,40 @@ twinwright run duplicate-charge --agent exec --model billing-agent@1 \
 
 The container runs with a read-only root filesystem (plus a 16 MiB `/tmp`), every
 capability dropped, privilege gain off and the user `65534`. The files you mount
-must be readable by that user. What this does not do: the Docker daemon is trusted,
-there is no custom seccomp profile, a network other than `none` is unrestricted, on
-macOS and Windows the boundary is the Docker Desktop VM, and a timeout kills the
-docker client but Docker does not stop a container when its client dies, so a hung
-agent's container can keep running until its process exits. See
+must be readable by that user. `--agent-memory` and `--agent-cpus` of zero are
+refused, because docker reads zero as no limit.
+
+Each turn's container is named `tw-agent-` and 16 random hexadecimal digits. When a
+turn ends by a timeout, a cancellation or an output flood, Twinwright kills the
+docker client and then runs `docker rm -f` on that name (10 seconds at most, best
+effort: a failure is logged and the turn's own error is the one reported), because
+Docker does not stop a container when its client dies. It does not run for a turn
+that ended by itself, where `--rm` removes the container, and it cannot run if
+Twinwright is killed mid-turn: the container is then left until its own process
+exits.
+
+The docker client is started with `PATH`, `HOME` and, when they are set in
+Twinwright's environment, `DOCKER_HOST`, `DOCKER_CONTEXT`, `DOCKER_CONFIG`,
+`DOCKER_CERT_PATH` and `DOCKER_TLS_VERIFY`, so a daemon that is configured that way
+is reachable. Those go to the client only; the container gets just the names given
+with `--agent-env`, so the daemon's address does not enter the container. Their
+values are masked in error text like the passed ones.
+
+What this does not do: the Docker daemon is trusted, there is no custom seccomp
+profile, a network other than `none` is unrestricted, and on macOS and Windows the
+boundary is the Docker Desktop VM. See
 `docs/adr/0033-agent-protocol-and-isolation.md`.
 
 ## What a run records
 
 The run records the provider name `exec`, the `--model` you gave, and the turns,
 exactly as for any other provider. It does **not** record the command, its
-arguments or the environment names. Replay verifies a run from its recorded turns
+arguments or the environment names: an agent that cannot be started fails the run
+with the operating system's reason (for example "no such file or directory") and not
+the command that was tried. The stderr tail of an agent that fails after it started
+is quoted in the error and is the agent's own text, so a traceback that prints its
+script path puts that path in the ledger; masking covers the passed values and
+key-like tokens, not paths. Replay verifies a run from its recorded turns
 and needs no agent. Continuing an exec run, with `resume` or a `worker`, needs
 `--agent-command` again, and an exec run started elsewhere fails with an error
 that names that flag.

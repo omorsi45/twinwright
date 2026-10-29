@@ -300,6 +300,11 @@ func (p *cancelOnFirstCall) Next(context.Context, string, []Message, []compiler.
 func TestClientErrorIsNotRetried(t *testing.T) {
 	for _, tc := range adapterCases() {
 		for _, status := range []int{400, 401, 403, 404, 422, 501, 505, 529} {
+			if status == 529 && tc.name == "anthropic" {
+				// Anthropic's documented overloaded status: a temporary condition,
+				// retried once (TestAnthropicOverloadedIsRetriedOnce).
+				continue
+			}
 			t.Run(tc.name+"/"+strconv.Itoa(status), func(t *testing.T) {
 				out := runAgainst(t, tc, reply{status: status}, reply{status: 200})
 				if out.err == nil || out.run.Status != "failed" {

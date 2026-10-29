@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -123,6 +124,67 @@ func TestPerfCLIRejectsBadInput(t *testing.T) {
 	}
 }
 
+// The report is written after the whole measurement, which with the defaults is
+// over a minute, so a path that cannot be written has to be found before it
+// starts. The unreachable database below would make a started measurement fail
+// with exit 1; seeing exit 2 means the command stopped at the path.
+func TestPerfCLIRejectsAnOutPathItCannotWriteBeforeMeasuring(t *testing.T) {
+	dir := t.TempDir()
+	tests := []struct {
+		name string
+		out  string
+	}{
+		{"missing parent directory", filepath.Join(dir, "no-such-dir", "nested", "perf.json")},
+		{"a directory", dir},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			err := runCLI([]string{
+				"perf", "--examples", perfExamples(),
+				"--db", "postgres://perf:test-not-a-secret@127.0.0.1:1/perf?sslmode=disable",
+				"--workloads", "replay", "--replay-runs", "1", "--out", tc.out,
+			}, &out)
+			if err == nil {
+				t.Fatal("perf accepted an --out it cannot write")
+			}
+			if got := exitCode(err); got != exitBadInput {
+				t.Errorf("exit code=%d (%v) want %d: the path should have been refused before any measurement", got, err, exitBadInput)
+			}
+			if !strings.Contains(err.Error(), "--out") {
+				t.Errorf("the error does not name the flag: %v", err)
+			}
+			if out.Len() != 0 {
+				t.Errorf("a refused path still printed a summary: %s", out.String())
+			}
+		})
+	}
+}
+
+// Checking the path must not leave anything behind, and must not touch a report
+// that is already there: the old one stays until a new one replaces it.
+func TestPerfCLICheckingTheOutPathLeavesNoFileAndKeepsAnExistingReport(t *testing.T) {
+	dir := t.TempDir()
+	fresh := filepath.Join(dir, "fresh.json")
+	if err := checkReportPath(fresh); err != nil {
+		t.Fatalf("a path in an existing directory was refused: %v", err)
+	}
+	if _, err := os.Stat(fresh); err == nil {
+		t.Error("checking a new path left a file behind")
+	}
+
+	existing := filepath.Join(dir, "existing.json")
+	if err := os.WriteFile(existing, []byte("previous report\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkReportPath(existing); err != nil {
+		t.Fatalf("an existing report was refused: %v", err)
+	}
+	if got, _ := os.ReadFile(existing); string(got) != "previous report\n" {
+		t.Errorf("checking the path changed the existing report: %q", got)
+	}
+}
+
 // A report that records a duplicated mutation or a recovery violation is the
 // finding the command exists to produce, so the file must exist before the
 // command fails, or the failure would leave nothing to look at.
@@ -137,6 +199,8 @@ func TestPerfFinishWritesTheReportBeforeFailingOnAProblem(t *testing.T) {
 			Recovery: []perf.RecoveryResult{{LeaseTTLMS: 1000, DuplicateMutations: 1}}}, 1},
 		{"crash matrix violation", perf.Report{SchemaVersion: 1, Backend: "sqlite",
 			CrashMatrix: &perf.MatrixResult{Scenario: "duplicate-charge", Cases: 9, Violations: 2}}, 1},
+		{"unverified replay", perf.Report{SchemaVersion: 1, Backend: "sqlite",
+			Replay: &perf.ReplayResult{Runs: 20, Verified: 19}}, 1},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -168,26 +232,93 @@ func TestPerfFinishWritesTheReportBeforeFailingOnAProblem(t *testing.T) {
 }
 
 func TestPerfCLINeverPrintsTheDSN(t *testing.T) {
-	const dsn = "postgres://perf:hunter2-secret@127.0.0.1:1/perf?sslmode=disable"
-	outPath := filepath.Join(t.TempDir(), "perf.json")
-	var out bytes.Buffer
-	err := runCLI([]string{
-		"perf", "--examples", perfExamples(), "--db", dsn,
-		"--workloads", "replay", "--replay-runs", "1", "--out", outPath,
-	}, &out)
-	if err == nil {
-		t.Fatal("perf succeeded against a port nothing listens on")
+	// The first is well formed and refused by the network; the rest do not parse,
+	// which is the only kind whose unscrubbed error carries the password, so the
+	// test fails when the command stops scrubbing.
+	for name, tc := range map[string]struct{ dsn, password string }{
+		"refused connection": {"postgres://perf:hunter2-secret@127.0.0.1:1/perf?sslmode=disable", "hunter2-secret"},
+		"slash":              {"postgres://perf:hunter2/secret@127.0.0.1:1/perf?sslmode=disable", "hunter2/secret"},
+		"hash":               {"postgres://perf:hunter2#secret@127.0.0.1:1/perf?sslmode=disable", "hunter2#secret"},
+		"question mark":      {"postgres://perf:hunter2?secret@127.0.0.1:1/perf?sslmode=disable", "hunter2?secret"},
+		"bad escape":         {"postgres://perf:hun%zzer2-secret@127.0.0.1:1/perf?sslmode=disable", "hun%zzer2-secret"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			outPath := filepath.Join(t.TempDir(), "perf.json")
+			var out bytes.Buffer
+			err := runCLI([]string{
+				"perf", "--examples", perfExamples(), "--db", tc.dsn,
+				"--workloads", "replay", "--replay-runs", "1", "--out", outPath,
+			}, &out)
+			if err == nil {
+				t.Fatal("perf succeeded against a DSN nothing can serve")
+			}
+			if got := exitCode(err); got != 1 {
+				t.Errorf("exit code=%d want 1 for a run that could not start", got)
+			}
+			text := err.Error() + "\n" + out.String()
+			if strings.Contains(text, tc.dsn) {
+				t.Errorf("the DSN leaked into the output: %s", text)
+			}
+			for i := 0; i+4 <= len(tc.password); i++ {
+				if piece := tc.password[i : i+4]; strings.Contains(text, piece) {
+					t.Errorf("a piece of the password (%q) leaked into the output: %s", piece, text)
+					break
+				}
+			}
+			if _, statErr := os.Stat(outPath); statErr == nil {
+				t.Error("a run that could not start still wrote a report")
+			}
+		})
 	}
-	if got := exitCode(err); got != 1 {
-		t.Errorf("exit code=%d want 1 for a run that could not start", got)
+}
+
+// makeRecipe returns the prerequisites and the recipe lines of one Makefile
+// target, read from the repository's Makefile.
+func makeRecipe(t *testing.T, target string) (prerequisites []string, recipe []string) {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "..", "Makefile"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, leaked := range []string{"hunter2-secret", dsn} {
-		if strings.Contains(err.Error(), leaked) || strings.Contains(out.String(), leaked) {
-			t.Errorf("the DSN leaked into the output: %v / %s", err, out.String())
+	inside := false
+	for _, line := range strings.Split(strings.ReplaceAll(string(raw), "\r\n", "\n"), "\n") {
+		switch {
+		case strings.HasPrefix(line, target+":"):
+			inside = true
+			rest, _, _ := strings.Cut(strings.TrimPrefix(line, target+":"), "##")
+			prerequisites = strings.Fields(rest)
+		case inside && strings.HasPrefix(line, "\t"):
+			recipe = append(recipe, strings.TrimSpace(line))
+		case inside:
+			return prerequisites, recipe
 		}
 	}
-	if _, statErr := os.Stat(outPath); statErr == nil {
-		t.Error("a run that could not start still wrote a report")
+	if !inside {
+		t.Fatalf("the Makefile has no %q target", target)
+	}
+	return prerequisites, recipe
+}
+
+// A binary started with go run carries no VCS settings and no linker version, so
+// the report it writes names no revision and, before the build information said
+// so, asserted a clean tree it never read. The documented command has to run a
+// built binary, which is what the build target produces.
+func TestMakePerfBuildsAStampedBinary(t *testing.T) {
+	prerequisites, recipe := makeRecipe(t, "perf")
+	if !slices.Contains(prerequisites, "build") {
+		t.Errorf("make perf depends on %v, want build so the binary carries the toolchain's VCS stamp", prerequisites)
+	}
+	ran := false
+	for _, line := range recipe {
+		if strings.Contains(line, "go run") {
+			t.Errorf("make perf runs %q: a go run binary records no git revision", line)
+		}
+		if strings.Contains(line, "./twinwright perf") && strings.Contains(line, "--out") {
+			ran = true
+		}
+	}
+	if !ran {
+		t.Errorf("make perf never runs ./twinwright perf --out: %v", recipe)
 	}
 }
 

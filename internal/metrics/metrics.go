@@ -27,10 +27,9 @@ package metrics
 
 import (
 	"context"
-	"database/sql"
-	"errors"
 	"fmt"
 	"math"
+	"net"
 	"net/http"
 	"sort"
 	"strconv"
@@ -164,8 +163,13 @@ func NewCounters() *Counters {
 // on its one series. An undeclared metric, or a labelled counter given no
 // label, is dropped: Render writes only declared families, which is what keeps
 // the document well formed.
+//
+// A counter only goes up. Prometheus reads any decrease as a reset, so rate()
+// and increase() jump by the whole accumulated total after one. A negative delta
+// is therefore dropped, and so is one that is not a finite number, which would
+// turn the counter into NaN or +Inf for the life of the process.
 func (c *Counters) Add(metric, label string, delta float64) {
-	if c == nil {
+	if c == nil || delta < 0 || math.IsNaN(delta) || math.IsInf(delta, 0) {
 		return
 	}
 	spec, ok := counterSpecFor(metric)
@@ -187,9 +191,12 @@ func (c *Counters) Add(metric, label string, delta float64) {
 
 // Observe records one value, in seconds, against a declared histogram. An
 // undeclared metric is dropped. A value that is not a finite number is dropped
-// too: one NaN or infinity would poison the sum for the life of the process.
+// too: one NaN or infinity would poison the sum for the life of the process. So
+// is a negative value, because the sum is a counter and must not decrease; a
+// duration is never negative, and one that comes out so is a clock fault, which
+// would also put a run in the smallest bucket.
 func (c *Counters) Observe(metric string, value float64) {
-	if c == nil || math.IsNaN(value) || math.IsInf(value, 0) {
+	if c == nil || value < 0 || math.IsNaN(value) || math.IsInf(value, 0) {
 		return
 	}
 	spec, ok := histogramSpecFor(metric)
@@ -247,7 +254,17 @@ type Collector struct {
 	WorkerID string
 	// Clock is for deterministic tests; nil means time.Now.
 	Clock store.Clock
+	// WorkerWindow is how recently a worker must have been seen to be counted by
+	// twinwright_workers_registered and to have a last-seen series. Zero means
+	// DefaultWorkerWindow.
+	WorkerWindow time.Duration
 }
+
+// DefaultWorkerWindow is the window the metrics use for which workers to list:
+// ten minutes, many times the worker's idle heartbeat (a minute), so a healthy
+// worker, idle or busy, is always inside it, and a process that was killed is out
+// of the series ten minutes after its last sign of life.
+const DefaultWorkerWindow = 10 * time.Minute
 
 // Handler serves the Prometheus text exposition format.
 func (c Collector) Handler() http.Handler {
@@ -295,7 +312,7 @@ func (c Collector) Render(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("oldest runnable entry: %w", err)
 	}
 	writeHelp(&b, queueOldestRunnableAge, "gauge",
-		"Seconds the longest-waiting runnable entry has been available to claim; 0 when none is runnable. An entry still in backoff is not runnable yet.")
+		"Seconds the longest-waiting entry a worker could claim right now has been claimable: a runnable entry counts from when it became available, an entry whose lease expired from when the lease expired; 0 when none. An entry in backoff, and a run another worker's live lease holds, do not count.")
 	writeSample(&b, queueOldestRunnableAge, nil, oldest)
 
 	runs, err := countBy(ctx, c.Store, "SELECT status, count(*) FROM runs GROUP BY status")
@@ -314,7 +331,7 @@ func (c Collector) Render(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("event counts: %w", err)
 	}
 	writeHelp(&b, "twinwright_ledger_events", "gauge", "Ledger events by type.")
-	for _, typ := range sortedKeys(events) {
+	for _, typ := range keysWithZeros(events, namedLedgerEventTypes) {
 		writeSample(&b, "twinwright_ledger_events", map[string]string{"type": typ}, float64(events[typ]))
 	}
 
@@ -332,7 +349,7 @@ func (c Collector) Render(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("ownership counts: %w", err)
 	}
 	writeHelp(&b, "twinwright_ownership_events", "gauge", "Ownership transitions across the fleet.")
-	for _, kind := range sortedKeys(ownership) {
+	for _, kind := range keysWithZeros(ownership, store.OwnershipKinds()) {
 		writeSample(&b, "twinwright_ownership_events", map[string]string{"kind": kind}, float64(ownership[kind]))
 	}
 
@@ -340,20 +357,40 @@ func (c Collector) Render(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("workers: %w", err)
 	}
-	writeHelp(&b, "twinwright_workers_registered", "gauge", "Workers that have registered against this database.")
-	writeSample(&b, "twinwright_workers_registered", nil, float64(len(workers)))
-
-	// A worker's stamp moves when it registers, claims a run or renews a lease.
-	// It does not move on an idle poll, so an idle worker's age keeps growing.
-	sort.Slice(workers, func(i, j int) bool { return workers[i].ID < workers[j].ID })
-	writeHelp(&b, workerLastSeenAge, "gauge",
-		"Seconds since each registered worker last registered, claimed a run or renewed a lease.")
+	// Only workers seen within the window are listed. Every process with a default
+	// ID adds a row and a killed worker never removes its own, so without a window
+	// the series and the count grow by one per restart and an alert on last-seen
+	// age fires forever for each past process. The count and the series use the
+	// same set.
+	window := c.WorkerWindow
+	if window <= 0 {
+		window = DefaultWorkerWindow
+	}
+	type seenWorker struct {
+		id  string
+		age float64
+	}
+	var seen []seenWorker
 	for _, worker := range workers {
 		age, err := ageSeconds(worker.LastSeenAt, now)
 		if err != nil {
 			return "", fmt.Errorf("worker %q last seen: %w", worker.ID, err)
 		}
-		writeSample(&b, workerLastSeenAge, map[string]string{"worker": worker.ID}, age)
+		if age <= window.Seconds() {
+			seen = append(seen, seenWorker{id: worker.ID, age: age})
+		}
+	}
+	writeHelp(&b, "twinwright_workers_registered", "gauge",
+		fmt.Sprintf("Workers seen within the last %s: registered, claimed a run, renewed a lease or polled an empty queue. A worker that stopped cleanly removed itself.", window))
+	writeSample(&b, "twinwright_workers_registered", nil, float64(len(seen)))
+
+	// A worker's stamp moves when it registers, claims a run, renews a lease or
+	// polls an empty queue (at most once a minute).
+	sort.Slice(seen, func(i, j int) bool { return seen[i].id < seen[j].id })
+	writeHelp(&b, workerLastSeenAge, "gauge",
+		fmt.Sprintf("Seconds since each worker seen within the last %s last registered, claimed a run, renewed a lease or polled an empty queue.", window))
+	for _, worker := range seen {
+		writeSample(&b, workerLastSeenAge, map[string]string{"worker": worker.id}, worker.age)
 	}
 
 	writeHelp(&b, "twinwright_scrape_timestamp_seconds", "gauge", "When this document was produced.")
@@ -400,21 +437,22 @@ func writeHistogram(b *strings.Builder, spec histogramSpec, worker string, h his
 	writeSample(b, spec.name+"_count", map[string]string{"worker": worker}, float64(h.count))
 }
 
-// oldestRunnableAge is how long the longest-waiting runnable entry has been
-// available, 0 when none is. An entry whose available_at is still in the future
-// is in backoff and is not waiting for a worker yet, so it does not count.
+// oldestRunnableAge is how long the entry that has been claimable longest has
+// been claimable, 0 when no worker could claim anything. The store decides what
+// is claimable, with the predicate ClaimRun selects by, so the gauge answers for
+// the entries a worker could take right now: a runnable entry whose backoff has
+// passed, and an entry a crashed worker left behind once its lease expired. A
+// backed-off entry and a run another worker's live lease still holds are not
+// waiting for a worker, so they do not count.
 func oldestRunnableAge(ctx context.Context, s *store.Store, now time.Time) (float64, error) {
-	var availableAt string
-	err := s.DB.QueryRowContext(ctx,
-		"SELECT available_at FROM work_queue WHERE state=? AND available_at <= ? ORDER BY available_at LIMIT 1",
-		store.QueueRunnable, store.CoordinationTime(now)).Scan(&availableAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		return 0, nil
-	}
+	since, found, err := s.OldestClaimableSince(ctx, now)
 	if err != nil {
 		return 0, err
 	}
-	return ageSeconds(availableAt, now)
+	if !found {
+		return 0, nil
+	}
+	return ageSeconds(since, now)
 }
 
 // ageSeconds is how long before now a coordination timestamp was. A stamp ahead
@@ -496,7 +534,28 @@ func sortedKeys[V any](m map[string]V) []string {
 	return keys
 }
 
-// Serve runs the metrics endpoint until ctx is cancelled.
+// keysWithZeros is the sorted union of the keys counted and the keys declared, so
+// a declared value that has not happened yet is still rendered, at zero, and one
+// that was counted but not declared (a type another build wrote) is not dropped.
+func keysWithZeros(counts map[string]int, declared []string) []string {
+	seen := make(map[string]bool, len(counts)+len(declared))
+	for key := range counts {
+		seen[key] = true
+	}
+	for _, key := range declared {
+		seen[key] = true
+	}
+	return sortedKeys(seen)
+}
+
+// namedLedgerEventTypes are the ledger event types this package gives gauges of
+// their own. The set of types in the ledger is open, so only these are rendered at
+// zero in twinwright_ledger_events; any other type appears with its first event.
+var namedLedgerEventTypes = []string{"authorization.denied", "chaos.injected", "retry", "tool.response"}
+
+// Serve binds address and runs the endpoint on it until ctx is cancelled. A caller
+// that must know the bind worked before it starts anything else binds with
+// net.Listen and calls ServeListener.
 //
 // It binds exactly where the caller asks. Callers pass a loopback address by
 // default: these counters describe internal runtime state and there is no
@@ -504,6 +563,17 @@ func sortedKeys[V any](m map[string]V) []string {
 // hand queue and run topology to anyone who asked. The docstring says so
 // because the code cannot enforce an operator's choice of address.
 func Serve(ctx context.Context, address string, collector Collector) error {
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		return err
+	}
+	return ServeListener(ctx, listener, collector)
+}
+
+// ServeListener runs the endpoint on a listener the caller bound, until ctx is
+// cancelled, and closes the listener when it returns. See Serve for what the
+// address should be.
+func ServeListener(ctx context.Context, listener net.Listener, collector Collector) error {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", collector.Handler())
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -511,12 +581,11 @@ func Serve(ctx context.Context, address string, collector Collector) error {
 		_, _ = w.Write([]byte("ok\n"))
 	})
 	server := &http.Server{
-		Addr:              address,
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	done := make(chan error, 1)
-	go func() { done <- server.ListenAndServe() }()
+	go func() { done <- server.Serve(listener) }()
 	select {
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

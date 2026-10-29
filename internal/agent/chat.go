@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -25,6 +26,23 @@ type ChatCompletionsProvider struct {
 	// MaxOutputTokens is the output ceiling sent with each request. Zero sends
 	// none and leaves the server's own limit in force.
 	MaxOutputTokens int
+}
+
+// chatCompletionsURL is the endpoint for a base URL: the path /chat/completions
+// appended to the base's own path, with its query kept. Appending to the whole
+// string put the suffix inside the query, so a base such as
+// http://host/v1?api-version=1 was sent to /v1. The error is url.Parse's own.
+func chatCompletionsURL(base string) (string, error) {
+	u, err := url.Parse(base)
+	if err != nil {
+		return "", err
+	}
+	const suffix = "/chat/completions"
+	u.Path = strings.TrimRight(u.Path, "/") + suffix
+	if u.RawPath != "" {
+		u.RawPath = strings.TrimRight(u.RawPath, "/") + suffix
+	}
+	return u.String(), nil
 }
 
 func (p ChatCompletionsProvider) Next(ctx context.Context, task string, history []Message, ops []compiler.Operation) (Message, error) {
@@ -89,10 +107,13 @@ func (p ChatCompletionsProvider) Next(ctx context.Context, task string, history 
 	if err != nil {
 		return Message{}, err
 	}
-	endpoint := strings.TrimRight(p.BaseURL, "/") + "/chat/completions"
+	endpoint, err := chatCompletionsURL(p.BaseURL)
+	if err != nil {
+		return Message{}, safeRequestError(err, p.BaseURL, p.APIKey)
+	}
 	req, err := http.NewRequestWithContext(attemptCtx, http.MethodPost, endpoint, bytes.NewReader(data))
 	if err != nil {
-		return Message{}, err
+		return Message{}, safeRequestError(err, endpoint, p.APIKey)
 	}
 	if p.APIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+p.APIKey)
@@ -152,7 +173,7 @@ func (p ChatCompletionsProvider) Next(ctx context.Context, task string, history 
 	if err = json.Unmarshal(raw[0], &message); err != nil {
 		return Message{RawBody: redact.String(string(body), p.APIKey)}, err
 	}
-	out := Message{Role: "assistant", RawOutput: raw, ResponseID: wire.ID, ServerModel: wire.Model, FinishReason: wire.Choices[0].FinishReason, HTTPStatus: res.StatusCode}
+	out := Message{Role: "assistant", RawOutput: raw, ResponseID: redact.Secrets(wire.ID, p.APIKey), ServerModel: redact.Secrets(wire.Model, p.APIKey), FinishReason: redact.Secrets(wire.Choices[0].FinishReason, p.APIKey), HTTPStatus: res.StatusCode}
 	if message.Content != nil {
 		out.Content = *message.Content
 	}

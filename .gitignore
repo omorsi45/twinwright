@@ -16,7 +16,13 @@ live-model-report.json
 # machine's measurement; the figures worth keeping are quoted in
 # docs/performance.md with the environment block that came with them.
 perf.json
+# What `make gate` wrote into the repository root before it used a temporary
+# directory. A bench report is one run's output, and the baseline it is gated
+# against is committed under examples/bench/baselines/.
+bench-candidate.json
 # The private design workspace: briefs, working specs, implementation plans and a
 # progress snapshot. Its own README always said it was ignored while every file in
 # it was tracked. Public architectural decisions live in docs/adr/ instead.
 /design/
+# Scratch for local working notes: scripts, logs and built binaries from a working session.
+.superpowers/

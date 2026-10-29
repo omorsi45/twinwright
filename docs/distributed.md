@@ -17,8 +17,11 @@ lease.
 ## Topology
 
 `twinwright run --enqueue` queues a run. `twinwright worker` claims, executes
-and finishes runs. `twinwright queue` reports depth, fleet and ownership, and
-writes nothing.
+and finishes runs. `twinwright queue` reports depth, fleet and ownership. It
+opens the database read-only, so it writes nothing: it does not apply a pending
+migration, which matters while workers on an older build are still running, and
+it refuses a path that does not exist instead of creating a database there
+(`TestReadCommandsDoNotMigrateTheSource`, `TestReadCommandsRefuseAMissingDatabase`).
 
 ```mermaid
 flowchart LR
@@ -62,7 +65,10 @@ lineage and checkpoint reconstruction digest a run's event prefix, so if
 ownership transitions lived there an identical agent trajectory would digest
 differently depending on which worker executed it and how often the lease
 changed hands. Keeping the ledger a pure record of what the agent did is what
-lets a distributed run and a single-node replay produce byte-identical ledgers.
+lets a distributed run and a single-node replay produce the same agent events,
+tool results and world rows. Replay compares them by value: event types and
+payloads, saved results and world tables. The ledgers are not byte-identical,
+since every event's `recorded_at` differs and replay does not compare it.
 
 ## A worker dies mid-run
 
@@ -123,12 +129,14 @@ stateDiagram-v2
     note right of Expired
         Expiry alone disqualifies the old owner, because
         the instant a lease lapses another worker may take
-        the run. The presented fence must also be at least
-        committed_fence, the highest that has committed.
-        That condition involves no clock at all, so it is
-        still correct under skew between a worker and the
-        database, which is the case a TTL check alone gets
-        wrong.
+        the run. The row must also still name the presented
+        owner and fence. That match involves no clock, so
+        it is still correct under skew between a worker and
+        the database, which is the case a TTL check alone
+        gets wrong. committed_fence, the highest fence that
+        has committed, is a record on top of it: it refuses
+        a lower fence even if the row's owner and fence
+        were put back by a restore or a repair by hand.
     end note
 ```
 
@@ -136,9 +144,43 @@ Every acquisition increments the fence, including re-acquisition by the same
 owner. A worker that lost contact and reconnected must not keep using its old
 token, because the run may have been taken over and handed back in between.
 
+A run that has never been leased has no lease row to lock, so two workers that
+reached it together could both read "no lease" and both take fence 1. Acquisition
+therefore creates an unowned row first, in the same transaction, and re-reads it
+under the lock: the later worker waits for the earlier one and then finds a live
+lease (`TestConcurrentFirstAcquireYieldsOneHolderPostgres`, which needs a
+PostgreSQL server, since SQLite has one writer). The same lock orders every
+writer of a run's `run_ownership_log`, so its sequence numbers cannot collide
+(`TestConcurrentOwnershipAppendsNeverCollidePostgres`), and a release commits
+together with its log row (`TestReleaseAndItsOwnershipRowCommitTogether`).
+
 While a run executes the worker renews on a timer, and a rejected renewal
 cancels the execution context immediately. Continuing would spend model calls on
 work this worker is no longer permitted to commit.
+
+A renewal that fails for another reason, such as a dropped connection or a locked
+SQLite file, says nothing about who owns the run, so it is not treated as a
+rejection. The worker logs it at warn level and tries again at the next interval
+while its own clock says the lease is still valid. It abandons the run only when
+the lease was refused or that expiry has passed, and writes a `fence.rejected`
+row only for a real refusal, with the store's reason (`TestTransientRenewalErrorDoesNotAbandonTheRun`,
+`TestRenewalErrorsPastTheLocalExpiryAbandonTheRun`, `TestAbandonedRunRecordsTheRenewalCause`).
+
+The renewal interval defaults to a third of the lease TTL, and to no less than
+100 ms where the TTL leaves room for a retry. A one second lease therefore renews
+about every 333 ms (`TestOneSecondLeaseRenewsAtLeastTwiceDuringALongerRun`). An
+explicit interval at or above the TTL is an error, reported before anything is
+claimed (`TestRenewEveryAtOrAboveTheTTLIsRefused`).
+
+A worker that is stopped (Ctrl-C or `SIGTERM`) while a run executes is not a dead
+worker. It hands its claim back: the run is runnable at once, the lease is
+released, and the delivery that claim counted is given back, so restarting
+workers cannot use up a run's attempts (`TestWorkerStoppedMidRunReleasesAndReportsStopped`).
+`worker --drain` and `--max-runs` then exit normally and print their summary with
+`"stopped": true` (`TestWorkerStopDuringADrainIsACleanStop`). A worker that is
+killed instead of stopped leaves its lease to lapse and its delivery stays
+counted, which is the crash path below. No test delivers a real signal to the
+process; the CLI test ends the context the signal handler is derived from.
 
 ## Crash boundaries
 
@@ -169,13 +211,15 @@ What each test is:
   equal to the reference, the recovered ledger verifying under `replay.Verify`,
   the latest checkpoint at or before the crash and the final checkpoint
   reconstructing, model requests equal to responses, and the dead worker's fence
-  refused for a new call and for an already committed one.
+  refused for a new call, for an already committed one and for the runner's own
+  writes (a model turn and a status change).
 - `TestCrashMatrixPostgres` runs the first and last occurrence of each point on
   PostgreSQL when `TWINWRIGHT_TEST_POSTGRES_DSN` is set. It is skipped without a
   server. The `postgres` job of the Integration workflow sets the DSN and runs
   `go test -count=1 ./...` against PostgreSQL 16 and 17, so every PostgreSQL-gated test
-  runs there. That job passed on every Integration run of this branch on 2026-10-28,
-  so the PostgreSQL half of the table has been run against a server.
+  runs there. That job passed on every Integration run on 2026-10-28 and 2026-10-29,
+  the `pull_request` run of 2026-10-29 included, so the PostgreSQL half of the table has
+  been run against a server.
 - `TestRealProcessDeathIsRecovered` (unix only) re-executes the test binary as a
   worker that sends itself `SIGKILL` at the crash point, so the database has to
   cope with a client that vanished, possibly mid-transaction. It covers four
@@ -297,11 +341,12 @@ once for the fleet was left out, and ADR 0032 lists this among its limits.
 
 ```
 twinwright bench --suite-file examples/bench/flagship.yaml
-twinwright queue --dsn <dsn>
+twinwright queue --db <dsn>
 twinwright demo --dir <dir>     # step 8 crashes a worker and shows the takeover
 ```
 
 The crash tests advance a controlled clock past the lease TTL rather than
 sleeping it out, so the whole distributed section of the demo finishes in about
 half a second. Every recovered run is replayed and required to verify, which is
-what makes "byte-identical ledgers" a measurement instead of a claim.
+what makes "the same agent events, tool results and world rows" a measurement
+instead of a claim.

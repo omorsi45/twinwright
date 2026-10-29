@@ -7,9 +7,12 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	mrand "math/rand/v2"
 	"net/url"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -111,18 +114,36 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("schema version: %w", err)
 	}
-	if version > CurrentSchemaVersion {
-		return fmt.Errorf("database schema version %d is newer than this build supports (%d); upgrade Twinwright instead of downgrading the database", version, CurrentSchemaVersion)
+	if err = refuseNewerSchema(version); err != nil {
+		return err
 	}
 	if err := applyMigrations(ctx, s.DB, s.Dialect, migrations); err != nil {
 		return fmt.Errorf("schema migration: %w", err)
 	}
 	return nil
 }
+
+// refuseNewerSchema is the one wording of the refusal, shared by the migrating
+// open and by RequireSchema so a reader and a writer say the same thing.
+func refuseNewerSchema(version int) error {
+	if version > CurrentSchemaVersion {
+		return fmt.Errorf("database schema version %d is newer than this build supports (%d); upgrade Twinwright instead of downgrading the database", version, CurrentSchemaVersion)
+	}
+	return nil
+}
+
+// OpenReadOnly opens an existing SQLite database for reading only. It never
+// creates the file and never migrates it, so a mistyped path is an error that
+// names the path rather than an empty database that looks healthy.
 func OpenReadOnly(path string) (*Store, error) {
 	absolute, err := filepath.Abs(path)
 	if err != nil {
 		return nil, err
+	}
+	// SQLite reports a missing file opened with mode=ro as "unable to open
+	// database file: out of memory (14)", which names nothing and misleads.
+	if _, statErr := os.Stat(absolute); errors.Is(statErr, fs.ErrNotExist) {
+		return nil, fmt.Errorf("database %s does not exist (read-only commands never create one)", path)
 	}
 	uriPath := filepath.ToSlash(absolute)
 	if filepath.VolumeName(absolute) != "" {
@@ -136,7 +157,7 @@ func OpenReadOnly(path string) (*Store, error) {
 	db.SetMaxOpenConns(1)
 	if err = db.Ping(); err != nil {
 		db.Close()
-		return nil, err
+		return nil, fmt.Errorf("open database %s read-only: %w", path, err)
 	}
 	return &Store{DB: db, Dialect: DialectSQLite}, nil
 }

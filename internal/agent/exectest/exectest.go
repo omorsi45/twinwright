@@ -40,6 +40,14 @@ const ChildSuffix = ".child"
 // Secret is read by the modes that echo it, so a test can prove it is masked.
 const Secret = "TW_TEST_SECRET"
 
+// ReplyFile names a file whose bytes the reply mode writes to stdout as they
+// are. It is a file and not a variable because every passed variable's value is
+// masked, and a variable holding the whole reply would mask the reply.
+const ReplyFile = "TW_EXEC_REPLYFILE"
+
+// Pad is read by the exit3-padded mode: how many filler bytes follow the secret.
+const Pad = "TW_EXEC_PAD"
+
 const protocol = "twinwright.agent.v1"
 
 // MaybeRun runs the agent and exits when Mode is set, and returns otherwise.
@@ -64,15 +72,24 @@ var fixed = map[string]string{
 	// that does not care about its input looks like to the provider.
 	"ignore-stdin": `{"protocol":"` + protocol + `","content":"done","tool_calls":[]}`,
 	"with-usage":   `{"protocol":"` + protocol + `","content":"counted","tool_calls":[],"usage":{"input_tokens":3,"output_tokens":4,"total_tokens":7}}`,
+	// usage is optional, but when it is there the schema wants an object with all
+	// three counts, so these three are malformed.
+	"usage-empty":   `{"protocol":"` + protocol + `","content":"hi","tool_calls":[],"usage":{}}`,
+	"usage-partial": `{"protocol":"` + protocol + `","content":"hi","tool_calls":[],"usage":{"input_tokens":5}}`,
+	"usage-null":    `{"protocol":"` + protocol + `","content":"hi","tool_calls":[],"usage":null}`,
 }
 
 // Run speaks as an agent in the named mode and returns the process exit code.
 //
 // Modes: billing solves the duplicate-charge scenario from the history it is
-// sent; unauthorized asks for a refund whatever it was offered; echo-request
+// sent; unauthorized asks for a refund whatever it was offered; reply writes the
+// bytes of ReplyFile; call-with-secret proposes a call with Secret as its
+// argument; echo-request
 // answers with the request it received as its content;
 // environ answers with the sorted names of its environment; leak answers with
-// the value of Secret; exit3 fails with a message on stderr; stderr-flood fails
+// the value of Secret; exit3 fails with a message on stderr; exit3-spellings
+// fails after writing Secret to stderr in several spellings; exit3-padded fails
+// after writing Secret and then Pad filler bytes; stderr-flood fails
 // after writing far more than the provider keeps; flood writes stdout until it
 // is stopped; hang and hang-ignore-term never answer; spawn-hang hangs with a
 // child that ignores SIGTERM; every key of fixed is a malformed or odd
@@ -122,6 +139,40 @@ func Run(mode string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 		stdout.Write(out)
 		return 0
+	case "reply":
+		// Whatever bytes the test put in ReplyFile, so a test can hand the
+		// provider any document, valid or not, in any encoding.
+		reply, err := os.ReadFile(os.Getenv(ReplyFile))
+		if err != nil {
+			fmt.Fprintln(stderr, "read reply:", err)
+			return 2
+		}
+		stdout.Write(reply)
+		return 0
+	case "call-with-secret":
+		// Proposes a call whose argument is the secret, then reports once it has
+		// the result: an agent that uses a value it was given as an argument.
+		raw, err := io.ReadAll(stdin)
+		if err != nil {
+			return 2
+		}
+		var req request
+		if err := json.Unmarshal(raw, &req); err != nil {
+			return 2
+		}
+		for _, m := range req.History {
+			if m.Role == "tool" {
+				return say(stdout, "done")
+			}
+		}
+		out, err := json.Marshal(response{Protocol: protocol, ToolCalls: []toolCall{{
+			ID: "exec-1", OperationID: "getCustomer", Arguments: map[string]any{"id": os.Getenv(Secret)},
+		}}})
+		if err != nil {
+			return 2
+		}
+		stdout.Write(out)
+		return 0
 	case "echo-request":
 		raw, err := io.ReadAll(stdin)
 		if err != nil {
@@ -142,6 +193,25 @@ func Run(mode string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return say(stdout, "the secret is "+os.Getenv(Secret))
 	case "exit3":
 		fmt.Fprintf(stderr, "agent exploded: %s\n", os.Getenv(Secret))
+		return 3
+	case "exit3-spellings":
+		// The secret as an agent's own logging may spell it: as it is, Go-quoted,
+		// and as a JSON string.
+		quoted := strconv.Quote(os.Getenv(Secret))
+		encoded, _ := json.Marshal(os.Getenv(Secret))
+		fmt.Fprintf(stderr, "raw: %s\n", os.Getenv(Secret))
+		fmt.Fprintf(stderr, "go: %s\n", quoted)
+		fmt.Fprintf(stderr, "json: %s\n", encoded)
+		fmt.Fprintf(stderr, "go inner: %s\n", quoted[1:len(quoted)-1])
+		fmt.Fprintf(stderr, "json inner: %s\n", encoded[1:len(encoded)-1])
+		return 3
+	case "exit3-padded":
+		// The secret, a newline, Pad filler bytes and a newline, so that the end
+		// of stderr is a known distance from the secret.
+		pad, _ := strconv.Atoi(os.Getenv(Pad))
+		io.WriteString(stderr, os.Getenv(Secret)+"\n")
+		io.WriteString(stderr, strings.Repeat("x", pad))
+		io.WriteString(stderr, "\n")
 		return 3
 	case "stderr-flood":
 		line := strings.Repeat("e", 1023) + "\n"

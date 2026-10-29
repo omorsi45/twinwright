@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"twinwright/internal/compiler"
+	"twinwright/internal/redact"
 )
 
 // Live provider tests.
@@ -110,9 +111,59 @@ func liveToolCallProblem(m Message, key string) string {
 		return "the turn does not marshal: " + err.Error()
 	}
 	if key != "" && strings.Contains(string(encoded), key) {
-		return "the configured key appears in the turn"
+		return "the configured key appears in the turn (in " + strings.Join(liveKeyFields(m, key), ", ") + ")"
 	}
 	return ""
+}
+
+// liveKeyFields names the fields of a turn that hold key, and only names them:
+// the value is what must not be printed. The names let a failure say where the
+// key leaked, which is all the person reading it needs.
+func liveKeyFields(m Message, key string) []string {
+	var fields []string
+	check := func(name string, value any) {
+		text, ok := value.(string)
+		if !ok {
+			encoded, err := json.Marshal(value)
+			if err != nil {
+				return
+			}
+			text = string(encoded)
+		}
+		if strings.Contains(text, key) {
+			fields = append(fields, name)
+		}
+	}
+	check("content", m.Content)
+	check("response_id", m.ResponseID)
+	check("server_model", m.ServerModel)
+	check("finish_reason", m.FinishReason)
+	check("raw_output", m.RawOutput)
+	check("raw_body", m.RawBody)
+	for i, call := range m.ToolCalls {
+		check("tool_calls["+strconv.Itoa(i)+"]", call)
+	}
+	if len(fields) == 0 {
+		// The key is in the marshalled turn but in none of the fields above, so
+		// say that and not nothing.
+		fields = append(fields, "a field not listed here")
+	}
+	return fields
+}
+
+// liveFailure is the line a failed live check prints: the problem and the turn's
+// identifying metadata, each masked with key, and never the turn itself. The
+// check that most needs this is the one that found the key in the turn, and
+// printing the turn with %+v at that point wrote the key into test output, which
+// is routinely pasted into issues.
+func liveFailure(provider, problem string, m Message, key string) string {
+	mask := func(s string) string { return redact.Secrets(s, key) }
+	return provider + " turn: " + problem + " (" +
+		"response_id=" + mask(m.ResponseID) +
+		" server_model=" + mask(m.ServerModel) +
+		" finish_reason=" + mask(m.FinishReason) +
+		" http_status=" + strconv.Itoa(m.HTTPStatus) +
+		" tool_calls=" + strconv.Itoa(len(m.ToolCalls)) + ")"
 }
 
 func TestLiveOpenAIToolCall(t *testing.T) {
@@ -126,7 +177,7 @@ func TestLiveOpenAIToolCall(t *testing.T) {
 	}
 	t.Logf("response_id=%s server_model=%s finish_reason=%s tool_calls=%d", m.ResponseID, m.ServerModel, m.FinishReason, len(m.ToolCalls))
 	if problem := liveToolCallProblem(m, key); problem != "" {
-		t.Fatalf("OpenAI turn: %s: %+v", problem, m)
+		t.Fatal(liveFailure("OpenAI", problem, m, key))
 	}
 }
 
@@ -141,7 +192,7 @@ func TestLiveAnthropicToolCall(t *testing.T) {
 	}
 	t.Logf("response_id=%s server_model=%s finish_reason=%s tool_calls=%d", m.ResponseID, m.ServerModel, m.FinishReason, len(m.ToolCalls))
 	if problem := liveToolCallProblem(m, key); problem != "" {
-		t.Fatalf("Anthropic turn: %s: %+v", problem, m)
+		t.Fatal(liveFailure("Anthropic", problem, m, key))
 	}
 }
 
@@ -202,6 +253,53 @@ func TestLiveToolCallProblemJudgesTurnsFromTheAdapters(t *testing.T) {
 				t.Fatalf("the problem text carries the key: %q", got)
 			}
 		})
+	}
+}
+
+// A live test cannot run without a key, so what it prints on failure is checked
+// here with a key of this package's own. The check that finds the key in a turn
+// is the one whose failure used to print the turn, key included, with %+v. The
+// line it prints now names the field the key was in and carries nothing else of
+// the turn.
+func TestLiveFailureLineNeverCarriesTheKey(t *testing.T) {
+	const key = "test-key-not-a-secret"
+	leaky := Message{
+		Role: "assistant", HTTPStatus: 200,
+		Content:      "the key is " + key,
+		ResponseID:   "resp-" + key,
+		ServerModel:  "model-" + key,
+		FinishReason: "stop-" + key,
+		RawOutput:    []json.RawMessage{json.RawMessage(`{"text":"` + key + `"}`)},
+		RawBody:      "body " + key,
+		ToolCalls:    []ToolCall{{ID: "c", OperationID: "getCustomer", Arguments: map[string]any{"id": key}}},
+	}
+	problem := liveToolCallProblem(leaky, key)
+	if !strings.Contains(problem, "key appears") {
+		t.Fatalf("problem = %q, want the key-leak problem", problem)
+	}
+	for _, field := range []string{"content", "response_id", "server_model", "finish_reason", "raw_output", "raw_body", "tool_calls[0]"} {
+		if !strings.Contains(problem, field) {
+			t.Errorf("the problem does not say the key is in %s: %q", field, problem)
+		}
+	}
+	line := liveFailure("OpenAI", problem, leaky, key)
+	if strings.Contains(line, key) {
+		t.Fatalf("the failure line carries the key: %s", line)
+	}
+	for _, kept := range []string{"OpenAI turn:", "key appears", "http_status=200", "tool_calls=1", "[REDACTED]"} {
+		if !strings.Contains(line, kept) {
+			t.Errorf("the failure line lost %q: %s", kept, line)
+		}
+	}
+	// Nothing of the turn's text is printed, only the problem and the metadata.
+	if strings.Contains(line, "the key is") || strings.Contains(line, "getCustomer") {
+		t.Errorf("the failure line prints the turn: %s", line)
+	}
+
+	// A failure that is not a leak still names its problem and the metadata.
+	clean := Message{Role: "assistant", ResponseID: "resp_1", ServerModel: "m-1", FinishReason: "completed", HTTPStatus: 200}
+	if line = liveFailure("Anthropic", liveToolCallProblem(clean, key), clean, key); !strings.Contains(line, "no tool call") || !strings.Contains(line, "response_id=resp_1") {
+		t.Errorf("failure line = %s", line)
 	}
 }
 

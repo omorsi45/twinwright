@@ -29,7 +29,10 @@ func versionCommand(out io.Writer) error {
 		"platform":       runtime.GOOS + "/" + runtime.GOARCH,
 		"schema_version": store.CurrentSchemaVersion,
 		"delivery":       "at_least_once",
-		"git_modified":   info.Modified,
+		// Always present, as it has been since the field was added. Where the
+		// build recorded no tree state it is false, which with no git_revision
+		// below means "nothing recorded"; the bench and perf reports omit it instead.
+		"git_modified": info.Modified != nil && *info.Modified,
 	}
 	// Omitted rather than empty when the build recorded no VCS settings, so a
 	// reader never mistakes a missing revision for a real one.
@@ -62,8 +65,13 @@ func doctorCommand(ctx context.Context, args []string, out io.Writer) error {
 
 	healthy := true
 	if *dbPath != "" {
+		// doctor only reads: it opens the database read-only, so the version it
+		// reports is the one the database had before anything ran, and a
+		// database that needs migrating is described, not migrated. Applying the
+		// upgrade while reporting on it would defeat the check an operator runs
+		// before upgrading.
 		check := map[string]any{"check": "storage backend", "ok": false, "detail": *dbPath}
-		s, err := store.OpenDSN(ctx, *dbPath)
+		s, err := store.OpenReadOnlyDSN(ctx, *dbPath)
 		if err != nil {
 			check["detail"] = err.Error()
 			healthy = false
@@ -73,12 +81,15 @@ func doctorCommand(ctx context.Context, args []string, out io.Writer) error {
 			if versionErr != nil {
 				check["detail"] = versionErr.Error()
 				healthy = false
+			} else if newerErr := s.RequireSchema(ctx, 0, "doctor"); newerErr != nil {
+				check["detail"] = newerErr.Error()
+				healthy = false
 			} else {
 				check["ok"] = true
 				check["detail"] = fmt.Sprintf("%s, schema version %d", s.Dialect, applied)
 				if applied < store.CurrentSchemaVersion {
-					check["detail"] = fmt.Sprintf("%s, schema version %d (this build writes %d; opening it for writing will migrate it)",
-						s.Dialect, applied, store.CurrentSchemaVersion)
+					check["detail"] = fmt.Sprintf("%s, schema version %d (this build writes %d: migration to %d is pending and doctor does not apply it)",
+						s.Dialect, applied, store.CurrentSchemaVersion, store.CurrentSchemaVersion)
 				}
 			}
 			depth, depthErr := s.QueueDepth(ctx)

@@ -105,7 +105,7 @@ func (p AnthropicProvider) Next(ctx context.Context, task string, history []Mess
 	}
 	req, err := http.NewRequestWithContext(attemptCtx, http.MethodPost, endpoint, bytes.NewReader(data))
 	if err != nil {
-		return Message{}, err
+		return Message{}, safeRequestError(err, endpoint, p.APIKey)
 	}
 	req.Header.Set("x-api-key", p.APIKey)
 	req.Header.Set("anthropic-version", "2023-06-01")
@@ -122,7 +122,7 @@ func (p AnthropicProvider) Next(ctx context.Context, task string, history []Mess
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		text := redact.String(string(body), p.APIKey)
 		failure := fmt.Errorf("Anthropic HTTP %d: %s", res.StatusCode, text)
-		if interrupt := statusInterruption(res, failure); interrupt != nil {
+		if interrupt := statusInterruption(res, failure, anthropicOverloaded); interrupt != nil {
 			return Message{RawBody: text}, interrupt
 		}
 		return Message{RawBody: text}, failure
@@ -148,7 +148,7 @@ func (p AnthropicProvider) Next(ctx context.Context, task string, history []Mess
 		return Message{RawBody: redact.String(string(body), p.APIKey)}, truncatedCompletion(wire.StopReason)
 	}
 	wire.Content = redactOutput(wire.Content, p.APIKey)
-	out := Message{Role: "assistant", RawOutput: wire.Content, ResponseID: wire.ID, ServerModel: wire.Model, FinishReason: wire.StopReason, HTTPStatus: res.StatusCode}
+	out := Message{Role: "assistant", RawOutput: wire.Content, ResponseID: redact.Secrets(wire.ID, p.APIKey), ServerModel: redact.Secrets(wire.Model, p.APIKey), FinishReason: redact.Secrets(wire.StopReason, p.APIKey), HTTPStatus: res.StatusCode}
 	var texts []string
 	for _, raw := range wire.Content {
 		var block struct {

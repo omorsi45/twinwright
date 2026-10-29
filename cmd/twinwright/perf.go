@@ -23,8 +23,9 @@ import (
 //
 // Input mistakes are exit 2, as in gate, so a script can tell "fix the command
 // line" from "the measurement found a problem" (exit 1). The report is written
-// before the exit code is decided, so a run that found a duplicated mutation or
-// a crash matrix violation leaves the evidence behind.
+// before the exit code is decided, so a run that found a duplicated mutation, a
+// replay that did not verify or a crash matrix violation leaves the evidence
+// behind.
 func perfCommand(ctx context.Context, args []string, out io.Writer) error {
 	defaults := perf.DefaultConfig()
 	fs := flag.NewFlagSet("perf", flag.ContinueOnError)
@@ -77,6 +78,9 @@ func perfCommand(ctx context.Context, args []string, out io.Writer) error {
 	if cfg, err = cfg.Resolve(); err != nil {
 		return badInput(err)
 	}
+	if err = checkReportPath(*outPath); err != nil {
+		return badInput(err)
+	}
 	cfg.Build = buildinfo.Read(Version)
 
 	// Ctrl-C cancels the measurement and lets Run remove its temporary files.
@@ -87,6 +91,32 @@ func perfCommand(ctx context.Context, args []string, out io.Writer) error {
 		return fmt.Errorf("perf: %w", err)
 	}
 	return finishPerf(report, *outPath, out)
+}
+
+// checkReportPath proves the report can be written before the measurement
+// starts, because the report is written after it and a full run takes over a
+// minute: a mistyped directory would otherwise cost the whole run. It opens the
+// path the way the final write will and closes it again. A file it had to create
+// is removed, so a run that is cancelled or fails leaves no empty report, and an
+// existing report is neither truncated nor changed here: the old one stays until
+// a new one replaces it.
+func checkReportPath(path string) error {
+	info, err := os.Stat(path)
+	existed := err == nil
+	if existed && info.IsDir() {
+		return fmt.Errorf("--out %s is a directory; name a file", path)
+	}
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0o644)
+	if err != nil {
+		return fmt.Errorf("--out %s cannot be written: %w", path, err)
+	}
+	if err = file.Close(); err != nil {
+		return fmt.Errorf("--out %s cannot be written: %w", path, err)
+	}
+	if !existed {
+		_ = os.Remove(path)
+	}
+	return nil
 }
 
 // finishPerf writes the report, prints the summary, and only then turns a

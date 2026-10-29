@@ -58,12 +58,17 @@ regenerated.
 - A response body is read up to 4 MiB plus one byte. A body at the limit is
   accepted and a longer one is `ErrResponseTooLarge`, which is an ordinary error
   and not an interruption, so it is not retried.
-- The configured key is masked with `redact.Secrets` in every output item before
-  the item is interpreted, so the content, the tool arguments and the raw items
-  kept for replay all derive from the masked text. Error bodies keep the pattern
-  masks, since their text is not trusted. A transport error goes through
-  `redact.URL` and its cause text is masked, so a base URL with userinfo or a key
-  in its query is not printed.
+- The configured key is masked in every output item before the item is
+  interpreted, as written and as a JSON string escapes it (`\u0026` for `&`, `\/`
+  for `/`), so the content, the tool arguments and the raw items kept for replay
+  all derive from the masked text. The response's `id`, `model` and stop reason
+  are masked the same way. Error bodies keep the pattern masks, since their text
+  is not trusted. A transport error goes through `redact.URL` and its cause text
+  is masked, so a base URL with userinfo or a key in its query or path is not
+  printed. So does the error from building the request. For a URL that does not
+  parse, `url.Parse`'s own text is dropped, because it quotes the part it choked
+  on, and `redact.URL` keeps only the scheme and host of a string it cannot parse,
+  and nothing when the string holds an `@`.
 
 ### Retries cover rate limits, server errors and dropped connections
 
@@ -75,15 +80,19 @@ once:
 | `timeout` | the attempt's own deadline passed | none |
 | `truncated` | the provider said the completion was cut short | none |
 | `rate_limited` | HTTP 429 | `Retry-After`, or 1 s |
-| `server_error` | HTTP 500, 502, 503 or 504 | `Retry-After`, or 1 s |
+| `server_error` | HTTP 500, 502, 503 or 504, and 529 from the Anthropic adapter | `Retry-After`, or 1 s |
 | `transport` | the request failed while neither the caller nor the attempt deadline had given up | 1 s |
 
 `Retry-After` is whole seconds or an HTTP date, capped at `MaxRetryAfter` (30 s).
 A missing, zero, negative, fractional, unparseable or past value counts as not
 sent. The wait goes through `Runner.Sleep`, which returns the context's error if
 the run is cancelled during it, and then no second attempt is made. Every other
-status, 501, 505 and 529 included, stays an ordinary error. A body that fails
-part way through is also an ordinary error; only a failure of the request itself
+status, 501 and 505 included, stays an ordinary error. 529 is the exception for the
+Anthropic adapter only: Anthropic documents it as `overloaded_error`, a temporary
+condition, so that adapter retries it like a 503 (`TestAnthropicOverloadedIsRetriedOnce`),
+while the other two adapters keep it an ordinary error. A body that fails
+part way through is also an ordinary error, on the first attempt and with no second
+call (`TestBodyFailurePartWayIsNotRetried`); only a failure of the request itself
 is a `transport` interruption.
 
 Both attempts are recorded on the turn, as ADR 0027 describes. The
@@ -117,17 +126,19 @@ exchange:
 | Field | Meaning |
 | --- | --- |
 | `seq` | 1-based, counting failed round trips |
-| `method`, `url` | the request line; the URL has lost its userinfo and query |
+| `method`, `url` | the request line; the URL has lost its userinfo, its query and fragment, and the configured key where it was in the path |
 | `request_sha256` | SHA-256 of the request body bytes as sent, before masking |
 | `request` | the request body with the configured secrets masked; the body itself when it is JSON, a JSON string holding it otherwise |
 | `status` | the response status, or 0 when the round trip failed |
 | `retry_after` | the `Retry-After` header text, when sent |
 | `content_type` | the `Content-Type` header, when sent |
+| `location` | the redirect target of a 3xx response, without userinfo, query or fragment, when sent |
 | `error` | set when the round trip did not complete; with `status` 0 there was no response at all |
 | `response` | the response body with the configured secrets masked |
 
-The exchange count of a file is its line count minus one. The file is created with
-mode 0600 and each exchange is written with one `Write` as it happens. A write that
+The exchange count of a file is its line count minus one. The file has mode 0600,
+whether it is new or replaces an existing file, and each exchange is written with
+one `Write` as it happens. A write that
 fails fails that round trip and every later one, because a cassette missing an
 exchange would replay as a divergence nobody can explain. The recorder reads at
 most one byte past the adapters' 4 MiB limit, so a hostile server cannot fill the
@@ -136,8 +147,11 @@ disk and the adapters' too-large refusal reproduces.
 **Replay.** The adapter is rebuilt from the run record (provider and model), the
 cassette header (the ceiling) and the first exchange (the address; for
 `openai-compatible` the trailing `/chat/completions` is removed to give the base
-URL). The key is a fixed placeholder, so replay needs neither `--base-url` nor an
-API key. The cassette is the adapter's only transport. It has no base transport
+URL). The adapter appends `/chat/completions` to the base URL's path and keeps the
+base URL's query on the request, so `http://host/v1?api-version=1` is sent to
+`/v1/chat/completions` with that query, and the query is not in the cassette. The
+key is a fixed placeholder, so replay needs neither `--base-url` nor an API key.
+The cassette is the adapter's only transport. It has no base transport
 and never dials; `TestCassetteNeverDials` replaces the default transport with a
 tripwire to show it.
 
@@ -145,8 +159,9 @@ An incoming request is matched to the next exchange by method, then URL path, th
 `request_sha256`, and the first field that differs is named in the error with the
 `seq`: `cassette divergence: seq 2: request_sha256 differs`. The host and the query
 are not compared, so a cassette recorded against one address replays against
-another. The cursor does not move on a divergence. Only `Content-Type` and
-`Retry-After` are served back. A recorded failure replays as an error and never as
+another. The cursor does not move on a divergence. Only `Content-Type`,
+`Retry-After` and, for a 3xx, `Location` are served back, so a recorded redirect is
+followed on replay. A recorded failure replays as an error and never as
 a response. Retry waits are skipped, so a recorded 429 replays at once. A reader
 refuses a version it does not know, a header without a provider or model, a `seq`
 out of order, and a `status` that is neither a response nor a recorded failure.
@@ -181,7 +196,15 @@ exchange count and wall time, plus the run ID and status, the model's digest fro
 Ollama's `/api/tags` (empty when the endpoint is unavailable), the machine, the Go
 version, the git revision, the start time and the per-step times. No key or header
 value is written, and the script fails if the value of `OPENAI_API_KEY` appears in
-any file it wrote.
+the report, the cassette, the database or its write-ahead log, or the output of a
+step. A key shorter than 8 characters is not searched for, because the masks
+ignore one on purpose (`redact.Secrets`) and a placeholder such as Ollama's
+`ollama` is in every response as `fp_ollama`; the script says so when it skips. The
+CLI binary and the manifest are not searched. All of this is held by
+`TestLiveModelScriptNeverPrintsTheBaseURL`,
+`TestLiveModelScriptSkipsTheKeyCheckForAKeyTheMasksIgnore` and
+`TestLiveModelScriptChecksTheDatabaseForTheKey`, which run the script against a
+local server and skip without bash, jq, curl and go.
 
 It exits non-zero when recording fails, when the run does not reach `completed`,
 when ledger replay is not verified, or when cassette replay is not verified. The
@@ -210,7 +233,10 @@ here.
 `TW_LIVE_ANTHROPIC_MODEL`) each make one real call offering `getCustomer`. They
 require a model turn with a response ID, an HTTP status of 200 and a
 `getCustomer` call with a call ID and an `id` argument, and no copy of the key in
-the turn. Each skips with a message naming whatever is not set. Nothing runs them
+the turn. A failure prints the problem and the turn's metadata with the key
+masked, and for a leaked key it names the fields that held it; it never prints
+the turn (`TestLiveFailureLineNeverCarriesTheKey`). Each skips with a message
+naming whatever is not set. Nothing runs them
 in CI, which keeps hosted-provider keys out of every workflow. A hermetic test
 checks the same assertions against turns built by the real adapters and by hand,
 so the assertions are not themselves unexercised.
@@ -245,8 +271,13 @@ here.
 
 ## Consequences and limits
 
-- A recorded per-attempt timeout replays from a cassette as a `transport`
-  interruption, and the replay reports a divergence. Deadlines are not simulated.
+- A per-attempt timeout that passed before the response headers arrived is recorded
+  as a failed round trip and replays from a cassette as a `transport`
+  interruption, and the replay reports a divergence. A deadline that passes while
+  the body is being read is recorded as a 200 with an error, and replays as an
+  ordinary error, which fails the run without a retry
+  (`TestRecordedBodyFailureReplaysAsAnOrdinaryError`); the replay reports a
+  divergence there too. Deadlines are not simulated.
 - A `Retry-After` given as an HTTP date is clock relative, so a replay at another
   time can compute a different wait. It is not verified to replay identically.
 - A response body that is not valid UTF-8 is stored as a JSON string.
@@ -262,8 +293,10 @@ here.
   more before it fails.
 - A close error on the cassette file is ignored when `run` ends; every write was
   checked when it happened. A full disk was not exercised.
-- The success-path mask knows only the configured key. A credential a model makes
-  up, or a configured secret under 8 characters, is not recognised.
+- The success-path mask knows only the configured key, as written and in the
+  spellings above. A credential a model makes up, a configured secret under 8
+  characters, and a key escaped some other way (such as `\u002f` for `/`) are not
+  recognised.
 - A cassette and the script's run output hold a model's prompts and answers, even
   masked. They are written 0600 or into a temporary directory, and
   `live-model-report.json` and `*.cassette.jsonl` are ignored by git so they are
@@ -271,3 +304,11 @@ here.
 - ADR 0027 said no live provider call had been verified. That stands for the
   hosted vendors. The chat completions adapter is exercised against a real local
   server by the script and the CI job.
+
+## Corrections
+
+- 2026-10-28: the success path, the error path and the cassette URL did not mask what this ADR said they masked. The error from building a request (a base URL that does not parse) was returned as it was and quoted the URL, userinfo and query included; `redact.URL` kept the userinfo of an unparseable string; the response's id, model and stop reason, and a key in the URL path, were not masked; and a key the server escaped in its JSON was not recognised. Each is fixed as the Decision section above now reads. A base URL with a query now keeps it, where the suffix used to be appended inside the query.
+- 2026-10-28: a cassette served only `Content-Type` and `Retry-After`, so a run whose endpoint redirected could be recorded and never replayed, and the file's 0600 mode applied only when it was created, so a recording over an existing 0644 file stayed readable by everyone. A 3xx exchange now records and serves its `Location` (without userinfo, query or fragment), and the recorder sets the mode to 0600 whether the file is new or not.
+- 2026-10-28: the retry classification and the consequences did not say what the code does. Anthropic documents 529 as `overloaded_error`, a temporary condition, yet it failed the run on the first attempt with no stated reason; the Anthropic adapter now retries it once like a 503 and the other two adapters do not. The consequence about timeouts held only for a deadline that passes before the response headers: one that passes while the body is read is recorded as a 200 with an error and replays as an ordinary error, and the mid-body case now has a test at the adapter.
+- 2026-10-28: the live provider tests kept the key out of the problem text but printed the whole turn with `%+v` when they failed, so the check that finds the key in a turn wrote the key to the test output. A failure now prints the problem, the names of the fields that held the key and the turn's metadata with the key masked, and never the turn.
+- 2026-10-28: `scripts/live-model.sh` named the server by host and port everywhere except one note, which printed the base URL with its userinfo and query whenever the server had no `/api/tags`. Its key check also searched only some of the files it wrote, and failed every clean run for a key under 8 characters such as Ollama's placeholder `ollama`. The note names the host and port, the check now includes the database and its write-ahead log and skips a short key with a message, and the sentence above says which files are searched.

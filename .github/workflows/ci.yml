@@ -133,8 +133,10 @@ jobs:
         run: go build -o twinwright ./cmd/twinwright
       # Scripted fixtures never call a provider, so a failure here is a change in
       # this repository and not a different answer from a model. The default
-      # trajectory mode is warn: a reordered tool call shows in the job summary
-      # without blocking the merge.
+      # trajectory mode is warn: the gate does not fail on a reordered tool call,
+      # which shows in the job summary. The go test jobs do:
+      # TestRegressedBenchFailsTheGate holds the committed baseline to zero
+      # warnings, so regenerate the baseline with the change that moved the calls.
       - name: bench the standard suite and gate it against the approved baseline
         run: |
           ./twinwright bench --suite standard --agent scripted --examples examples --out candidate.json > /dev/null
@@ -145,7 +147,10 @@ jobs:
       # A gate that has only ever passed has not been shown to catch anything.
       # This fixture claims success instead of making the first write, so the gate
       # must exit exactly 1. Exit 0 means it missed the regression, and exit 2
-      # means it could not decide; both fail the job.
+      # means it could not decide; both fail the job. Exit 1 alone is not enough:
+      # two other cases error under this fixture and regress on their own, so the
+      # step also requires the regression the fixture is built to cause, a refund
+      # case that failed without writing.
       - name: the gate blocks a deliberately regressed agent
         run: |
           ./twinwright bench --suite standard --agent scripted --model fixture-regressed-v1 --examples examples --out regressed.json > /dev/null
@@ -159,6 +164,16 @@ jobs:
             cat gate-regressed.json
             exit 1
           fi
+          jq -e '.regressions[] | select(.case == "billing-duplicate-charge" and .kind == "newly_failing" and (.detail | contains("candidate failed")))' gate-regressed.json > /dev/null || {
+            echo "expected a newly_failing regression for billing-duplicate-charge because the candidate failed it"
+            echo "gate output:"
+            cat gate-regressed.json
+            exit 1
+          }
+          jq -e '.cases[] | select(.id == "billing-duplicate-charge" and .status == "failed" and .mutations == 0)' regressed.json > /dev/null || {
+            echo "expected the candidate's billing-duplicate-charge to be failed with no mutations"
+            exit 1
+          }
 
   security:
     name: secret and vulnerability scan

@@ -24,6 +24,18 @@ const (
 // is refused rather than silently downgraded.
 const CurrentSchemaVersion = 3
 
+// Schema versions that introduced the tables a read-only command depends on. A
+// command that reads such a table checks for its version with RequireSchema
+// instead of opening the database for writing, which would migrate it.
+const (
+	// SchemaVersionLedger is the base schema: worlds, runs, the ledger and the
+	// tables replay, inspection and tracing read.
+	SchemaVersionLedger = 1
+	// SchemaVersionQueue added the lease, work queue, worker and ownership
+	// tables that the queue view reads.
+	SchemaVersionQueue = 2
+)
+
 // intType keeps integer widths honest per backend. SQLite's INTEGER is a
 // 64-bit signed value; PostgreSQL's INTEGER is 32-bit, which would overflow
 // world seeds and cent amounts, so PostgreSQL gets BIGINT.
@@ -248,7 +260,8 @@ func distributedSchema(d Dialect) []string {
 		// cannot be regenerated. Keeping ownership in its own append-only
 		// audit table leaves the ledger a pure record of what the agent did,
 		// so a distributed run and a single-node replay of the same
-		// trajectory produce byte-identical ledgers.
+		// trajectory produce the same agent events, tool results and world
+		// rows. Replay compares them by value, not byte for byte.
 		`CREATE TABLE IF NOT EXISTS run_ownership_log (
   run_id TEXT NOT NULL,
   seq %INT% NOT NULL,
@@ -356,6 +369,29 @@ func firstLine(stmt string) string {
 		return stmt[:80]
 	}
 	return stmt
+}
+
+// RequireSchema is the check a read-only command makes instead of migrating. It
+// returns nil when the database is at least version min and not newer than this
+// build supports, and otherwise an error that says why and what to run.
+//
+// A database that is too old is not upgraded here. A migration applied by a
+// command that only reads would change a database under workers that still run
+// an older build (ADR 0029, "Upgrade caveat"), so the operator is told to run a
+// command that migrates, deliberately, once those workers have stopped. feature
+// names what the caller reads, for the message.
+func (s *Store) RequireSchema(ctx context.Context, min int, feature string) error {
+	version, err := s.SchemaVersion(ctx)
+	if err != nil {
+		return fmt.Errorf("schema version: %w", err)
+	}
+	if err = refuseNewerSchema(version); err != nil {
+		return err
+	}
+	if version < min {
+		return fmt.Errorf("database schema version %d is older than %s needs (version %d); this command only reads, so run a command that migrates it (run, resume, enqueue or worker) after stopping workers that run an older build", version, feature, min)
+	}
+	return nil
 }
 
 // SchemaVersion reports the highest applied migration. A database written

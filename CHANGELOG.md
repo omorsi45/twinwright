@@ -11,6 +11,596 @@ database written by a newer build is refused rather than downgraded.
 
 ## Unreleased
 
+### Fixed
+
+- **The claims table can no longer put an opt-in test in the local suite, link to a heading that
+  does not exist, or cite a test that only a stray checkout has.** `TestClaimsTableReferencesExist`
+  now reads the Go source of every cited test and requires a row whose test skips unless a
+  `TWINWRIGHT_TEST_` variable is set to name that variable or Integration;
+  `TestDocLinksResolve` checks `page.md#heading` against the headings of the target by GitHub's
+  rules, same-page anchors included; test functions under `.worktrees` and `.tools` no longer
+  count. Each check has a test that feeds it the mistake it exists to catch
+  (`TestClaimsChecksCatchTheReviewedMutations`, `TestDocLinkAnchorsAreChecked`,
+  `TestHeadingAnchorsFollowGitHubsRules`, `TestGateReaderFindsTheVariableATestNeeds`,
+  `TestGateReaderOnASyntheticModule`, `TestCollectTestsIgnoresWorktreesAndTools`). The reader
+  works on names, not types, so a test that reaches its skip through a method call, a callback or
+  a branch is not seen.
+- **Claims rows say what their tests assert, and README claims that had no row have one.** The
+  rows for a worker's metrics endpoint, the exec agent's process, the README's links, the opt-in
+  tests of the hosted providers and the 120 crash cases claimed more than their tests assert and
+  now say less or cite a count (`TestCrashMatrixCasesAreTheOnesTheDocumentsCount`,
+  `TestReadmeLinksTheDocumentationSet`). `MaxAttempts` (default 3), `--provider-timeout` and an
+  OTLP rejection each have a row (`TestDocumentedDeliveryBoundMatchesTheCode`), and the rows the
+  fixes above made stale cite the current tests.
+- **The README, the guide, `SECURITY.md` and three ADRs agree with the code after the review
+  fixes.** The README said `make demo-stack` had no recorded CI result; every statement about a
+  CI job now says what Integration showed: `real-model`, `observability` and `demo-stack` passed
+  on their first runs on 2026-10-28 and on every run since, `docker` and `postgres` on every run
+  from 2026-10-28, and `perf` on every manual dispatch (`docs/live-model-run.md` says so for
+  `real-model`). The `pull_request` runs of both workflows on 2026-10-29 passed every job except
+  `perf`, which runs on manual dispatch only. That includes `demo-stack` with the script as the
+  review fixes left it (the port checks, `TW_DEMO_PG_PORT`, the saved failure files and the
+  cleanup). The performance limitation says three machines, not two. Each guide
+  page's opening paragraph lists its corrections. The path of one tool call gains the two
+  branches it left out (a call that fails validation records no authorization event, and the
+  legacy `--fault` option). `SECURITY.md` no longer says the container of a timed-out agent
+  keeps running. ADRs 0019 and 0029 no longer say replay compares a ledger event's timestamp (it
+  compares an event's type and decoded payload and the world tables' `created_at`), and ADR 0021
+  no longer says there are no histograms and that the Compose collector is not in CI. The
+  retries are listed by status, with the Anthropic 529, where the README said "a 5xx".
+- **Two tracked plan files no longer open with an instruction block that names a development
+  tool, one verification command no longer contains an em dash, and `.superpowers/` is in
+  `.gitignore`.** The documents call that directory git-ignored, which was true only through a
+  local exclude file.
+- **`make demo-stack` no longer trusts whatever answers on the workers' metrics ports, follows the
+  PostgreSQL port Compose published, shows its failure files in CI, and cleans up after a success.**
+  Checks 3 and 4 read Prometheus, which scrapes ports 9095 and 9096 on the host, so a worker left
+  over from an earlier run (or any process) holding a port could satisfy them. The script now
+  refuses to start when either port answers and requires each endpoint to serve its own worker's
+  `twinwright_worker_claims_total` series (`TestDemoStackRefusesAnOccupiedMetricsPortBeforeStartingAnything`).
+  `docker-compose.yml` told readers to change the host port while the script connected to 5432; both
+  now read `TW_DEMO_PG_PORT`, default 5432 (`TestDemoStackPostgresPortComesFromOneVariable`). The
+  files its failure messages point to (`bench.err`, `bench.out`, `enqueue.err` as well as the worker
+  logs) are copied to `TW_DEMO_LOGS`, and the CI job prints and uploads all of them
+  (`TestDemoStackSavesAndShowsEveryFileItsFailuresPointTo`); the changed job passed on the
+  `pull_request` run of the Integration workflow on 2026-10-29, which did not run the steps that
+  print and upload those files, because they run only when the job fails. `make demo` and
+  `make demo-stack` each
+  removed nothing; both now remove their temporary directory when they succeed and keep it, printing
+  its path, when they fail (`TestDemoStackRemovesItsWorkDirectoryOnlyOnSuccess`,
+  `TestMakeDemoRemovesItsDirectoryOnlyOnSuccess`).
+- **`scripts/e2e.sh` fails when the run it expects to pass fails its evaluation.** It grepped the
+  output of the duplicate-charge run and of the safe ambiguous-commit run for `"passed":true`, but
+  `run` exits 0 on a failing evaluation and prints a `passed` for every check, so one passing check
+  satisfied the grep (the regressed fixture's duplicate-charge run passes it with three of four
+  checks failing). Both runs now use `--fail-on-eval` and the greps are gone
+  (`TestE2EScriptFailsWhenAnExpectedlyPassingRunFailsItsEvaluation`).
+- **Demo steps 4, 8 and 11 print only what they read, and step 11's check can fail.** Step 11 looked
+  for the word "injection" in the run's output, which is in the scenario's name, so it passed on
+  every run (with the security analysis removed it still passed). It now requires the run's
+  `security` analysis to show the injected instruction attempted and refused and none carried out,
+  prints the counts it read, and fails when the over-privileged control's output is not a readable
+  run with a violation that succeeded (`TestDemoSecurityStepFailsWithoutAnInjectionFinding`,
+  `TestDemoSecurityControlFailsWhenItCannotBeRead`). Step 8 printed "fence 1 -> 2" whatever the
+  fences were and now prints the pairs the takeovers showed (`TestDemoCrashStepPrintsTheFencesItRead`);
+  step 4 accepted an OTLP document with no span and now fails on it
+  (`TestDemoTraceStepFailsWithoutSpans`). A truncated failure message ended in mojibake and now ends
+  in `...` (`TestDemoExcerptTruncatesWithAnASCIIEllipsis`). The demo is still twelve steps.
+- **ADR 0034 and `docs/performance.md` describe the throughput and recovery workloads as they run.**
+  They said the throughput workers poll every 10 ms; they stop at their first empty claim and never
+  wait, so the setting is gone from the workload and the text. They said the recovery lease pin
+  makes the lease expire "exactly one TTL later, whatever time the run took"; the pin is a renewal
+  and the store refuses to renew an expired lease, so it holds when the run reaches its crash
+  point within one TTL and otherwise the trial fails. Documentation and an unused setting only; no
+  figure in a committed report changes.
+- **The benchmark document test holds the throughput table to its report row for row.**
+  `TestBenchmarkDocsMatchTheirReports` compared the rows a table had, so a dropped row, a committed
+  report that no table quotes and a stale `Runs per trial` all passed. It now requires each table
+  to quote exactly the worker counts of its report, once each, with the report's runs per trial, and
+  every committed report to be quoted; `TestBenchmarkDocsCheckNoticesWhatItWasWrittenToCatch` edits
+  the real document each of those ways and requires a failure. ADR 0034 says the same.
+- **`twinwright perf` refuses an `--out` it cannot write before it measures, and a Ctrl-C during a
+  recovery wait is reported as a cancellation.** The report is written after the whole measurement,
+  so a mistyped directory cost over a minute and the figures; the command now opens the path first
+  and exits 2, leaving no file behind and an existing report untouched
+  (`TestPerfCLIRejectsAnOutPathItCannotWriteBeforeMeasuring`,
+  `TestPerfCLICheckingTheOutPathLeavesNoFileAndKeepsAnExistingReport`). An interrupted wait said
+  "the run was not recovered within 35s"; it now says it was cancelled and unwraps to
+  `context.Canceled` (`TestAwaitRecoveryReportsACancellationAsOne`).
+- **`twinwright perf` fails when a replay does not verify.** A replay that verified fewer runs than
+  it executed was recorded in the report and the command still exited 0, so the dispatch-only
+  `perf` CI job stayed green on it. It now writes the report and exits 1, like a duplicated
+  mutation or a crash matrix violation (`TestProblems`,
+  `TestPerfFinishWritesTheReportBeforeFailingOnAProblem`).
+- **`make perf` writes a report that names its commit, and a build with no VCS stamp no longer
+  claims a clean tree.** The target ran `go run`, whose binary carries neither a git revision nor a
+  version, so its report had neither and still said `git_modified: false`. `make perf` now builds
+  `./twinwright` first (`TestMakePerfBuildsAStampedBinary`). `git_modified` is omitted, not false,
+  from the `environment` block of a bench or perf report whose build recorded no tree state
+  (`TestInfoOmitsGitModifiedWhenTheTreeStateIsUnknown`,
+  `TestReportFromABuildWithoutVCSSettingsDoesNotAssertACleanTree`); a stamped build still records
+  true or false (`TestReportFromAStampedBuildRecordsTheTreeState`), and the committed reports read
+  as before. `twinwright version` still prints `git_modified` as a boolean.
+- **ADR 0032 no longer claims more than the gated tests read, and names both Prometheus targets.**
+  Its Consequences section said a change to the OTLP encoding, the span attributes or the exposition
+  document is checked against real software on every integration run; the tests read the span
+  count, the root's name, one tag key and two series. It also named one Prometheus target where
+  `deploy/prometheus.yml` has two. `TestPrometheusScrapesAWorker` took the first runnable queue
+  sample from any target, so a worker on the demo's second port could satisfy or break its
+  assertion; both queries now name the test's instance (`host.docker.internal:9095`) and the check
+  requires the label on the answer (`TestWaitForScrapeReadsOnlyTheTestsOwnInstance`,
+  `TestWaitForScrapeRefusesWhatIsNotTheServedStore`). Run once locally against the Compose stack
+  with the CI step, both gated tests passed, and the `observability` job passed with the changed
+  tests on the `pull_request` run of the Integration workflow on 2026-10-29.
+- **The ownership and ledger-event gauges render the first event as a step, not a new series.**
+  `twinwright_ownership_events{kind}` and `twinwright_ledger_events{type}` rendered only the values
+  that already had rows, so the first fencing rejection or takeover appeared at 1 with no earlier
+  sample for `increase()`, which ADR 0021's "every series is emitted even when its value is zero"
+  was meant to rule out. Every kind of the ownership log (`store.OwnershipKinds`, kept equal to the
+  constants by a test) now renders at zero, and so do the four ledger event types the endpoint names
+  (`TestOwnershipEventsRenderEveryKindAtZero`, `TestOwnershipKindsListsEveryOwnershipConstant`). Other
+  ledger event types, an open set, still appear with their first event.
+- **Worker rows are removed when a worker stops, and the metrics list only recent workers.** Nothing
+  ever removed a `workers` row, so `twinwright_worker_last_seen_age_seconds` gained a series and
+  `twinwright_workers_registered` a count for every process that ever started, and an alert on
+  last-seen age fired forever for a worker that had stopped. A worker that stops cleanly now removes
+  its own row (`Worker.Close`, called by `Serve` and by the worker command), unless it still owns a
+  live lease; both gauges list only workers seen within the last ten minutes, and say so in their
+  HELP text. A worker waiting for work refreshes its row once a minute so a healthy idle worker
+  stays in the window. The row of a killed worker stays in the table (and in `twinwright queue`) and
+  leaves the metrics ten minutes after its last sign of life (`TestLastSeenAgeOmitsPrunedWorkers`,
+  `TestRemoveWorker`, `TestCloseRemovesTheWorkersRow`, `TestServeRemovesItsRowOnACleanStop`,
+  `TestAnIdleWorkerStaysSeen`).
+- **A worker whose `--metrics-addr` cannot be bound now exits instead of running without
+  metrics.** The endpoint started in a goroutine and a bind failure was one stderr line while the
+  worker claimed on, so with another process on the port Prometheus scraped that process and the
+  worker's counters were never seen. The address is bound before the worker registers or claims
+  anything, and the command returns an error naming `--metrics-addr` and the address
+  (`TestWorkerFailsWhenTheMetricsAddressIsTaken`; `metrics.ServeListener` serves on a bound
+  listener). `TestWorkerMetricsEndpointServesTheCompleteSet` no longer finds a free port, closes
+  it and lets the command bind it later: it hands the command a listener it holds.
+- **A collector that does not answer no longer stalls a worker after every run.** The worker
+  exported a finished run's trace inside the claim, so a blackholed collector held it for the
+  10 second export bound per completed run and the run-duration metrics did not show it. The export
+  now runs in a goroutine of its own, one at a time per worker: a run that finishes while one is in
+  flight is not exported and is logged at warn with its trace ID, and `Serve`, `--drain` and
+  `--max-runs` wait at most 10 seconds for the one running when they stop. `Outcome.TraceExported`
+  (`trace_exported`, never released) could no longer say a trace arrived and is replaced by
+  `TraceExportQueued` (`trace_export_queued`); the result is in the log (`trace exported` at info,
+  `trace export failed` at warn). ADR 0032 and the guide say so (`TestExportDoesNotDelayTheNextClaim`,
+  `TestStopDoesNotCancelTheExportInFlight`, `TestServeWaitsForTheExportInFlightBeforeItReturns`,
+  `TestCloseGivesUpOnAnExportThatIgnoresItsContext`).
+- **An OTLP partial success is no longer reported as a full delivery.** A collector that answers
+  200 with `partialSuccess.rejectedSpans` above zero has refused some of the spans, but the
+  exporter looked only at the status code and reported `delivered: true`. The exporter now reads
+  the body of a 2xx answer, returns the delivery with `delivered: false` and a new
+  `rejected_spans` count, and fails with the count and the collector's reason. `trace
+  --otlp-endpoint` exits non-zero, and a worker logs the failure at warn like any other
+  (`TestExporterReportsAPartialSuccess`, `TestTraceCommandFailsOnAPartialSuccess`,
+  `TestWorkerWarnsOnAPartialSuccess`). A rejected count of zero with a message is still a
+  delivery.
+- **Claims are counted as they ended.** A run settled without being executed (past
+  `--max-attempts`) was timed as 0 s; a claim whose read of the run failed was counted in
+  `twinwright_worker_claims_total` and in no disposition series; and a closing write refused by
+  the fence was counted as `finished` with no fencing rejection. The settlement is now timed, a
+  refused closing write is `fenced` (counted and noted in the ownership log), and a claim whose
+  closing write fails for another reason is returned as an error and not observed, so claims
+  equal the sum of the dispositions (`TestOverDeliveredClaimIsTimed`,
+  `TestOverDeliveredClaimWithAnUnreadableRunIsNotObserved`,
+  `TestClaimRefusedByTheFenceAtTheEndIsFenced`,
+  `TestClaimWhoseClosingWriteFailsIsNotObservedAsFinished`). `ClaimAndRun` no longer returns an
+  error when the fence refuses the write that ends a claim; it returns the `fenced` outcome.
+- **Run durations are measured on a monotonic clock, and a counter can no longer go down.** A
+  claim's duration was the difference of two readings of the lease clock, which drops the
+  monotonic reading, so a backward clock step during a claim made it negative: the run-seconds
+  counter and the histogram's `_sum` decreased, which Prometheus reads as a counter reset. The
+  worker now times a claim with `time.Since` on a reading taken in the process, `Counters.Add`
+  drops a negative or non-finite delta and `Observe` drops a negative value
+  (`TestClaimDurationIgnoresABackwardClockStep`, `TestCountersRefuseNegativeDeltas`,
+  `TestRunDurationIgnoresNegativeObservations`).
+- **The `observability` CI job fails when either gated test is skipped or does not run.** `go test`
+  exits 0 when a test skips and when the `-run` pattern matches nothing, so a renamed test or
+  environment variable left the job green with nothing checked. The step now requires a
+  `--- PASS:` line for `TestSpansAreQueryableInJaeger` and `TestPrometheusScrapesAWorker` in the
+  `-v` output. Run locally against the extracted step it exits 1 with the variable unset (both
+  tests skip) and with a pattern that matches no test, and with canned output it exits 0 only
+  when both print a pass. The job passed on a runner in the first Integration run with the step,
+  and again on the `pull_request` run on 2026-10-29, where the step found the `--- PASS:` line of
+  both tests.
+- **`twinwright_queue_oldest_runnable_age_seconds` now answers for what a worker can claim.** The
+  gauge counted every `runnable` row with a past `available_at`, so it read 0 while a crashed
+  worker's run sat claimable behind an expired lease (the recovery path) and reported minutes of
+  waiting for a run that an operator had re-enqueued while another worker's live lease still held
+  it. It now uses the same predicate `ClaimRun` selects by (shared as one constant in the store),
+  dates an expired lease from its expiry, and its HELP text says so
+  (`TestOldestRunnableAgeCountsAnExpiredLease`, `TestOldestRunnableAgeIgnoresARunHeldByALiveLease`,
+  `TestOldestClaimableSince`; the last also runs on PostgreSQL when a DSN is configured).
+- **The "the gate fails" checks now require the missing-write regression, not any regression.**
+  Two cases error under `fixture-regressed-v1` and regress by themselves, so the CI step (exit
+  code 1 only) would have passed with the failed-status path broken, and the test and demo step
+  12 accepted any regression on `billing-duplicate-charge`, an errored one included. All three
+  now require that case as `newly_failing` with a detail saying the candidate failed, and the
+  candidate's case at `failed` with no mutations; the CI step does it with `jq`
+  (`TestRegressedBenchFailsTheGate`,
+  `TestMissingWriteRegressionNeedsTheFailedCaseNotAnyRegression`). The `regression-gate` job,
+  with the new `jq` check, passed on the `pull_request` run of the CI workflow on 2026-10-29.
+- **ADR 0030, the bench guide and the CI comment no longer say a trajectory change cannot block a
+  merge.** The gate does only warn on one (`--trajectory warn` exits 0), but
+  `TestRegressedBenchFailsTheGate` fails on any warning for the healthy fixture and runs in the
+  `go test` jobs, so a reordered tool call, a new case or an edited fixture fails CI in this
+  repository until the baseline is regenerated. The text and the test's failure message now say
+  so. No behaviour changed.
+- **`make gate` no longer leaves `bench-candidate.json` in the repository root.** The candidate
+  report is written to a temporary directory that is removed when the recipe ends, with the
+  gate's exit status unchanged (a regressed candidate still exits 1), and `bench-candidate.json`
+  is in `.gitignore` for checkouts that still have one.
+- **`twinwright bench` refuses a positional argument instead of dropping every flag after it.**
+  Go's flag parser stops at the first argument that is not a flag, so
+  `bench standard --agent openai --trials 10 --out c.json` ran the scripted agent, one trial,
+  wrote no report and exited 0. It now exits 1 with an error naming the argument, as `gate`
+  already did (`TestBenchRefusesPositionalArguments`).
+- **The gate's Markdown summary no longer lets a suite name change its layout.** The suite name
+  was printed raw inside a code span, so a backtick in it ended the span and a line break
+  started a line of its own, which could put a second `## Twinwright gate: PASSED` heading into
+  a CI job summary right after a failed verdict. The name is now rendered with a backtick fence
+  longer than any run inside it and line breaks become spaces
+  (`TestMarkdownEscapesTheSuiteName`).
+- **The gate refuses a case it cannot judge instead of passing it.** A candidate case whose
+  status was anything but `passed`, `failed` or `error` (`skipped`, `PASSED`, `timeout`, empty)
+  made a passed baseline case "regress" to it silently and the gate exited 0; a case with an
+  empty ID failed the gate while the JUnit file carried no testcase for it and said
+  `failures="0"`; more passes than trials was accepted. `gate` now exits 2 for each, naming the
+  report and the case; a report from before trial counts stays valid
+  (`TestGateRefusesAnUnjudgeableCase`, `TestGateExitCodes`).
+- **A baseline in which every case errored is refused, and a bench run that measured nothing
+  exits non-zero.** `bench` with a missing provider key errored all 21 cases, exited 0 and wrote
+  a report that looked like any other; the gate then marked every case `baseline_unmeasured`
+  and exited 0, so the deliberately regressed candidate passed against it. `gate` now exits 2
+  for a baseline with no case that reached a verdict, as it does for an empty one, and
+  `bench` exits 1 naming the first case's error when every case errored, after printing and
+  writing the report so each error can be read (`TestGateRefusesABaselineWithNoMeasuredCase`,
+  `TestGateExitCodes`, `TestBenchExitsNonZeroWhenEveryCaseErrored`).
+- **The gate no longer skips a repeated bench case because a trial errored.** It returned early
+  on `status: error`, so against a baseline of 9 passes in 10 a candidate that errored on every
+  trial, or kept one pass, produced no finding at all; one provider timeout among a baseline's
+  ten trials made the case `baseline_unmeasured` permanently; and against a baseline of 10 in
+  10 one errored trial was `newly_failing` at every tolerance while one failed trial was
+  tolerated. A case is now rated on the passes it recorded, an errored trial counting as not
+  passed. A candidate that reached no verdict on any trial against a baseline that passed some
+  is the new regression `candidate_unmeasured`; an errored trial in a case that kept passes, or
+  an errored case whose baseline had no pass, is the new warning `candidate_errored`; a
+  candidate with some completed trials is compared on mutations and violations, so an errored
+  trial elsewhere cannot hide a leak. A baseline case is `baseline_unmeasured` only when it
+  errored and passed nothing. Negative controls and single-trial cases behave as before
+  (`TestGateRatesAnErroredRepeatedCandidate`, `TestGateRatesARepeatedBaselineWithAnErroredTrial`,
+  `TestGateToleratesOneErroredTrialLikeOneFailedTrial`,
+  `TestGateComparesSafetyCountersOfACandidateWithAnErroredTrial`).
+- **A leak in a later trial of a repeated bench case is no longer hidden by the pass-rate
+  tolerance.** The fold of a case's trials kept trial 1's state-mutation and successful-violation counts, so with a
+  tolerance that absorbs one lost trial (the way a live-model report is gated) a cross-customer
+  leak in trial 3 of 10 was a pass-rate drop of 0.1, allowed, and neither `new_violation` nor
+  `extra_mutations` could fire, while the same leak in trial 1 failed the gate. Both counts are
+  now the largest over the trials. A leak in trial 1, 3 or 10 of 10 is a regression at
+  tolerance 0 and 0.1, and every ordering of four unlike trials folds to the same counts
+  (`TestGateFlagsAViolationInALaterTrialAtTolerance`,
+  `TestGateFlagsExtraMutationsOfALaterTrialThatStillPassed`,
+  `TestFoldTrialsSafetyCountersCoverEveryTrial`,
+  `TestFoldTrialsSafetyCountersAreIndependentOfTrialOrder`). The trajectory, run ID and wall
+  time stay the first trial's; a single-trial case reports what it did before.
+- **Three claims about delivery and fencing now say what their tests show.** The duplicate
+  delivery test redelivers a finished run, which returns before any call is dispatched, so it
+  could not fail for the call-ID cache; a worker-level test now has a new owner present a
+  committed call ID and requires the saved result and no new effect, and fails when the cache
+  is disabled (`TestCommittedCallIsAnsweredFromTheCacheUnderTheNewOwner`). The
+  `committed_fence` comparison was documented as the clock-free guard, but the owner and token
+  match in the lease row is that guard and the comparison is a high-water mark; the docs and ADR
+  0020 say so, and a test now fails when the comparison is removed, by putting the row's owner
+  and fence back after a newer token committed
+  (`TestGuardFenceRefusesATokenBelowTheCommittedMarkWhenTheFenceWasRewound`). "Byte-identical
+  ledgers" became "the same agent events, tool results and world rows": replay compares them by
+  value and every event's `recorded_at` differs. No behaviour changed.
+- **Stopping a worker with Ctrl-C or SIGTERM during `--drain` or `--max-runs` is a clean stop
+  and no longer spends an attempt.** The cut-short run was requeued with the cancelled
+  context, the requeue failed, and the command exited with `requeue run: context canceled` (at
+  the last attempt, `mark run failed`) and no summary; the lease stayed held until its TTL and
+  the delivery stayed counted, so rolling restarts could fail a long run at the delivery limit.
+  The claim is now handed back under a context the stop does not reach, runnable at once with
+  its delivery given back, and the command exits 0 with its summary and `"stopped": true`.
+  A worker that is killed still leaves its delivery counted. Delivering a real signal is not
+  tested; the test ends the context the handler is derived from
+  (`TestWorkerStoppedMidRunReleasesAndReportsStopped`,
+  `TestWorkerStopDuringADrainIsACleanStop`).
+- **On PostgreSQL, two workers could both take a never-leased run at fence 1, and ownership
+  writes could collide.** A run with no lease row has nothing to lock, so concurrent first
+  acquisitions both read "no lease" and the later one overwrote the earlier one's live lease
+  without `ErrLeaseHeld`: in the new test eight workers all won. Acquisition now creates an
+  unowned row first and re-reads it under the lock, so exactly one wins
+  (`TestConcurrentFirstAcquireYieldsOneHolderPostgres`). The ownership log picked
+  `MAX(seq)+1` with no lock, so a stale worker recording a fence rejection collided with a
+  legitimate owner's write on the primary key and one of them failed (78 failures in the new
+  test); appends now take the run's lease row first
+  (`TestConcurrentOwnershipAppendsNeverCollidePostgres`). A release and its log row now commit
+  in one transaction, so a failed log write no longer reports "lease not released" for a lease
+  that was released (`TestReleaseAndItsOwnershipRowCommitTogether`).
+- **A lease renewal that fails no longer abandons a healthy run, and a one second lease no
+  longer fences its own worker.** Any renewal error was treated as a lost lease, so a
+  database blip cancelled the run, reported the claim as fenced and wrote a false
+  `fence.rejected` row whose reason was `context canceled`. Only a refusal by the store
+  does that now. Other errors are logged and retried at the next interval while the lease is
+  valid by the worker's own clock, the run is abandoned once it is not, and a fence rejection
+  is recorded only for a real refusal, with the store's reason
+  (`TestTransientRenewalErrorDoesNotAbandonTheRun`,
+  `TestRenewalErrorsPastTheLocalExpiryAbandonTheRun`,
+  `TestAbandonedRunRecordsTheRenewalCause`). The renewal interval was floored at one second,
+  so with the store's minimum lease of one second the first renewal ran at expiry and was
+  refused, and every run longer than the lease failed. It is now a third of the TTL with a
+  100 ms floor that cannot reach the TTL, and an explicit interval at or above the TTL is an
+  error (`TestOneSecondLeaseRenewsAtLeastTwiceDuringALongerRun`,
+  `TestRenewalCadenceLeavesMarginAtTheMinimumTTL`, `TestRenewEveryAtOrAboveTheTTLIsRefused`).
+- **The runner's own writes now have a test that a superseded fence is refused.** The
+  model request, the model turn (which overwrites the transcript and step), a provider
+  failure and the completed, paused and failed statuses are fenced in code, but only the
+  dispatcher's writes had a stale-worker test: removing the fence from all seven runner
+  calls passed every suite. A stalled runner whose lease was taken over is now shown unable
+  to rewrite the finished run (`TestStaleRunnerCannotCommitAModelTurnAfterTakeover`), each
+  of the seven writes is reached on its own (`TestStaleRunnerWritesNothingAfterTakeover`),
+  and the crash matrix has the dead worker attempt a model turn and a status change in
+  every case. No behaviour changed.
+- **`inspect`, `queue` and `doctor` no longer migrate the database or create one.** They
+  opened the source for writing, so a version 2 database came out at version 3 (the
+  migration ADR 0029 says must wait until older workers stop), and a mistyped `--db` left
+  a new migrated file behind; `queue` on that path exited 0 with an empty queue and
+  `doctor` reported the version it had just written. All three now open the database
+  read-only, as `trace`, `replay` and `evaluate` already did. A missing path is an error that
+  names it, `doctor` reports the version the database had and says when a migration is
+  pending, and a database too old for the command is refused with a request to run a
+  command that migrates it. The file comes out byte for byte unchanged
+  (`TestReadCommandsDoNotMigrateTheSource`, `TestReadCommandsRefuseAMissingDatabase`,
+  `TestDoctorReportsTheAppliedSchemaVersionWithoutMigrating`,
+  `TestReadCommandsAskForAMigrationWhenTheSchemaIsTooOld`, `TestRequireSchema`). The
+  documented `twinwright queue --dsn` is `--db`.
+- **`trace --otlp-endpoint` no longer prints the endpoint's credentials.** The delivery
+  report named the endpoint as given and the error for a refusal or a failed post quoted
+  it, so a password in the userinfo or a token in the query went to stdout and stderr,
+  though the worker had always scrubbed the same thing from its log. The exporter now
+  names the address alone in `Delivery.Endpoint` and in every error, and masks header
+  values and the endpoint's own credentials if a collector echoes them back
+  (`TestTraceCommandExportDoesNotPrintEndpointCredentials`,
+  `TestExporterNeverReturnsTheEndpointCredentials`). An endpoint with a query string was
+  posted to the wrong path, with the traces path appended inside the query, and now keeps
+  its query and gets the path added to its path (`TestExporterKeepsTheQueryOfTheEndpoint`).
+- **Collector headers can come from `OTEL_EXPORTER_OTLP_HEADERS`.** `trace` and `worker`
+  read the standard variable (comma-separated `name=value` pairs, values percent-decoded)
+  when `--otlp-header` is not given, so a long-running worker's credential need not sit in
+  its command line; the flag still works and wins. A malformed variable is refused before the
+  database is opened, without repeating a value (`TestResolveOTLPHeaders`,
+  `TestWorkerReadsTheOTLPHeaderFromTheEnvironment`).
+- **A PostgreSQL password holding an unencoded `/`, `#` or `?` is no longer printed by `perf`
+  or by any command that takes `--db`.** `url.Parse` rejects such a DSN and quotes a piece of
+  the password in its error (the `/` case, the complete password). `perf`'s scrubber searched
+  for the whole DSN and never found it, so `perf --db` printed it; the store's own open passed
+  the same text on, so `run`, `worker`, `queue`, `trace` and the rest printed it too, or, for a
+  DSN that parsed into the wrong pieces, the rest of it inside pgx's connect error. An error
+  about a PostgreSQL DSN that does not parse cleanly now has its text replaced by a fixed
+  message in `perf`, and both of the store's DSN opens refuse such a DSN before anything uses
+  it, with a message that says to percent-encode the password and quotes no part of the DSN;
+  every command opens its database through one of them, and the CLI test runs `enqueue`,
+  `queue` and `doctor`. The two tests that cited `perf`'s guarantee used a DSN whose error
+  never held the password, so they passed without the scrubber; they now use malformed DSNs
+  and fail without it (`TestRunNeverPrintsAMalformedDSN`, `TestPerfCLINeverPrintsTheDSN`,
+  `TestOpeningAMalformedDSNNeverPrintsIt`, `TestStorageCommandsNeverPrintAMalformedDSN`).
+- **A base URL that does not parse no longer puts its credentials into errors, the ledger
+  or a trace.** The three HTTP adapters redacted only the error from sending a request.
+  The error from building one quoted the whole URL, so an unencoded `%` in a password, a
+  trailing newline or a bad port printed the userinfo and query on stderr, stored them in
+  the run's `error` event and copied them into the model span. Both errors now go through
+  one redaction that drops `url.Parse`'s own text, and `run` refuses an invalid `--base-url`
+  before it creates a run (`TestMalformedBaseURLNeverLeaks`, `TestBuildNeverCarriesAMalformedBaseURL`,
+  `TestMalformedBaseURLNeverLeaksFromTheCLI`). `redact.URL` now fails closed on a string it
+  cannot parse: it trims whitespace, drops the fragment and keeps only the scheme and host
+  when the string holds no `@`, and `[unparseable URL]` otherwise, where it used to keep the
+  userinfo of a string with a leading space or a `/`, `#` or `?` in the password
+  (`TestURLFailsClosedOnAnUnparseableURL`).
+- **An OpenAI-compatible base URL with a query keeps it.** `/chat/completions` was appended
+  after the query, so `http://host/v1?api-version=1` was sent to `/v1`
+  (`TestChatBaseURLQueryIsKept`).
+- **The configured key is masked in more places.** The success-path mask now also covers a
+  key the server escaped in its JSON (`\u0026`, `\/`), the response's `id`, `model` and stop
+  reason, and a key in the URL path of an error or a cassette (`TestSuccessfulOutputIsRedactedWhenEscaped`,
+  `TestEchoedTopLevelFieldsAreMasked`, `TestKeyInTheURLPathIsMasked`).
+- **A cassette replays a redirect, and is always mode 0600.** A 3xx exchange now records its
+  `Location` (without userinfo, query or fragment) and the replay serves it, where it used to
+  serve a redirect the client could not follow and fail with `HTTP 308` on a run that had
+  succeeded live (`TestCassetteReplaysARedirectedExchange`). `--record-cassette` over an
+  existing 0644 file left it 0644; the mode is now set whether the file is new or not
+  (`TestRecordingTransportReplacesWithMode0600`).
+- **An Anthropic 529 is retried once.** Anthropic documents 529 as `overloaded_error`, a
+  temporary overload, yet the Anthropic adapter failed the run on it at the first attempt,
+  while the same overload reported as a 503 was retried. It is now a `server_error`
+  interruption for that adapter only, and the comment that stated why other 5xx codes are
+  excluded says so (`TestAnthropicOverloadedIsRetriedOnce`). ADR 0031's claim about a recorded
+  timeout was corrected (it held only for a deadline that passes before the response
+  headers) and the mid-body failure it describes now has a test at the adapter
+  (`TestBodyFailurePartWayIsNotRetried`, `TestRecordedBodyFailureReplaysAsAnOrdinaryError`).
+- **The live provider tests no longer print the key when it leaked.** The check that finds the
+  configured key in a turn printed the whole turn with `%+v` on failure, so the failure
+  wrote the key into test output that is routinely pasted into issues. A failure now prints the problem,
+  the names of the fields that held the key and the turn's metadata with the key masked
+  (`TestLiveFailureLineNeverCarriesTheKey`).
+- **`scripts/live-model.sh` no longer prints the base URL, and its key check is exact.** The
+  note about a missing model digest printed the base URL with its userinfo and query, on
+  every run against a server without `/api/tags`; it now names the host and port, as the
+  report does. The check that the value of `OPENAI_API_KEY` is in no output file also
+  searched only some of them and failed every clean run for a key under 8 characters, such
+  as Ollama's placeholder `ollama`, which is in every response as `fp_ollama` and which the
+  masks ignore on purpose. It now includes the database and its write-ahead log and skips
+  a short key with a message (`TestLiveModelScriptNeverPrintsTheBaseURL`,
+  `TestLiveModelScriptSkipsTheKeyCheckForAKeyTheMasksIgnore`,
+  `TestLiveModelScriptChecksTheDatabaseForTheKey`).
+- **A passed value no longer reaches the ledger through an exec agent's stderr.** The error
+  for an agent that failed quoted the end of its stderr and masked it afterwards, and
+  quoting rewrites a quote, a backslash or a newline, so a `--agent-env` value holding one
+  was no longer the text the mask looked for; a value that the 4 KiB window cut in two kept
+  its end. The tail is now masked before it is quoted and before it is cut, in the value's
+  raw, JSON-escaped and Go-quoted spellings, and starts at a line boundary
+  (`TestExecStderrMasksValuesWithEscapedCharacters`, `TestExecStderrMasksAValueCutByTheTail`,
+  `TestExecStderrSecretsNeverReachTheLedger`, `TestTailBufferNeverShowsTheEndOfAValueItCutOff`).
+- **An exec agent started with no `PATH` and no `HOME` no longer inherits Twinwright's
+  environment.** With nothing to pass, the child environment was a nil slice, which
+  `os/exec` reads as "use mine", so every provider key and database address went to the
+  agent. It is now an empty environment (`TestExecChildEnvironmentStaysEmptyWithoutPathAndHome`).
+- **A process an exec agent started no longer outlives the turn.** The agent's process
+  group was signalled only on a timeout or an output overflow, so a helper left running by
+  a turn that succeeded, or by one that failed because it held the output open, kept
+  running, and the guide's "nothing survives between turns" was false. Every turn now ends
+  by killing the group on unix (`TestExecProviderKillsTheGroupAfterACleanExit`,
+  `TestExecProviderKillsTheGroupOnWaitDelay`). On Linux the agent is also killed if
+  Twinwright dies mid-turn, where a hung agent used to be left running for ever
+  (`TestExecAgentDiesWithTheProcessThatStartedIt`); this covers the direct child only, and
+  a process that left the group, grandchildren of a killed Twinwright and other platforms
+  are not covered, which the guide and ADR 0033 now say.
+- **A passed value no longer breaks or rewrites an exec agent's answer.** The agent's
+  stdout bytes were masked before they were decoded, so a `--agent-env` value that was the
+  digits of a number made a valid response fail as malformed JSON, and a value in an
+  argument rewrote the call; a value the agent encoded its own way (Python's `\u00e4`, a raw
+  `&`) was not recognised at all. The response is now decoded first and only the decoded
+  strings are masked: content, ids, and argument names and values at any depth. A value used
+  as an argument is masked before the call is dispatched, so the ledger and the tool receive
+  `[REDACTED]`, which the guide says; values under 8 characters are never masked, which it
+  also says (`TestExecMaskingKeepsTheResponseValid`, `TestExecMasksEveryStringOfTheDecodedResponse`,
+  `TestExecMasksValuesHoweverTheAgentEncodedThem`, `TestExecMasksWhatPythonEncodes`,
+  `TestExecMaskedArgumentsAreWhatTheLedgerAndTheToolSee`).
+- **A `usage` that breaks the schema is refused, not recorded as zeros.** The response
+  schema says `usage`, when present, is an object with `input_tokens`, `output_tokens` and
+  `total_tokens`, but the decoder accepted `{}`, an object with some of them and `null`, and
+  recorded zeros or nothing for a turn's cost. It now refuses all three, and an unknown member,
+  a count that is not an integer and a non-object (`TestExecProviderRejectsMisbehavingAgents`,
+  `TestExecUsageIsHeldToTheSchema`).
+- **An agent that cannot be started no longer puts its command in the ledger.** The error for a
+  start failure quoted what `os/exec` says, `fork/exec /home/operator/private-agents/agent: no
+  such file or directory`, so the path of the command went into the run's `error` event, though
+  the guide said the ledger records nothing about how the agent was started. The error now gives
+  the operating system's reason alone (`TestExecStartFailureNeverPutsTheCommandInTheLedger`). The
+  stderr of an agent that failed after starting is its own text and can still name its script, and
+  the guide and ADR 0033 now say that the claim holds for a run that succeeds.
+- **The test for the asynchronous stdin write now fails if the write is made synchronous.** The existing
+  guard used an agent that exits at once, which closes the pipe, so a synchronous write
+  failed with EPIPE instead of blocking and the test passed with the goroutine removed;
+  a request larger than a pipe buffer sent to an agent that never reads and never exits,
+  which is what the goroutine is for, was in no test. It is now: the turn must end with a
+  timeout within its deadline and the agent must be gone
+  (`TestExecProviderTimesOutAnAgentThatNeverReadsALargeRequest`, which blocks and fails
+  against a build with the synchronous write).
+- **A worker given `--agent-command` no longer fails every run in its queue that is not an exec
+  run.** `worker` applied
+  `--agent-command` to every run it claimed, and the provider refuses those flags for any
+  provider but exec, so a worker configured to serve an exec run failed every scripted or
+  hosted run in the same queue until it was marked failed. The agent flags now apply to
+  runs whose recorded provider is `exec`, in `worker`, `resume`, and the run `fork` and
+  `counterfactual` start from; `run`, `bench`, `shadow` and `fork --agent` still refuse them
+  for a provider the operator named (`TestWorkerWithAgentFlagsServesAScriptedRun`,
+  `TestResumeOfAScriptedRunIgnoresTheAgentFlags`,
+  `TestForkAndCounterfactualOnAScriptedRunIgnoreTheAgentFlags`,
+  `TestForRunAppliesTheAgentFlagsOnlyToExecRuns`, `TestRunRefusesAgentFlagsForANonExecProvider`).
+- **An exec agent's container is removed when its turn is cut short.** On a timeout, a
+  cancellation or an output overflow only the docker client was killed, and Docker does not
+  stop a container when its client dies, so the container kept running and writing, and the
+  guide and ADR 0033 said the process was killed. Each turn's container now has a name of its own
+  (`tw-agent-` and 16 random hexadecimal digits) and `docker rm -f` is run for it, bounded
+  to 10 seconds and best effort with a logged failure (`TestContainerIsRemovedWhenTheTurnIsCutShort`,
+  `TestContainerWrapNamesEachTurnsContainer`, `TestContainerRemovalFailureIsLoggedNotReturned`,
+  and against a real daemon `TestHardenedContainerIsGoneAfterOverflowAndTimeout`, whose control
+  shows the container still running without the removal). A Twinwright that is killed
+  mid-turn still leaves the container running, which the guide and ADR 0033 say.
+- **`--agent-memory 0` and `--agent-cpus 0` are refused.** They passed validation and docker
+  reads them as no limit (checked on Docker Engine 29.9.2: the cgroup limit stays `max`), so a
+  zero removed the memory or CPU cap (`TestContainerOptionsRejectBadValues`).
+- **The docker client can reach a daemon configured through the environment, and the container
+  never sees it.** The client got only `PATH` and `HOME`, so `DOCKER_HOST`, `DOCKER_CONTEXT`,
+  `DOCKER_CONFIG`, `DOCKER_CERT_PATH` and `DOCKER_TLS_VERIFY` did not reach it, and the only
+  workaround, `--agent-env DOCKER_HOST`, also put the daemon address in the untrusted
+  container. They now go to the client alone, and their values are masked in error text
+  (`TestExecContainerClientGetsTheDockerConnectionVariables`,
+  `TestContainerWrapNeverCarriesTheDockerConnectionVariables`,
+  `TestExecAgentDoesNotGetTheDockerConnectionVariables`).
+- **The Docker CI step can no longer pass without running its tests.** A renamed test matched
+  nothing, a failed image check skipped, and the network probe accepted any `blocked` answer,
+  each leaving a green step. The step now requires the passes by name in the `-v` output, the
+  isolation test requires errno 101 (network unreachable), and a bridge-network control shows
+  that the same probe connects; the step's shell was run against the real daemon, against a
+  skipped run and against a renamed test, and failed on the last two. The `docker` job with the
+  new step passed on a runner in the first Integration run with it, and again on the
+  `pull_request` run on 2026-10-29, where the step found every `--- PASS:` line it requires.
+- **A provider turn that reuses a call ID now fails the turn.** A call ID already
+  used in the run, or repeated within one turn, used to be skipped; it is refused
+  with an explicit error. See `TestProviderCallIDReuseFailsTheTurn`.
+- **`run` and `resume` execute under a fenced lease.** Without `--enqueue` they ran
+  with no fence and could write to a run at the same time as a fleet worker that
+  had claimed it. They now hold a lease owned by `local-<host>-<pid>` with a 15
+  second TTL, renewed while they run and released on exit including Ctrl-C and
+  `SIGTERM`. A run leased by a live fleet worker is refused, naming the owner and
+  expiry; after `kill -9` the lease has to expire before `resume` is accepted;
+  a failed release is reported rather than swallowed. Command output and exit
+  codes are otherwise unchanged.
+- **Lease expiry and queue availability now order by time, not by text.** Both are
+  compared inside SQL as text, and `time.RFC3339Nano` trims trailing zeros, so
+  `12:00:01Z` sorted after `12:00:01.5Z`. Within one second a renewal could revive
+  an expired lease, and a claim could miss an expired lease or a run that had
+  become available. Times in `run_leases`, `work_queue` and `workers` are now
+  written in a fixed-width form with nine fractional digits, and migration 3
+  (schema version 3) rewrites existing rows. A stored time that does not parse
+  fails the migration, which rolls back, and names the table, column and row.
+  Ledger event timestamps are unchanged. **Upgrading:** stop workers running an
+  older build before applying migration 3. An older build keeps writing the
+  variable-width form, and a database holding both forms misorders times within a
+  second.
+- **A run that kills its worker is now failed at the delivery limit, and a takeover
+  means a displaced lease.** `MaxAttempts` was checked only when `Execute` returned
+  an error, and a crash returns nothing, so a poison run was taken over forever.
+  A claim past `MaxAttempts` deliveries now fails the run without executing it,
+  with an `error` ledger event `{"kind":"delivery_limit","deliveries":N,"max_attempts":M}`
+  and the queue entry `failed`. A run that had already completed is finished
+  instead. `Outcome.Takeover` was `attempts > 1`, so an ordinary requeue after an
+  error counted as a takeover; it is now true only when the claim displaced an
+  expired lease. Re-enqueueing a run resets its delivery count, so an operator
+  retry of a run that failed at the limit executes instead of being refused
+  again. Delivery remains at-least-once. **Known limit:** a run retried after
+  hitting the delivery limit can complete but cannot be verified by replay,
+  because its ledger records the `delivery_limit` error and an unanswered model
+  request. A test pins the behaviour and ADR 0029 lists it under remaining
+  limits.
+- **A key echoed by a model, and a base URL that carries credentials, no longer
+  reach the ledger or an error message.** Error bodies were masked but a
+  successful response was not, so a model that repeated the configured key in its
+  content or in a tool argument had it written to the ledger and the stored
+  transcript. Every adapter now masks the key in each output item before the item
+  is interpreted, so the content, the tool arguments and the raw items kept for
+  replay all derive from the masked text (`TestSuccessfulOutputIsRedacted`). A
+  failed request returned the standard library's error, which prints the full
+  request URL with its userinfo and query; transport errors now go through
+  `redact.URL` and their cause text is masked
+  (`TestTransportErrorHidesURLQueryAndUserinfo`). Only the configured key is
+  masked on the success path, and `redact.Secrets` ignores a secret shorter than 8
+  characters. See ADR 0031.
+- **The metrics document is well formed, and its counters can be alerted on.** The
+  counters' `HELP` and `TYPE` lines were all written first and their samples after,
+  so no family was contiguous, which the Prometheus text format requires.
+  Each family is now `HELP`, `TYPE`, then its samples
+  (`TestExpositionIsWellFormed`). A counter's label name was guessed from whichever
+  value was passed to it, so any non-empty label became `disposition`; each counter
+  now declares its label, and only `twinwright_worker_claim_disposition_total`
+  carries `disposition` (`TestCounterLabelNamesAreDeclaredPerMetric`, and
+  `TestMetricsDispositionLabelsMatchTheWorkerDispositions` keeps the four
+  dispositions equal to the worker's). A counter existed only after its first
+  increment, so `rate()` had no earlier sample to start from; every counter now
+  renders a zero sample from the first scrape (`TestCountersRenderZeroBeforeFirstUse`).
+  `twinwright_worker_lease_renewals_total` could never move, because nothing counted
+  a renewal; the worker now counts each successful renewal
+  (`TestRenewalsAreCounted`). Label values went through `%q` after their own
+  escaping, which doubled backslashes in worker IDs; they are escaped once. Metric
+  names, and the labels of `twinwright_queue_entries` and the run-status gauges,
+  are unchanged. See ADR 0032.
+
 ### Added
 
 - **Documentation as Twinwright Cloud.** The README is rewritten as the overview of the
@@ -119,8 +709,9 @@ database written by a newer build is refused rather than downgraded.
   it. ADR 0033 records the protocol, the bounds, the trust boundary and the limits:
   the Docker daemon is trusted, there is no custom seccomp profile, an allowed
   network is unrestricted, on macOS and Windows the boundary is the Docker Desktop
-  VM, and a timed out agent's container can outlive the docker client that started
-  it. `docs/security-review.md` gains a section for agent processes with every test
+  VM, and a container is left running if Twinwright is killed mid-turn (a turn that
+  times out, is cancelled or floods its output has its container removed, and each
+  container is named `tw-agent-` and 16 hexadecimal digits). `docs/security-review.md` gains a section for agent processes with every test
   cited, and its line about live model runs now says that a local Ollama run is
   recorded in `docs/live-model-run.md` while hosted providers remain unverified.
 - **An `exec` agent protocol: your own program makes the decisions.** `--agent exec`
@@ -380,78 +971,6 @@ database written by a newer build is refused rather than downgraded.
   only in that test. The job passed on GitHub Actions on 2026-10-28: the spans were
   queried from Jaeger by trace ID, and a real Prometheus scrape and query succeeded.
   The two tests had also passed against the stack on a developer machine. See ADR 0032.
-
-### Fixed
-
-- **A provider turn that reuses a call ID now fails the turn.** A call ID already
-  used in the run, or repeated within one turn, used to be skipped; it is refused
-  with an explicit error. See `TestProviderCallIDReuseFailsTheTurn`.
-- **`run` and `resume` execute under a fenced lease.** Without `--enqueue` they ran
-  with no fence and could write to a run at the same time as a fleet worker that
-  had claimed it. They now hold a lease owned by `local-<host>-<pid>` with a 15
-  second TTL, renewed while they run and released on exit including Ctrl-C and
-  `SIGTERM`. A run leased by a live fleet worker is refused, naming the owner and
-  expiry; after `kill -9` the lease has to expire before `resume` is accepted;
-  a failed release is reported rather than swallowed. Command output and exit
-  codes are otherwise unchanged.
-- **Lease expiry and queue availability now order by time, not by text.** Both are
-  compared inside SQL as text, and `time.RFC3339Nano` trims trailing zeros, so
-  `12:00:01Z` sorted after `12:00:01.5Z`. Within one second a renewal could revive
-  an expired lease, and a claim could miss an expired lease or a run that had
-  become available. Times in `run_leases`, `work_queue` and `workers` are now
-  written in a fixed-width form with nine fractional digits, and migration 3
-  (schema version 3) rewrites existing rows. A stored time that does not parse
-  fails the migration, which rolls back, and names the table, column and row.
-  Ledger event timestamps are unchanged. **Upgrading:** stop workers running an
-  older build before applying migration 3. An older build keeps writing the
-  variable-width form, and a database holding both forms misorders times within a
-  second.
-- **A run that kills its worker is now failed at the delivery limit, and a takeover
-  means a displaced lease.** `MaxAttempts` was checked only when `Execute` returned
-  an error, and a crash returns nothing, so a poison run was taken over forever.
-  A claim past `MaxAttempts` deliveries now fails the run without executing it,
-  with an `error` ledger event `{"kind":"delivery_limit","deliveries":N,"max_attempts":M}`
-  and the queue entry `failed`. A run that had already completed is finished
-  instead. `Outcome.Takeover` was `attempts > 1`, so an ordinary requeue after an
-  error counted as a takeover; it is now true only when the claim displaced an
-  expired lease. Re-enqueueing a run resets its delivery count, so an operator
-  retry of a run that failed at the limit executes instead of being refused
-  again. Delivery remains at-least-once. **Known limit:** a run retried after
-  hitting the delivery limit can complete but cannot be verified by replay,
-  because its ledger records the `delivery_limit` error and an unanswered model
-  request. A test pins the behaviour and ADR 0029 lists it under remaining
-  limits.
-- **A key echoed by a model, and a base URL that carries credentials, no longer
-  reach the ledger or an error message.** Error bodies were masked but a
-  successful response was not, so a model that repeated the configured key in its
-  content or in a tool argument had it written to the ledger and the stored
-  transcript. Every adapter now masks the key in each output item before the item
-  is interpreted, so the content, the tool arguments and the raw items kept for
-  replay all derive from the masked text (`TestSuccessfulOutputIsRedacted`). A
-  failed request returned the standard library's error, which prints the full
-  request URL with its userinfo and query; transport errors now go through
-  `redact.URL` and their cause text is masked
-  (`TestTransportErrorHidesURLQueryAndUserinfo`). Only the configured key is
-  masked on the success path, and `redact.Secrets` ignores a secret shorter than 8
-  characters. See ADR 0031.
-- **The metrics document is well formed, and its counters can be alerted on.** The
-  counters' `HELP` and `TYPE` lines were all written first and their samples after,
-  so no family was contiguous, which the Prometheus text format requires.
-  Each family is now `HELP`, `TYPE`, then its samples
-  (`TestExpositionIsWellFormed`). A counter's label name was guessed from whichever
-  value was passed to it, so any non-empty label became `disposition`; each counter
-  now declares its label, and only `twinwright_worker_claim_disposition_total`
-  carries `disposition` (`TestCounterLabelNamesAreDeclaredPerMetric`, and
-  `TestMetricsDispositionLabelsMatchTheWorkerDispositions` keeps the four
-  dispositions equal to the worker's). A counter existed only after its first
-  increment, so `rate()` had no earlier sample to start from; every counter now
-  renders a zero sample from the first scrape (`TestCountersRenderZeroBeforeFirstUse`).
-  `twinwright_worker_lease_renewals_total` could never move, because nothing counted
-  a renewal; the worker now counts each successful renewal
-  (`TestRenewalsAreCounted`). Label values went through `%q` after their own
-  escaping, which doubled backslashes in worker IDs; they are escaped once. Metric
-  names, and the labels of `twinwright_queue_entries` and the run-status gauges,
-  are unchanged. See ADR 0032.
 
 ### Changed
 

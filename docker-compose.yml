@@ -5,7 +5,8 @@
 # Bring them up when you want to exercise the PostgreSQL path, send OTLP spans
 # somewhere that renders them, or scrape a worker.
 #
-#   postgres        the PostgreSQL path (127.0.0.1:5432)
+#   postgres        the PostgreSQL path (127.0.0.1:5432, or the host port in
+#                   TW_DEMO_PG_PORT)
 #   otel-collector  receives OTLP/HTTP (127.0.0.1:4318), prints what it gets and
 #                   forwards it to jaeger; health check on 127.0.0.1:13133
 #   jaeger          stores the spans; UI and query API on 127.0.0.1:16686
@@ -27,9 +28,13 @@ services:
       POSTGRES_PASSWORD: twinwright
       POSTGRES_DB: twinwright
     ports:
-      # 5432 on the host, so the DSN in the Makefile and README works as
-      # written. Change the host side if you already run PostgreSQL locally.
-      - "127.0.0.1:5432:5432"
+      # 5432 on the host by default, so the DSN in the Makefile and README works
+      # as written. If you already run PostgreSQL locally, set TW_DEMO_PG_PORT to
+      # another host port before `docker compose up`. `make demo-stack` reads the
+      # same variable with the same default and connects to that port, so set it
+      # once for both. The DSNs in the Makefile (POSTGRES_DSN) and the README name
+      # 5432 and need the new port too.
+      - "127.0.0.1:${TW_DEMO_PG_PORT:-5432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U twinwright"]
       interval: 5s

@@ -100,12 +100,22 @@ func acquireRunLeaseTx(ctx context.Context, tx *sql.Tx, dialect Dialect, runID, 
 		lock = " FOR UPDATE"
 	}
 
-	var currentOwner, expiresText string
-	var fence, committed int64
-	err := tx.QueryRowContext(ctx, `SELECT owner,fence,committed_fence,expires_at FROM run_leases WHERE run_id=?`+lock, runID).
-		Scan(&currentOwner, &fence, &committed, &expiresText)
-	switch {
-	case errors.Is(err, sql.ErrNoRows):
+	readLease := func() (owner string, fence, committed int64, expires string, err error) {
+		err = tx.QueryRowContext(ctx, `SELECT owner,fence,committed_fence,expires_at FROM run_leases WHERE run_id=?`+lock, runID).
+			Scan(&owner, &fence, &committed, &expires)
+		return
+	}
+	currentOwner, fence, committed, expiresText, err := readLease()
+	if errors.Is(err, sql.ErrNoRows) {
+		// A run that was never leased has no row to lock, so FOR UPDATE above
+		// excluded nobody: two claimers could both see "no lease", both compute
+		// fence 1, and the later INSERT would take over the earlier one's live
+		// lease. Creating the row first, as an unowned placeholder, gives them a
+		// row to queue on. ON CONFLICT DO NOTHING makes the later inserter wait for
+		// the earlier transaction to finish and then do nothing, and the locked
+		// re-read sees what that transaction committed. The placeholder is written
+		// and replaced inside this transaction, so no other reader ever sees it
+		// unless the whole acquisition rolled back, in which case it is gone too.
 		var runs int
 		if err = tx.QueryRowContext(ctx, "SELECT count(*) FROM runs WHERE id=?", runID).Scan(&runs); err != nil {
 			return RunLease{}, err
@@ -113,17 +123,23 @@ func acquireRunLeaseTx(ctx context.Context, tx *sql.Tx, dialect Dialect, runID, 
 		if runs == 0 {
 			return RunLease{}, fmt.Errorf("run %s does not exist", runID)
 		}
-		fence, committed = 0, 0
-	case err != nil:
+		never := CoordinationTime(time.Time{})
+		if _, err = tx.ExecContext(ctx, `
+INSERT INTO run_leases(run_id,owner,fence,committed_fence,expires_at,acquired_at,heartbeat_at) VALUES(?,'',0,0,?,?,?)
+ON CONFLICT(run_id) DO NOTHING`, runID, never, never, never); err != nil {
+			return RunLease{}, err
+		}
+		currentOwner, fence, committed, expiresText, err = readLease()
+	}
+	if err != nil {
 		return RunLease{}, err
-	default:
-		expires, parseErr := time.Parse(time.RFC3339Nano, expiresText)
-		if parseErr != nil {
-			return RunLease{}, fmt.Errorf("lease expiry for %s: %w", runID, parseErr)
-		}
-		if currentOwner != "" && currentOwner != owner && expires.After(now) {
-			return RunLease{}, fmt.Errorf("%w: run %s is leased by %q until %s", ErrLeaseHeld, runID, currentOwner, expires.UTC().Format(time.RFC3339Nano))
-		}
+	}
+	expires, parseErr := time.Parse(time.RFC3339Nano, expiresText)
+	if parseErr != nil {
+		return RunLease{}, fmt.Errorf("lease expiry for %s: %w", runID, parseErr)
+	}
+	if currentOwner != "" && currentOwner != owner && expires.After(now) {
+		return RunLease{}, fmt.Errorf("%w: run %s is leased by %q until %s", ErrLeaseHeld, runID, currentOwner, expires.UTC().Format(time.RFC3339Nano))
 	}
 
 	next := RunLease{RunID: runID, Owner: owner, Token: fence + 1, ExpiresAt: now.Add(ttl).UTC()}
@@ -175,8 +191,18 @@ UPDATE run_leases SET expires_at=?, heartbeat_at=? WHERE run_id=? AND owner=? AN
 // ReleaseRunLease gives up ownership without rewinding the fence sequence, so
 // a released holder still cannot write and the next owner still gets a higher
 // token.
+//
+// The release and its ownership-log row commit together. They used to be two
+// statements in two transactions, so a failure of the second (the caller's
+// release deadline expiring between them, or a sequence collision) returned an
+// error for a lease that was already free, and the log had no release row.
 func (s *Store) ReleaseRunLease(ctx context.Context, lease RunLease, now time.Time) error {
-	result, err := s.DB.ExecContext(ctx, `
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := tx.ExecContext(ctx, `
 UPDATE run_leases SET owner='', expires_at=?, heartbeat_at=? WHERE run_id=? AND owner=? AND fence=?`,
 		CoordinationTime(now), CoordinationTime(now),
 		lease.RunID, lease.Owner, lease.Token)
@@ -190,7 +216,12 @@ UPDATE run_leases SET owner='', expires_at=?, heartbeat_at=? WHERE run_id=? AND 
 	if affected != 1 {
 		return fmt.Errorf("%w: release rejected for run %s", ErrFenced, lease.RunID)
 	}
-	return s.AppendOwnership(ctx, lease.RunID, OwnershipReleased, lease.Owner, lease.Token, now, nil)
+	// The UPDATE above holds the lease row, which is the lock that orders every
+	// writer of this run's ownership log; see lockOwnershipLog.
+	if err = appendOwnershipTx(ctx, tx, lease.RunID, OwnershipReleased, lease.Owner, lease.Token, now, nil); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // RunLease reports current ownership, including an expired row, so operators
@@ -211,16 +242,21 @@ func (s *Store) RunLease(ctx context.Context, runID string) (RunLease, error) {
 // GuardFenceTx asserts, inside an existing transaction, that fence still owns
 // the run, and records the fence as the highest one that has committed.
 //
-// This is the single choke point for every durable write a worker makes. Two
-// independent conditions must hold, and both matter:
+// This is the single choke point for every durable write a worker makes. What
+// it checks:
 //
-//   - The lease row must still name this owner and token, and must not have
-//     expired. Expiry alone is disqualifying, because the moment a lease lapses
-//     another worker may take the run.
-//   - The presented token must be at least the highest token that has already
-//     committed. This one does not depend on any clock, so it stays correct
-//     under clock skew between workers and the database, which is precisely the
-//     case a TTL check alone gets wrong.
+//   - The lease row must still name this owner and token. This is the guard that
+//     involves no clock: a worker that was displaced, however its clock reads,
+//     finds a different owner or a newer token in the row and is refused.
+//   - The lease must not have expired by the caller's clock. Expiry alone is
+//     disqualifying, because the moment a lease lapses another worker may take
+//     the run. This is the one condition that depends on a clock.
+//   - The presented token must be at least committed_fence, the highest token
+//     that has committed. While the row's fence only goes up, the first condition
+//     already refuses every token below it, so this one adds nothing on its own;
+//     it is a high-water mark that an acquisition never lowers, and it refuses a
+//     superseded token if the row's owner and fence are ever put back (a restore
+//     or a repair by hand). It is not what keeps fencing correct under clock skew.
 //
 // Recording committed_fence inside the caller's transaction is what makes the
 // check atomic with the work it guards: a takeover cannot slip between the

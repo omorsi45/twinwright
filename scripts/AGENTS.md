@@ -23,6 +23,11 @@ Applies to `scripts/`.
   a takeover, and exits non-zero unless six checks read back from PostgreSQL,
   Jaeger and Prometheus hold. It drops and recreates only the
   `twinwright_demo_*` databases, never prints a DSN, and ends its workers and
-  its lock session in an exit trap. It leaves the stack running.
+  its lock session in an exit trap. The trap removes its temporary directory on
+  success and keeps it, printing the path, on failure. It refuses to start when
+  the metrics ports 9095 or 9096 already answer, and each worker's endpoint must
+  serve that worker's own series before Prometheus is believed. PostgreSQL's host
+  port is `TW_DEMO_PG_PORT` (default 5432), the variable `docker-compose.yml`
+  reads too. It leaves the stack running.
 
 From the root: `./scripts/e2e.sh` or `make bench-smoke`, as relevant.

@@ -221,9 +221,13 @@ func TestGuardFenceRejectsExpiredLeaseWithoutTakeover(t *testing.T) {
 	}
 }
 
-// The monotonic committed-fence record is what keeps fencing correct when
-// clocks disagree: a lower fence is refused regardless of the wall clock.
-func TestGuardFenceRejectsLowerFenceEvenWhenTheLeaseLooksLive(t *testing.T) {
+// A superseded token is refused while its own TTL is still running, so the
+// refusal does not depend on any clock: the lease row names a newer token (the
+// same owner, re-acquired), and a presented token has to match the row's. That
+// equality, not the committed-fence record, is what stops it; see
+// TestGuardFenceRefusesATokenBelowTheCommittedMarkWhenTheFenceWasRewound for the
+// record's own job.
+func TestGuardFenceRejectsASupersededTokenWhileItsTTLIsStillRunning(t *testing.T) {
 	ctx := context.Background()
 	s := leaseTestStore(t)
 	run := seededRun(ctx, t, s)
@@ -248,6 +252,48 @@ func TestGuardFenceRejectsLowerFenceEvenWhenTheLeaseLooksLive(t *testing.T) {
 	})
 	if !errors.Is(err, ErrFenced) {
 		t.Fatalf("superseded fence err=%v want ErrFenced", err)
+	}
+}
+
+// committed_fence is a high-water mark of the tokens that have committed. In
+// normal operation the owner-and-token match already refuses every token below it,
+// because the lease row's fence never goes down. The mark is for when it does: a
+// lease row put back by hand or from a restore names an old owner and token again,
+// the lease looks live, and the owner and token match. Only the mark, which an
+// acquisition never lowers, still refuses the token that a newer one has
+// superseded. A mutation that removes the comparison fails this test.
+func TestGuardFenceRefusesATokenBelowTheCommittedMarkWhenTheFenceWasRewound(t *testing.T) {
+	ctx := context.Background()
+	s := leaseTestStore(t)
+	run := seededRun(ctx, t, s)
+	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+
+	first, err := s.AcquireRunLease(ctx, run.ID, "worker-a", time.Minute, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.AcquireRunLease(ctx, run.ID, "worker-b", time.Minute, now.Add(2*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	commit := func(fence Fence, at time.Time) error {
+		return s.withGuardedTx(ctx, fence, at, func(tx *sql.Tx) error {
+			return AppendEventTx(ctx, tx, run.ID, "model.request", map[string]any{"at": at.String()})
+		})
+	}
+	if err = commit(second.Fence(), now.Add(2*time.Minute+time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	// The lease row is put back as it was for the first holder: same owner, same
+	// token, a live expiry. Nothing about the row itself rules the first holder out.
+	if _, err = s.DB.ExecContext(ctx, "UPDATE run_leases SET owner=?, fence=?, expires_at=? WHERE run_id=?",
+		first.Owner, first.Token, CoordinationTime(now.Add(time.Hour)), run.ID); err != nil {
+		t.Fatal(err)
+	}
+	err = commit(first.Fence(), now.Add(3*time.Minute))
+	if !errors.Is(err, ErrFenced) || !strings.Contains(err.Error(), "superseded") {
+		t.Fatalf("a token below the committed mark err=%v, want ErrFenced naming the mark", err)
 	}
 }
 

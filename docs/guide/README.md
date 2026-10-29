@@ -41,7 +41,7 @@ The documents that make claims are separate. [docs/claims.md](../claims.md) list
 
 ## Pages that gained material
 
-Four pages end with sections that did not exist in the old README, because the README had no place for features added since: [providers.md](providers.md) (the output ceiling, rate limits and server errors, cassettes, a real model run, gating a run), [bench.md](bench.md) (the regression gate), [observability.md](observability.md) (worker export, metrics, the Compose stack, what CI shows) and [distributed-runtime.md](distributed-runtime.md) (what Compose starts, `make up` and `make down`). A few sentences were corrected where they had become false; each page's opening paragraph says so.
+Four pages end with sections that did not exist in the old README, because the README had no place for features added since: [providers.md](providers.md) (the output ceiling, rate limits and server errors, cassettes, a real model run, gating a run), [bench.md](bench.md) (the regression gate), [observability.md](observability.md) (worker export, metrics, the Compose stack, what CI shows) and [distributed-runtime.md](distributed-runtime.md) (what Compose starts, `make up` and `make down`). A few sentences were corrected where they had become false, and some were added to moved text; each page's opening paragraph lists them.
 
 ## Other documents
 

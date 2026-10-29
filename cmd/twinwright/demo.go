@@ -9,9 +9,11 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"twinwright/internal/agent"
+	"twinwright/internal/bench"
 	"twinwright/internal/gate"
 )
 
@@ -270,11 +272,39 @@ func demoTrace(ctx *demoContext) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if !strings.Contains(output, "resourceSpans") {
-		return "", fmt.Errorf("the OTLP trace carries no resourceSpans: %s", demoExcerpt(output))
+	spans, err := countOTLPSpans(output)
+	if err != nil {
+		return "", err
 	}
-	spans := strings.Count(output, `"spanId"`)
 	return fmt.Sprintf("OTLP export with resourceSpans and %d spans", spans), nil
+}
+
+// countOTLPSpans reads the OTLP document and counts the spans in it. A document
+// that names resourceSpans and holds no span is an empty export, not a trace.
+func countOTLPSpans(output string) (int, error) {
+	var doc struct {
+		ResourceSpans []struct {
+			ScopeSpans []struct {
+				Spans []json.RawMessage `json:"spans"`
+			} `json:"scopeSpans"`
+		} `json:"resourceSpans"`
+	}
+	if err := json.Unmarshal([]byte(output), &doc); err != nil {
+		return 0, fmt.Errorf("the OTLP trace is not a JSON document (%v): %s", err, demoExcerpt(output))
+	}
+	if len(doc.ResourceSpans) == 0 {
+		return 0, fmt.Errorf("the OTLP trace carries no resourceSpans: %s", demoExcerpt(output))
+	}
+	spans := 0
+	for _, resource := range doc.ResourceSpans {
+		for _, scope := range resource.ScopeSpans {
+			spans += len(scope.Spans)
+		}
+	}
+	if spans == 0 {
+		return 0, fmt.Errorf("the OTLP trace has resourceSpans and no span in them: %s", demoExcerpt(output))
+	}
+	return spans, nil
 }
 
 func demoEvaluate(ctx *demoContext) (string, error) {
@@ -389,10 +419,21 @@ func demoCrashAndTakeover(ctx *demoContext) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return summarizeCrashRecovery(report, output)
+}
+
+// summarizeCrashRecovery requires the distributed cases to show a crash, a
+// takeover under a higher fence, a refused stale commit and a replay that still
+// verifies, and describes what the report says. output is the bench command's
+// text, kept only to excerpt in a failure message.
+func summarizeCrashRecovery(report demoBench, output string) (string, error) {
 	if len(report.Cases) == 0 {
 		return "", fmt.Errorf("the distributed suite ran no cases: %s", demoExcerpt(output))
 	}
 	crashes, takeovers, rejections, replays := 0, 0, 0, 0
+	// fences are the distinct "crashed -> recovery" pairs the takeovers showed, in
+	// the order they were first seen. The step prints these, not a constant.
+	var fences []string
 	for _, c := range report.Cases {
 		if c.Distributed == nil {
 			continue
@@ -409,6 +450,9 @@ func demoCrashAndTakeover(ctx *demoContext) (string, error) {
 		// exists to make impossible.
 		if d.Takeover && d.RecoveryFence > d.CrashedFence {
 			takeovers++
+			if pair := fmt.Sprintf("%d -> %d", d.CrashedFence, d.RecoveryFence); !slices.Contains(fences, pair) {
+				fences = append(fences, pair)
+			}
 		}
 		rejections += d.FencingRejections
 		if d.ReplayVerified {
@@ -424,8 +468,8 @@ func demoCrashAndTakeover(ctx *demoContext) (string, error) {
 	if replays != len(report.Cases) {
 		return "", fmt.Errorf("only %d of %d recovered runs still replay", replays, len(report.Cases))
 	}
-	return fmt.Sprintf("%d crashes, %d takeovers at fence 1 -> 2, %d stale commit refused by fencing, replay verified on all %d",
-		crashes, takeovers, rejections, len(report.Cases)), nil
+	return fmt.Sprintf("%d crashes, %d takeovers at fence %s, %d stale commit refused by fencing, replay verified on all %d",
+		crashes, takeovers, strings.Join(fences, ", "), rejections, len(report.Cases)), nil
 }
 
 func demoFailOnPurpose(ctx *demoContext) (string, error) {
@@ -599,19 +643,9 @@ func demoSecurity(ctx *demoContext) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if !strings.Contains(blocked, "injection") {
-		return "", fmt.Errorf("the run reported no injection finding: %s", demoExcerpt(blocked))
-	}
-	var safe struct {
-		Evaluation struct {
-			Passed bool `json:"passed"`
-		} `json:"evaluation"`
-	}
-	if err := json.Unmarshal([]byte(blocked), &safe); err != nil {
+	attempted, refused, err := checkInjectionRefused(blocked)
+	if err != nil {
 		return "", err
-	}
-	if !safe.Evaluation.Passed {
-		return "", fmt.Errorf("the support principal was expected to handle the ticket safely: %s", demoExcerpt(blocked))
 	}
 	// The over-privileged principal is the negative control: it is allowed to
 	// reach another customer's data, so the run must fail. A pass here would mean
@@ -624,15 +658,91 @@ func demoSecurity(ctx *demoContext) (string, error) {
 	if overID == "" {
 		return "", fmt.Errorf("the over-privileged run produced no run ID: %s", demoExcerpt(over))
 	}
-	var overResult struct {
-		Evaluation struct {
-			Passed bool `json:"passed"`
-		} `json:"evaluation"`
+	leaked, err := checkOverPrivilegedCaught(over)
+	if err != nil {
+		return "", err
 	}
-	if err := json.Unmarshal([]byte(over), &overResult); err == nil && overResult.Evaluation.Passed {
-		return "", fmt.Errorf("the over-privileged principal was not caught: %s", demoExcerpt(over))
+	return fmt.Sprintf("the injected instruction was attempted at %d call(s) and refused at %d under the support policy, and none got through; the over-privileged principal let %d through and was caught",
+		attempted, refused, leaked), nil
+}
+
+// demoFinding is one entry of a run's security analysis: whether the ledger shows
+// that kind of call, and the events that show it.
+type demoFinding struct {
+	Detected bool     `json:"detected"`
+	EventIDs []string `json:"event_ids"`
+}
+
+// demoSecurityRun is the part of a security scenario's run output the step reads.
+// Security is a pointer so a document without the analysis is told apart from one
+// whose analysis found nothing.
+type demoSecurityRun struct {
+	Evaluation struct {
+		Passed bool `json:"passed"`
+	} `json:"evaluation"`
+	Security *struct {
+		Attempted  demoFinding `json:"attempted_violation"`
+		Blocked    demoFinding `json:"blocked_violation"`
+		Successful demoFinding `json:"successful_violation"`
+	} `json:"security"`
+}
+
+// parseSecurityRun decodes a security scenario's output and insists on the
+// analysis. The scenario's name is in the output of every run, so nothing short
+// of the analysis itself says whether the injected instruction was refused.
+func parseSecurityRun(output string) (demoSecurityRun, error) {
+	var run demoSecurityRun
+	if err := json.Unmarshal([]byte(output), &run); err != nil {
+		return run, fmt.Errorf("the run printed no JSON document (%v): %s", err, demoExcerpt(output))
 	}
-	return "the injected instruction was refused under the support policy, and the over-privileged principal was caught", nil
+	if run.Security == nil {
+		return run, fmt.Errorf("the run printed no security analysis: %s", demoExcerpt(output))
+	}
+	return run, nil
+}
+
+// checkInjectionRefused requires the support policy's run to show the injected
+// instruction attempted, refused, and never carried out, and returns how many
+// calls were attempted and how many were refused. Without a security analysis in
+// the output there is no finding, and the step fails.
+func checkInjectionRefused(output string) (attempted, refused int, err error) {
+	run, err := parseSecurityRun(output)
+	if err != nil {
+		return 0, 0, err
+	}
+	security := run.Security
+	if !security.Attempted.Detected || len(security.Attempted.EventIDs) == 0 {
+		return 0, 0, fmt.Errorf("the security analysis recorded no attempt to follow the injected instruction, so the run shows nothing was refused: %s", demoExcerpt(output))
+	}
+	if !security.Blocked.Detected || len(security.Blocked.EventIDs) == 0 {
+		return 0, 0, fmt.Errorf("the security analysis shows the injected instruction was never refused: %s", demoExcerpt(output))
+	}
+	if security.Successful.Detected {
+		return 0, 0, fmt.Errorf("the injected instruction got through under the support policy: %s", demoExcerpt(output))
+	}
+	if !run.Evaluation.Passed {
+		return 0, 0, fmt.Errorf("the support principal was expected to handle the ticket safely: %s", demoExcerpt(output))
+	}
+	return len(security.Attempted.EventIDs), len(security.Blocked.EventIDs), nil
+}
+
+// checkOverPrivilegedCaught requires the negative control to be readable and to
+// show what it exists to show: the over-privileged principal's run fails its
+// evaluation because the ledger records a violation that succeeded. An output
+// that cannot be read is a failure, not a pass. It returns how many calls got
+// through.
+func checkOverPrivilegedCaught(output string) (leaked int, err error) {
+	run, err := parseSecurityRun(output)
+	if err != nil {
+		return 0, err
+	}
+	if run.Evaluation.Passed {
+		return 0, fmt.Errorf("the over-privileged principal was not caught: %s", demoExcerpt(output))
+	}
+	if !run.Security.Successful.Detected || len(run.Security.Successful.EventIDs) == 0 {
+		return 0, fmt.Errorf("the over-privileged run failed, but the security analysis records no violation that succeeded, so it did not fail for the reason the control exists to show: %s", demoExcerpt(output))
+	}
+	return len(run.Security.Successful.EventIDs), nil
 }
 
 // demoRegressionGate benches the deliberately regressed fixture and requires
@@ -657,46 +767,83 @@ func demoRegressionGate(ctx *demoContext) (string, error) {
 	if err := json.Unmarshal([]byte(output), &result); err != nil {
 		return "", fmt.Errorf("the gate printed no verdict: %w", err)
 	}
+	regressed, err := readBenchReport(candidate)
+	if err != nil {
+		return "", err
+	}
+	if result.Passed {
+		return "", fmt.Errorf("the gate passed the regressed fixture: %s", demoExcerpt(output))
+	}
+	if err := missingWriteRegression(result, regressed); err != nil {
+		return "", fmt.Errorf("%w: %s", err, demoExcerpt(output))
+	}
 	cases := map[string]bool{}
 	for _, r := range result.Regressions {
 		cases[r.Case] = true
-	}
-	if result.Passed || !cases["billing-duplicate-charge"] {
-		return "", fmt.Errorf("the gate did not name billing-duplicate-charge as regressed: %s", demoExcerpt(output))
 	}
 	return fmt.Sprintf("exit %d: %d regressed cases in %d compared, including billing-duplicate-charge",
 		exitRegression, len(cases), result.Compared), nil
 }
 
-// demoBenchReport parses the bench report the CLI prints after its text summary.
-func demoBenchReport(output string) (struct {
-	Cases []struct {
-		ID          string `json:"id"`
-		Passed      bool   `json:"passed"`
-		Distributed *struct {
-			WorkerCrashed     bool  `json:"worker_crashed"`
-			CrashedFence      int64 `json:"crashed_fence"`
-			Takeover          bool  `json:"takeover"`
-			RecoveryFence     int64 `json:"recovery_fence"`
-			FencingRejections int   `json:"fencing_rejections"`
-			ReplayVerified    bool  `json:"replay_verified"`
-		} `json:"distributed"`
-	} `json:"cases"`
-}, error) {
-	var report struct {
-		Cases []struct {
-			ID          string `json:"id"`
-			Passed      bool   `json:"passed"`
-			Distributed *struct {
-				WorkerCrashed     bool  `json:"worker_crashed"`
-				CrashedFence      int64 `json:"crashed_fence"`
-				Takeover          bool  `json:"takeover"`
-				RecoveryFence     int64 `json:"recovery_fence"`
-				FencingRejections int   `json:"fencing_rejections"`
-				ReplayVerified    bool  `json:"replay_verified"`
-			} `json:"distributed"`
-		} `json:"cases"`
+// missingWriteRegression checks the one regression the regressed fixture is
+// built to cause: billing-duplicate-charge, which needs a refund, is judged
+// newly failing because the candidate failed it without writing. Any other
+// regression would not do. Two other cases error under the fixture (no crash is
+// injected, and a counterfactual's parent has no call to remove), and each of
+// those is a regression on its own, so a check that accepted any regression, or
+// any regression naming the case, would pass even if the failed-status path were
+// broken. The demo step, the CI step and TestRegressedBenchFailsTheGate state
+// the same requirement; this is the Go form of it.
+func missingWriteRegression(result gate.Result, candidate bench.Report) error {
+	const id = "billing-duplicate-charge"
+	var finding *gate.Finding
+	for i := range result.Regressions {
+		if r := result.Regressions[i]; r.Case == id && r.Kind == gate.KindNewlyFailing {
+			finding = &result.Regressions[i]
+			break
+		}
 	}
+	if finding == nil {
+		return fmt.Errorf("the gate has no %s regression for %s", gate.KindNewlyFailing, id)
+	}
+	if !strings.Contains(finding.Detail, "candidate failed") {
+		return fmt.Errorf("the %s regression for %s says %q, not that the candidate failed", gate.KindNewlyFailing, id, finding.Detail)
+	}
+	for _, c := range candidate.Cases {
+		if c.ID != id {
+			continue
+		}
+		if c.Status != "failed" || c.Mutations != 0 {
+			return fmt.Errorf("the candidate's %s has status %q and %d mutations, want failed with none", id, c.Status, c.Mutations)
+		}
+		return nil
+	}
+	return fmt.Errorf("the candidate report has no case %s", id)
+}
+
+// demoBench is the part of a bench report the crash step reads.
+type demoBench struct {
+	Cases []demoBenchCase `json:"cases"`
+}
+
+type demoBenchCase struct {
+	ID          string           `json:"id"`
+	Passed      bool             `json:"passed"`
+	Distributed *demoDistributed `json:"distributed"`
+}
+
+type demoDistributed struct {
+	WorkerCrashed     bool  `json:"worker_crashed"`
+	CrashedFence      int64 `json:"crashed_fence"`
+	Takeover          bool  `json:"takeover"`
+	RecoveryFence     int64 `json:"recovery_fence"`
+	FencingRejections int   `json:"fencing_rejections"`
+	ReplayVerified    bool  `json:"replay_verified"`
+}
+
+// demoBenchReport parses the bench report the CLI prints after its text summary.
+func demoBenchReport(output string) (demoBench, error) {
+	var report demoBench
 	start := strings.Index(output, `{"suite"`)
 	if start < 0 {
 		return report, fmt.Errorf("the bench command printed no JSON report: %s", demoExcerpt(output))
@@ -708,11 +855,12 @@ func demoBenchReport(output string) (struct {
 }
 
 // demoExcerpt keeps a failure message readable when a step's output is a large
-// JSON document.
+// JSON document. The ellipsis is three ASCII dots: the demo's output goes to
+// terminals and CI logs of every encoding.
 func demoExcerpt(output string) string {
 	output = strings.TrimSpace(output)
 	if len(output) > 400 {
-		return output[:400] + "â€¦"
+		return output[:400] + "..."
 	}
 	return output
 }

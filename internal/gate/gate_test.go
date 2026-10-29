@@ -387,6 +387,47 @@ func TestMarkdownSummarizesFindings(t *testing.T) {
 	}
 }
 
+// The suite name is only required to be non-empty, and the summary is written
+// to a CI job summary. A backtick must not end the code span it sits in, and a
+// newline must not start a line of its own: a name that did either could inject
+// a second status heading above the real verdict.
+func TestMarkdownEscapesTheSuiteName(t *testing.T) {
+	build := func(name string) string {
+		base := bench.Report{Suite: name, SchemaVersion: 2, Cases: []bench.CaseResult{passing("a")}}
+		cand := bench.Report{Suite: name, SchemaVersion: 2, Cases: []bench.CaseResult{failing("a", "x")}}
+		return mustCompare(t, base, cand, Options{}).Markdown()
+	}
+
+	md := build("std` | **x**\n## Twinwright gate: PASSED")
+	// The name's text may appear inside the code span, but no line of the
+	// summary may start a second status heading.
+	headings := 0
+	for _, line := range strings.Split(md, "\n") {
+		if strings.HasPrefix(line, "## Twinwright gate:") {
+			headings++
+		}
+	}
+	if headings != 1 {
+		t.Fatalf("a suite name produced %d status headings, want 1:\n%s", headings, md)
+	}
+	for _, line := range strings.Split(md, "\n") {
+		if strings.HasPrefix(line, "Suite ") {
+			want := "Suite ``std` | **x** ## Twinwright gate: PASSED``: 1 cases compared, 1 regressions, 0 warnings, 0 improvements."
+			if line != want {
+				t.Fatalf("summary line =\n%q\nwant\n%q", line, want)
+			}
+		}
+	}
+
+	// A name that begins or ends with a backtick is padded so the span can hold it.
+	if md := build("`x`"); !strings.Contains(md, "Suite `` `x` ``: ") {
+		t.Fatalf("a backtick at the edge of the name must be padded:\n%s", md)
+	}
+	if md := build("standard"); !strings.Contains(md, "Suite `standard`: ") {
+		t.Fatalf("an ordinary name keeps its single-backtick span:\n%s", md)
+	}
+}
+
 type parsedSuites struct {
 	XMLName xml.Name      `xml:"testsuites"`
 	Suites  []parsedSuite `xml:"testsuite"`
@@ -468,6 +509,91 @@ func TestGateRefusesAnEmptyBaseline(t *testing.T) {
 	_, err := Compare(report(2), report(2, passing("a")), Options{})
 	if err == nil || !strings.Contains(err.Error(), "no cases") {
 		t.Fatalf("want an error saying the baseline has no cases, got %v", err)
+	}
+}
+
+// A baseline whose every case errored compares against nothing, like an empty
+// one: each case would be baseline_unmeasured and every candidate would pass.
+// It is what a bench run without credentials writes.
+func TestGateRefusesABaselineWithNoMeasuredCase(t *testing.T) {
+	single := func(id string) bench.CaseResult {
+		c := passing(id)
+		c.Status, c.Passed, c.AsExpected, c.Passes, c.Error = "error", false, false, 0, "OPENAI_API_KEY is required for openai"
+		return c
+	}
+	tests := []struct {
+		name string
+		base bench.Report
+	}{
+		{"single trials", report(2, single("a"), single("b"))},
+		{"repeated cases", report(2, repeated("a", "error", 10, 0), repeated("b", "error", 10, 0))},
+		{"version 1", report(1, single("a"), single("b"))},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Compare(tc.base, report(2, passing("a"), passing("b")), Options{})
+			if err == nil || !strings.Contains(err.Error(), "reached a verdict") {
+				t.Fatalf("want an error saying no baseline case reached a verdict, got %v", err)
+			}
+		})
+	}
+
+	// One measured case is enough: the others are warned about, as before.
+	base := report(2, single("a"), passing("b"))
+	if _, err := Compare(base, report(2, passing("a"), passing("b")), Options{}); err != nil {
+		t.Fatalf("a baseline with one measured case is gateable: %v", err)
+	}
+	// So is a repeated case that errored on a trial but passed the others.
+	partly := report(2, repeated("a", "error", 10, 9))
+	if _, err := Compare(partly, report(2, repeated("a", "passed", 10, 10)), Options{}); err != nil {
+		t.Fatalf("a baseline case with 9 passes is measured: %v", err)
+	}
+}
+
+// The gate's contract is to exit 2 on input it cannot judge. A status it does
+// not know is neither a pass nor a failure, so a passed baseline case would
+// "regress" to it silently; an empty case ID regresses without a JUnit testcase
+// to carry the failure; and more passes than trials is not a count.
+func TestGateRefusesAnUnjudgeableCase(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*bench.CaseResult)
+		want   string
+	}{
+		{"empty status", func(c *bench.CaseResult) { c.Status = "" }, `status ""`},
+		{"unknown status", func(c *bench.CaseResult) { c.Status = "skipped" }, `status "skipped"`},
+		{"status in the wrong case", func(c *bench.CaseResult) { c.Status = "PASSED" }, `status "PASSED"`},
+		{"timeout status", func(c *bench.CaseResult) { c.Status = "timeout" }, `status "timeout"`},
+		{"empty ID", func(c *bench.CaseResult) { c.ID = "" }, "no ID"},
+		{"more passes than trials", func(c *bench.CaseResult) { c.Trials, c.Passes = 2, 3 }, "3 passes in 2 trials"},
+		{"passes with no trial count", func(c *bench.CaseResult) { c.Trials, c.Passes = 0, 2 }, "2 passes"},
+		{"negative passes", func(c *bench.CaseResult) { c.Passes = -1 }, "-1 passes"},
+		{"negative trials", func(c *bench.CaseResult) { c.Trials = -1 }, "-1 trials"},
+	}
+	for _, side := range []string{"baseline", "candidate"} {
+		for _, tc := range tests {
+			t.Run(side+"/"+tc.name, func(t *testing.T) {
+				bad := passing("bad")
+				tc.mutate(&bad)
+				base, cand := report(2, passing("a"), passing("bad")), report(2, passing("a"), passing("bad"))
+				if side == "baseline" {
+					base = report(2, passing("a"), bad)
+				} else {
+					cand = report(2, passing("a"), bad)
+				}
+				_, err := Compare(base, cand, Options{})
+				if err == nil || !strings.Contains(err.Error(), side) || !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("want an error naming the %s and %q, got %v", side, tc.want, err)
+				}
+			})
+		}
+	}
+
+	// A version 1 report has no trial counts at all, and those are not invalid.
+	v1 := passing("a")
+	v1.Trials, v1.Passes = 0, 0
+	if _, err := Compare(report(1, v1), report(1, v1), Options{}); err != nil {
+		t.Fatalf("a version 1 case without trial counts is valid: %v", err)
 	}
 }
 
@@ -564,7 +690,9 @@ func TestGateWarnsAndSkipsWhenTheBaselineCaseErrored(t *testing.T) {
 	base.Status, base.Passed, base.AsExpected, base.Passes, base.Error = "error", false, false, 0, "boom"
 	cand := passing("a")
 	cand.UnsafeRetry, cand.AgentRefunds, cand.Mutations = true, 2, 9
-	result := mustCompare(t, report(2, base), report(2, cand), Options{})
+	// A second, measured case keeps the baseline gateable: a baseline in which
+	// every case errored is refused outright (TestGateRefusesABaselineWithNoMeasuredCase).
+	result := mustCompare(t, report(2, base, passing("b")), report(2, cand, passing("b")), Options{})
 	if !result.Passed {
 		t.Fatalf("an unmeasured baseline cannot be regressed against: %+v", result.Regressions)
 	}
@@ -588,5 +716,157 @@ func TestGateDerivesAControlVerdictFromStatusWhenAsExpectedIsAbsent(t *testing.T
 	}
 	if result := mustCompare(t, report(1, caught), report(2, control("c")), Options{}); !result.Passed {
 		t.Fatalf("a caught control stays caught: %+v", result.Regressions)
+	}
+}
+
+// repeated is a case run trials times, passes of which passed. The status is
+// the one bench's fold would give: passed when every trial passed, otherwise
+// the given one.
+func repeated(id, status string, trials, passes int) bench.CaseResult {
+	c := passing(id)
+	c.Trials, c.Passes = trials, passes
+	c.Status, c.Passed, c.AsExpected = status, status == "passed", status == "passed"
+	switch status {
+	case "failed":
+		c.FailedChecks = []string{"flaky"}
+	case "error":
+		c.Error = "provider timeout"
+	}
+	return c
+}
+
+func TestGateRatesAnErroredRepeatedCandidate(t *testing.T) {
+	base := report(2, repeated("a", "failed", 10, 9))
+	tests := []struct {
+		name      string
+		cand      bench.CaseResult
+		wantRegs  []string
+		wantWarns []string
+	}{
+		{"every trial errored", repeated("a", "error", 10, 0), []string{"a:candidate_unmeasured"}, nil},
+		{"one pass and nine errored trials", repeated("a", "error", 10, 1), []string{"a:pass_rate_drop"}, []string{"a:candidate_errored"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := mustCompare(t, base, report(2, tc.cand), Options{Tolerance: 0.1})
+			if got := kinds(result.Regressions); !equalStrings(got, tc.wantRegs) {
+				t.Fatalf("regressions = %v, want %v (passed=%v)", got, tc.wantRegs, result.Passed)
+			}
+			if got := kinds(result.Warnings); !equalStrings(got, tc.wantWarns) {
+				t.Fatalf("warnings = %v, want %v", got, tc.wantWarns)
+			}
+			if result.Passed {
+				t.Fatal("a candidate that lost its passes must not pass the gate")
+			}
+		})
+	}
+}
+
+func TestGateRatesARepeatedBaselineWithAnErroredTrial(t *testing.T) {
+	// Nine passes and one provider timeout: the nine passes are real, so the
+	// case is gateable. Only a baseline with no pass at all is unmeasured.
+	base := report(2, repeated("a", "error", 10, 9))
+	tests := []struct {
+		name      string
+		cand      bench.CaseResult
+		tolerance float64
+		wantRegs  []string
+	}{
+		{"candidate fails every trial", repeated("a", "failed", 10, 0), 0.1, []string{"a:pass_rate_drop"}},
+		{"candidate holds the rate", repeated("a", "failed", 10, 9), 0, nil},
+		{"candidate within tolerance", repeated("a", "failed", 10, 8), 0.1, nil},
+		{"candidate past tolerance", repeated("a", "failed", 10, 7), 0.1, []string{"a:pass_rate_drop"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := mustCompare(t, base, report(2, tc.cand), Options{Tolerance: tc.tolerance})
+			if got := kinds(result.Regressions); !equalStrings(got, tc.wantRegs) {
+				t.Fatalf("regressions = %v, want %v", got, tc.wantRegs)
+			}
+			for _, w := range result.Warnings {
+				if w.Kind == KindBaselineUnmeasured {
+					t.Fatalf("a baseline with 9 passes is measured, got %+v", w)
+				}
+			}
+		})
+	}
+
+	t.Run("a baseline with no pass stays unmeasured", func(t *testing.T) {
+		none := report(2, repeated("a", "error", 10, 0), passing("b"))
+		result := mustCompare(t, none, report(2, repeated("a", "failed", 10, 0), passing("b")), Options{Tolerance: 0.1})
+		if !result.Passed || !equalStrings(kinds(result.Warnings), []string{"a:baseline_unmeasured"}) {
+			t.Fatalf("passed=%v warnings=%v", result.Passed, kinds(result.Warnings))
+		}
+	})
+}
+
+// A provider timeout in one trial of ten is the same loss of one pass as one
+// failed trial of ten, so the tolerance has to treat them alike.
+func TestGateToleratesOneErroredTrialLikeOneFailedTrial(t *testing.T) {
+	base := report(2, repeated("a", "passed", 10, 10))
+	for _, tolerance := range []float64{0, 0.1} {
+		failed := mustCompare(t, base, report(2, repeated("a", "failed", 10, 9)), Options{Tolerance: tolerance})
+		errored := mustCompare(t, base, report(2, repeated("a", "error", 10, 9)), Options{Tolerance: tolerance})
+		if failed.Passed != errored.Passed || !equalStrings(kinds(failed.Regressions), kinds(errored.Regressions)) {
+			t.Errorf("tolerance %g: one failed trial gives %v, one errored trial gives %v",
+				tolerance, kinds(failed.Regressions), kinds(errored.Regressions))
+		}
+	}
+	// Within tolerance the error is not a regression, and it is not silent.
+	result := mustCompare(t, base, report(2, repeated("a", "error", 10, 9)), Options{Tolerance: 0.1})
+	if !result.Passed {
+		t.Fatalf("one errored trial in ten is within tolerance 0.1: %+v", result.Regressions)
+	}
+	if got := kinds(result.Warnings); !equalStrings(got, []string{"a:candidate_errored"}) {
+		t.Fatalf("warnings = %v, want the errored trial reported", got)
+	}
+}
+
+func TestGateRegressesACandidateThatReachedNoVerdictOnAPartlyPassingBaseline(t *testing.T) {
+	// The baseline passed 9 of 10, so the candidate has something to lose even
+	// when the tolerance is wide enough to allow a drop to zero.
+	base := report(2, repeated("a", "failed", 10, 9))
+	result := mustCompare(t, base, report(2, repeated("a", "error", 10, 0)), Options{Tolerance: 1})
+	if got := kinds(result.Regressions); !equalStrings(got, []string{"a:candidate_unmeasured"}) {
+		t.Fatalf("regressions = %v", got)
+	}
+	if !strings.Contains(result.Regressions[0].Detail, "provider timeout") {
+		t.Fatalf("detail %q must carry the error", result.Regressions[0].Detail)
+	}
+}
+
+func TestGateWarnsWhenACandidateErrorsOnACaseTheBaselineAlreadyFailed(t *testing.T) {
+	// There was no pass to lose, so this is not a regression, but a candidate
+	// that cannot run a case must not be silent either.
+	for name, base := range map[string]bench.CaseResult{
+		"single trial": failing("a", "x"),
+		"repeated":     repeated("a", "failed", 10, 0),
+	} {
+		t.Run(name, func(t *testing.T) {
+			cand := repeated("a", "error", base.Trials, 0)
+			result := mustCompare(t, report(2, base), report(2, cand), Options{})
+			if !result.Passed {
+				t.Fatalf("regressions = %v", kinds(result.Regressions))
+			}
+			if got := kinds(result.Warnings); !equalStrings(got, []string{"a:candidate_errored"}) {
+				t.Fatalf("warnings = %v", got)
+			}
+		})
+	}
+}
+
+// A mixed case (some trials passed, one errored) is still compared on the
+// safety counters its trials recorded. An errored trial must not switch off
+// extra_mutations or new_violation for the trials that completed, or the
+// verdict would depend on whether a provider timed out somewhere in the case.
+func TestGateComparesSafetyCountersOfACandidateWithAnErroredTrial(t *testing.T) {
+	base := report(2, repeated("a", "passed", 10, 10))
+	cand := repeated("a", "error", 10, 9)
+	cand.Mutations, cand.SuccessfulViolations = 4, 1
+	cand.Trajectory = nil // the first trial errored early, so its trajectory is truncated
+	result := mustCompare(t, base, report(2, cand), Options{Tolerance: 0.1, Trajectory: TrajectoryFail})
+	want := []string{"a:extra_mutations", "a:new_violation"}
+	if got := kinds(result.Regressions); !equalStrings(got, want) {
+		t.Fatalf("regressions = %v, want %v", got, want)
 	}
 }

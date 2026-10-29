@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"slices"
@@ -46,22 +47,36 @@ const execKillGrace = 500 * time.Millisecond
 // dispatcher still authorizes and executes them, so what a run is allowed to do
 // does not depend on the agent being well behaved.
 //
-// The process is started once per turn so that nothing survives between turns
-// except the history it is sent. That is what makes a run resumable on another
-// machine, and what keeps a crashed agent from taking the run's state with it.
+// The process is started once per turn so that the agent carries nothing between
+// turns except the history it is sent. That is what makes a run resumable on
+// another machine, and what keeps a crashed agent from taking the run's state
+// with it. Every turn ends by killing the agent's whole process group (unix), so
+// a process the agent started and left in its group does not outlive the turn,
+// and on Linux the agent is also killed if Twinwright dies mid-turn. A process
+// that left the group (setsid, a daemon) is not reached.
 type ExecProvider struct {
 	// Command is the argv of the agent. It is never passed to a shell.
 	Command []string
 	// Env holds NAME=value pairs for the child. The child environment is exactly
-	// these plus PATH and HOME from this process, so provider keys, database
-	// addresses and anything else in the operator's environment stay behind
-	// unless they were named on purpose.
+	// these plus PATH and HOME from this process (and ClientEnv, when set), so
+	// provider keys, database addresses and anything else in the operator's
+	// environment stay behind unless they were named on purpose.
 	Env []string
 	// Timeout is the deadline of one turn. Zero means DefaultCallTimeout.
 	Timeout time.Duration
 	// Wrap, when set, rewrites the argv before it is run. Container mode uses it
 	// to put the agent behind `docker run`; nil runs Command directly.
 	Wrap func(argv []string) []string
+	// Cleanup, when set, is called with the argv that Wrap returned after a turn
+	// was ended by a timeout, a cancellation or an output overflow and the process
+	// group was killed. Container mode uses it to remove the container, which
+	// Docker does not stop when its client dies.
+	Cleanup func(ctx context.Context, wrapped []string)
+	// ClientEnv names variables of this process that are passed to the wrapped
+	// process (the docker client in container mode) and to nothing else: the agent
+	// inside the container gets only what Wrap passes it by name. Names that are
+	// not set are skipped. The values are masked like the passed ones.
+	ClientEnv []string
 }
 
 // execRequest is the document an agent reads from stdin.
@@ -90,7 +105,19 @@ type execResponse struct {
 	Protocol  *string         `json:"protocol"`
 	Content   *string         `json:"content"`
 	ToolCalls *[]execToolCall `json:"tool_calls"`
-	Usage     *Usage          `json:"usage,omitempty"`
+	// RawUsage is usage as it was written, so that null can be told from absent
+	// and the counts can be required: the schema says that a usage that is there
+	// is an object with all three. decodeExecResponse checks it and fills usage.
+	RawUsage json.RawMessage `json:"usage,omitempty"`
+	usage    *Usage
+}
+
+// execUsage is usage as it is decoded, with a pointer per count so that a count
+// that is missing is not read as zero.
+type execUsage struct {
+	InputTokens  *int `json:"input_tokens"`
+	OutputTokens *int `json:"output_tokens"`
+	TotalTokens  *int `json:"total_tokens"`
 }
 
 // execToolCall is a proposed call, with the same presence rule as execResponse.
@@ -165,7 +192,39 @@ func decodeExecResponse(raw []byte, out *execResponse) error {
 			return fmt.Errorf("agent tool call %d is missing %q (use {} when there are none)", i, "arguments")
 		}
 	}
+	if out.RawUsage != nil {
+		usage, err := decodeExecUsage(out.RawUsage)
+		if err != nil {
+			return err
+		}
+		out.usage = usage
+	}
 	return nil
+}
+
+// decodeExecUsage reads the usage object the way the response schema describes
+// it: an object with all three counts and nothing else. It is optional, so a
+// response without one is fine, but one that is there and null, empty or short is
+// a mistake that would otherwise be recorded as zeros.
+func decodeExecUsage(raw json.RawMessage) (*Usage, error) {
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil, fmt.Errorf("agent response %q must be an object with input_tokens, output_tokens and total_tokens, not null (leave it out when there are no counts)", "usage")
+	}
+	var counts execUsage
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&counts); err != nil {
+		return nil, fmt.Errorf("agent response %q does not follow the protocol: %w", "usage", err)
+	}
+	switch {
+	case counts.InputTokens == nil:
+		return nil, fmt.Errorf("agent response %q is missing %q", "usage", "input_tokens")
+	case counts.OutputTokens == nil:
+		return nil, fmt.Errorf("agent response %q is missing %q", "usage", "output_tokens")
+	case counts.TotalTokens == nil:
+		return nil, fmt.Errorf("agent response %q is missing %q", "usage", "total_tokens")
+	}
+	return &Usage{InputTokens: *counts.InputTokens, OutputTokens: *counts.OutputTokens, TotalTokens: *counts.TotalTokens}, nil
 }
 
 // Next runs the agent for one turn.
@@ -202,16 +261,20 @@ func (p ExecProvider) Next(ctx context.Context, task string, history []Message, 
 	defer cancel()
 
 	stdout := &boundedBuffer{limit: MaxAgentOutputBytes, exceeded: make(chan struct{})}
-	stderr := &tailBuffer{max: maxAgentStderrBytes}
+	spellings := secretSpellings(secrets)
+	stderr := newTailBuffer(maxAgentStderrBytes, spellings)
 	// fail renders an error the way it may be stored: with the tail of stderr,
 	// which is where an agent's own diagnosis is, and with every passed secret
 	// and key-like token masked, since both end up in the ledger and the logs.
+	// The tail is masked before it is quoted, because quoting rewrites a quote, a
+	// backslash and a control character and so turns the value into text the mask
+	// no longer matches; the whole text is masked again at the end.
 	fail := func(format string, args ...any) error {
 		text := fmt.Sprintf(format, args...)
-		if tail := stderr.String(); tail != "" {
+		if tail := stderr.Tail(); tail != "" {
 			text += "; stderr (last " + strconv.Itoa(maxAgentStderrBytes) + " bytes): " + strconv.Quote(tail)
 		}
-		return errors.New(redact.String(text, secrets...))
+		return errors.New(redact.String(maskSpellings(text, spellings)))
 	}
 
 	cmd := exec.Command(argv[0], argv[1:]...)
@@ -220,13 +283,16 @@ func (p ExecProvider) Next(ctx context.Context, task string, history []Message, 
 	// Bounds how long Wait lingers on output pipes that a process the agent
 	// started is still holding after the agent itself has gone.
 	cmd.WaitDelay = execKillGrace
+	// The kernel's parent-death signal belongs to the thread that starts the
+	// child, so the thread is held until the turn is over.
+	defer holdThread()()
 	setProcessGroup(cmd)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return Message{}, fail("prepare agent: %v", err)
 	}
 	if err = cmd.Start(); err != nil {
-		return Message{}, fail("start agent: %v", err)
+		return Message{}, fail("start agent: %s", startFailure(err))
 	}
 	// Written from a goroutine so that an agent which never reads cannot block
 	// the turn on a full pipe. Its errors are the agent having exited or been
@@ -241,11 +307,18 @@ func (p ExecProvider) Next(ctx context.Context, task string, history []Message, 
 	var waitErr error
 	select {
 	case waitErr = <-waited:
+		// The agent has been reaped, but what it started may not have gone. The
+		// group outlives its leader while any member runs, so this reaches a
+		// helper left behind by a turn that succeeded and one that holds the
+		// output open (the ErrWaitDelay failure below) alike.
+		killProcessGroup(cmd)
 	case <-stdout.exceeded:
 		stopProcessGroup(cmd, waited)
+		p.removeContainer(ctx, argv)
 		return Message{}, fail("agent output exceeded %d bytes", MaxAgentOutputBytes)
 	case <-attemptCtx.Done():
 		stopProcessGroup(cmd, waited)
+		p.removeContainer(ctx, argv)
 		if err = ctx.Err(); err != nil {
 			return Message{}, err
 		}
@@ -275,12 +348,22 @@ func (p ExecProvider) Next(ctx context.Context, task string, history []Message, 
 		return Message{}, fail("agent produced no output; it must write one JSON object to stdout")
 	}
 	var response execResponse
-	if err = decodeExecResponse([]byte(maskSecrets(string(output), secrets)), &response); err != nil {
+	// The response is decoded as the agent wrote it, and only the decoded strings
+	// are masked. Rewriting the bytes first would let a passed value break a valid
+	// document (the digits of a number) or miss one the agent encoded its own way
+	// (\u escapes, which is what Python writes).
+	if err = decodeExecResponse(output, &response); err != nil {
 		return Message{}, fail("%v", err)
 	}
-	message := Message{Role: "assistant", Content: *response.Content, Usage: response.Usage}
+	message := Message{Role: "assistant", Content: maskSpellings(*response.Content, spellings), Usage: response.usage}
 	for _, call := range *response.ToolCalls {
-		message.ToolCalls = append(message.ToolCalls, ToolCall{ID: *call.ID, OperationID: *call.OperationID, Arguments: *call.Arguments})
+		message.ToolCalls = append(message.ToolCalls, ToolCall{
+			ID:          maskSpellings(*call.ID, spellings),
+			OperationID: maskSpellings(*call.OperationID, spellings),
+			// Masked before the runner dispatches it, so a passed value used as an
+			// argument is masked in the ledger and is not what the tool receives.
+			Arguments: maskDecoded(*call.Arguments, spellings).(map[string]any),
+		})
 	}
 	if message.Content == "" && len(message.ToolCalls) == 0 {
 		return Message{}, fail("agent response has no content and no tool calls")
@@ -289,7 +372,13 @@ func (p ExecProvider) Next(ctx context.Context, task string, history []Message, 
 }
 
 // childEnvironment builds the agent's environment and the values to mask.
+//
+// The environment is never nil. os/exec reads a nil Env as "use this process's
+// environment", so a process with neither PATH nor HOME and nothing passed would
+// hand the agent every provider key and database address it holds. An empty,
+// non-nil slice is how an empty environment is asked for.
 func (p ExecProvider) childEnvironment() (env, secrets []string, err error) {
+	env = []string{}
 	passed := map[string]bool{}
 	for _, pair := range p.Env {
 		name, value, ok := strings.Cut(pair, "=")
@@ -308,23 +397,56 @@ func (p ExecProvider) childEnvironment() (env, secrets []string, err error) {
 			env = append(env, name+"="+value)
 		}
 	}
+	// The wrapped process, the docker client in container mode, finds its daemon
+	// through its own environment. These reach it and nothing else, and are masked
+	// like the passed values, since a daemon's address is not the agent's to print.
+	for _, pair := range parentEnv(p.ClientEnv...) {
+		name, value, _ := strings.Cut(pair, "=")
+		if !passed[name] {
+			env = append(env, pair)
+			secrets = append(secrets, value)
+		}
+	}
 	return append(env, p.Env...), secrets, nil
 }
 
-// maskSecrets hides each secret in s, both as written and as it appears inside
-// a JSON string, which is where an agent's answer carries it. The result is
-// still valid JSON: the replacement has no characters that need escaping.
-func maskSecrets(s string, secrets []string) string {
-	for _, secret := range secrets {
-		if len(secret) < 8 {
-			continue
-		}
-		s = redact.Secrets(s, secret)
-		if encoded, err := json.Marshal(secret); err == nil {
-			s = redact.Secrets(s, string(encoded[1:len(encoded)-1]))
+// parentEnv returns NAME=value for each of the given names that is set in this
+// process's environment, in the order given.
+func parentEnv(names ...string) []string {
+	var pairs []string
+	for _, name := range names {
+		if value, ok := os.LookupEnv(name); ok {
+			pairs = append(pairs, name+"="+value)
 		}
 	}
-	return s
+	return pairs
+}
+
+// startFailure says why an agent could not be started without saying what was
+// being started. os/exec names the program in its error ("fork/exec /home/me/agent:
+// no such file or directory"), and the program is how the operator started the
+// agent, which the ledger is not to record: only the operating system's reason is
+// kept.
+func startFailure(err error) string {
+	const prefix = "the agent command could not be started"
+	var pathErr *fs.PathError
+	var execErr *exec.Error
+	switch {
+	case errors.As(err, &pathErr):
+		return prefix + ": " + pathErr.Err.Error()
+	case errors.As(err, &execErr):
+		return prefix + ": " + execErr.Err.Error()
+	}
+	return prefix
+}
+
+// removeContainer runs the provider's Cleanup, if it has one, for a turn that was
+// cut short and whose process group has been killed. wrapped is the argv that
+// was run.
+func (p ExecProvider) removeContainer(ctx context.Context, wrapped []string) {
+	if p.Cleanup != nil {
+		p.Cleanup(ctx, wrapped)
+	}
 }
 
 // stopProcessGroup ends a process group that has overrun, and reaps it.
@@ -388,31 +510,101 @@ func (b *boundedBuffer) Bytes() []byte {
 	return slices.Clone(b.buf.Bytes())
 }
 
-// tailBuffer keeps the last max bytes written to it.
+// tailBuffer keeps the end of what is written to it, for the error text of a
+// failed turn.
+//
+// What is reported is the last window bytes, but masking has to see a passed
+// value whole, so it keeps the longest spelling of a secret beyond the window and
+// masks before it cuts. A value that straddles the start of the window is then
+// still a whole value to the mask, and what is cut away is only ever masked
+// text. The value that straddles the start of what is kept is the one case the
+// mask cannot see whole, and it ends before the window begins, because it is no
+// longer than the extra that is kept.
 type tailBuffer struct {
-	mu  sync.Mutex
-	max int
-	buf []byte
+	mu       sync.Mutex
+	window   int
+	keep     int
+	spelling []string
+	buf      []byte
+}
+
+// newTailBuffer keeps the last window bytes, masking the given spellings (see
+// secretSpellings) of the values that must not appear in them.
+func newTailBuffer(window int, spellings []string) *tailBuffer {
+	extra := 0
+	for _, spelling := range spellings {
+		extra = max(extra, len(spelling))
+	}
+	return &tailBuffer{window: window, keep: window + extra, spelling: spellings}
 }
 
 func (b *tailBuffer) Write(p []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	written := len(p)
-	if len(p) > b.max {
-		p = p[len(p)-b.max:]
+	if len(p) > b.keep {
+		p = p[len(p)-b.keep:]
 	}
 	b.buf = append(b.buf, p...)
-	if len(b.buf) > b.max {
-		b.buf = append(b.buf[:0], b.buf[len(b.buf)-b.max:]...)
+	if len(b.buf) > b.keep {
+		b.buf = append(b.buf[:0], b.buf[len(b.buf)-b.keep:]...)
 	}
 	return written, nil
 }
 
-// String returns the kept tail as text. A cut that fell inside a multi-byte
-// character is replaced rather than printed as invalid UTF-8.
-func (b *tailBuffer) String() string {
+// Tail returns the end of what was written, as text that is safe to quote:
+// every spelling of a passed value is masked in what is kept, and only then is
+// the last window bytes taken.
+//
+// Where the window begins inside a masked value, it takes the whole mask, so a
+// value is never shown in part. Where it begins part way through a line, the
+// first, partial line is dropped, so the text starts where a line starts. A cut
+// that fell inside a multi-byte character is replaced rather than printed as
+// invalid UTF-8.
+func (b *tailBuffer) Tail() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return strings.TrimSpace(strings.ToValidUTF8(string(b.buf), "?"))
+	// Masking overwrites a spelling with zero bytes of the same length, so the
+	// window can be chosen in the original offsets and each run of zeros is made
+	// into one mask afterwards. A zero byte the agent really wrote is not one.
+	text := slices.Clone(b.buf)
+	for i, c := range text {
+		if c == 0 {
+			text[i] = '?'
+		}
+	}
+	for _, spelling := range b.spelling {
+		needle := []byte(spelling)
+		for from := 0; ; {
+			i := bytes.Index(text[from:], needle)
+			if i < 0 {
+				break
+			}
+			clear(text[from+i : from+i+len(needle)])
+			from += i + len(needle)
+		}
+	}
+	start := max(0, len(text)-b.window)
+	for start > 0 && text[start] == 0 && text[start-1] == 0 {
+		start--
+	}
+	partial := start > 0 && text[start-1] != '\n'
+
+	var out strings.Builder
+	for i := start; i < len(text); {
+		if text[i] != 0 {
+			out.WriteByte(text[i])
+			i++
+			continue
+		}
+		out.WriteString(redacted)
+		for i < len(text) && text[i] == 0 {
+			i++
+		}
+	}
+	tail := out.String()
+	if newline := strings.IndexByte(tail, '\n'); partial && newline >= 0 {
+		tail = tail[newline+1:]
+	}
+	return strings.TrimSpace(strings.ToValidUTF8(tail, "?"))
 }

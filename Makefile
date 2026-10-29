@@ -19,11 +19,13 @@ build: ## build the CLI into ./twinwright
 	go build -o twinwright ./cmd/twinwright
 
 .PHONY: demo
-demo: build ## run the 12-step scripted demo in a temporary directory (no network, no keys)
-	./twinwright demo --dir "$$(mktemp -d)/demo"
+demo: build ## run the 12-step scripted demo in a temporary directory, removed when it succeeds (no network, no keys)
+	@dir="$$(mktemp -d)"; \
+	if ./twinwright demo --dir "$$dir/demo"; then rm -rf "$$dir"; echo "make demo: removed the temporary demo directory (run twinwright demo --dir DIR to keep one)"; \
+	else rc=$$?; echo "make demo: the demo failed; its directory was kept at $$dir/demo" >&2; exit $$rc; fi
 
 .PHONY: demo-stack
-demo-stack: ## start the Compose stack and run the fleet, takeover and observability demo against it
+demo-stack: ## start the Compose stack and run the fleet, takeover and observability demo against it (TW_DEMO_PG_PORT sets PostgreSQL's host port, default 5432)
 	./scripts/demo-stack.sh
 
 .PHONY: fmt
@@ -70,13 +72,14 @@ bench-smoke: ## run every benchmark once, to prove they still compile and pass
 	go test -run '^$$' -bench . -benchtime=1x -timeout 900s ./internal/store ./internal/worker ./internal/replay
 
 .PHONY: perf
-perf: ## measure the platform workloads on SQLite into perf.json (results are documented in docs/performance.md)
-	go run ./cmd/twinwright perf --out perf.json
+perf: build ## measure the platform workloads on SQLite into perf.json (results are documented in docs/performance.md)
+	./twinwright perf --out perf.json
 
 .PHONY: gate
 gate: build ## bench the scripted suite and gate it against the approved baseline
-	./twinwright bench --suite standard --agent scripted --examples examples --out bench-candidate.json > /dev/null
-	./twinwright gate --baseline examples/bench/baselines/standard-scripted.json --candidate bench-candidate.json
+	dir="$$(mktemp -d)" && trap 'rm -rf "$$dir"' EXIT && \
+	  ./twinwright bench --suite standard --agent scripted --examples examples --out "$$dir/candidate.json" > /dev/null && \
+	  ./twinwright gate --baseline examples/bench/baselines/standard-scripted.json --candidate "$$dir/candidate.json"
 
 .PHONY: live-model
 live-model: ## run a local Ollama model on the billing world and replay it (needs TW_LIVE_MODEL; LIVE_BASE_URL optional)

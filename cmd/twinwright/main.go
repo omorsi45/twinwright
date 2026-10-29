@@ -310,7 +310,7 @@ func runCLI(args []string, out io.Writer) error {
 		if *model != "" && *model != run.Model {
 			return fmt.Errorf("model mismatch: run uses %s", run.Model)
 		}
-		provider, err := selectProvider(providerCfg.with(run.Provider, run.Model, run.Scenario))
+		provider, err := selectProvider(providerCfg.forRun(run.Provider, run.Model, run.Scenario))
 		if err != nil {
 			return err
 		}
@@ -422,7 +422,14 @@ func runCLI(args []string, out io.Writer) error {
 			if options.Model != "" {
 				modelForRun = options.Model
 			}
-			provider, err = selectProvider(providerCfg.with(providerNameForRun, modelForRun, parent.Scenario))
+			// A provider named with --agent is the operator's choice, and agent flags
+			// that cannot apply to it are refused; one inherited from the parent run
+			// gets the agent flags only if it is exec.
+			chosen := providerCfg.forRun(providerNameForRun, modelForRun, parent.Scenario)
+			if options.Provider != "" {
+				chosen = providerCfg.with(providerNameForRun, modelForRun, parent.Scenario)
+			}
+			provider, err = selectProvider(chosen)
 			if err != nil {
 				return err
 			}
@@ -651,8 +658,19 @@ func runCLI(args []string, out io.Writer) error {
 			return err
 		}
 		defer source.Close()
+		parent, err := source.Run(ctx, args[1])
+		if err != nil {
+			return err
+		}
 		analysis, err := counterfactual.Prepare(ctx, source, args[1], manifest, set, judge, counterfactual.Options{Trials: *trials, Steps: *steps, ProviderFor: func(provider, model, scenario string) (agent.Provider, error) {
-			p, err := selectProvider(providerCfg.with(provider, model, scenario))
+			// The run's own provider is recorded, so the agent flags apply to it only
+			// if it is exec. A different one was named by an intervention, which is the
+			// operator's choice, and flags that cannot apply to it are refused.
+			cfg := providerCfg.with(provider, model, scenario)
+			if provider == parent.Provider {
+				cfg = providerCfg.forRun(provider, model, scenario)
+			}
+			p, err := selectProvider(cfg)
 			if err != nil {
 				return nil, err
 			}
@@ -686,6 +704,12 @@ func runCLI(args []string, out io.Writer) error {
 		trials := fs.Int("trials", 1, "times each local case runs; a case's own trials field wins")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
+		}
+		// The flag parser stops at the first argument that is not a flag, so a
+		// positional one would silently drop every flag after it and run the
+		// defaults instead.
+		if fs.NArg() > 0 {
+			return fmt.Errorf("bench takes no positional arguments, got %q (choose a suite with --suite NAME)", fs.Arg(0))
 		}
 		if *trials < 1 {
 			return fmt.Errorf("--trials must be positive, got %d", *trials)
@@ -742,7 +766,14 @@ func runCLI(args []string, out io.Writer) error {
 				return err
 			}
 		}
-		return emit(out, report)
+		if err := emit(out, report); err != nil {
+			return err
+		}
+		// A run in which no case reached a verdict measured nothing. The report
+		// is still printed and written, so each case's error can be read, but the
+		// command must not look like a success: a missing credential would
+		// otherwise produce a report that is easy to commit as a baseline.
+		return benchMeasuredNothing(report)
 	case "shadow":
 		fs := flag.NewFlagSet("shadow", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
@@ -899,7 +930,7 @@ func runCLI(args []string, out io.Writer) error {
 		dbPath := fs.String("db", "twinwright.db", "SQLite path or postgres:// DSN")
 		format := fs.String("format", "json", "json, text, or otlp")
 		otlpEndpoint := fs.String("otlp-endpoint", os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"), "POST the spans to this OpenTelemetry collector instead of printing them")
-		otlpHeader := fs.String("otlp-header", "", "extra request header for the collector, as Name: value")
+		otlpHeader := fs.String("otlp-header", "", "extra request header for the collector, as Name: value; with none, OTEL_EXPORTER_OTLP_HEADERS (name=value,...) is used, which keeps a credential out of the process listing")
 		if err := fs.Parse(args[2:]); err != nil {
 			return err
 		}
@@ -925,13 +956,16 @@ func runCLI(args []string, out io.Writer) error {
 			if *otlpEndpoint != "" {
 				// Delivering the spans, not just formatting them: the
 				// collector's status code is what makes the export verifiable.
-				headers, err := parseOTLPHeader(*otlpHeader)
+				headers, err := resolveOTLPHeaders(*otlpHeader)
 				if err != nil {
 					return err
 				}
+				// The endpoint can carry userinfo or a query token, so the
+				// report and the error pass through the same scrubbing the
+				// worker applies before it logs one.
 				delivery, err := trace.Exporter{Endpoint: *otlpEndpoint, Headers: headers}.Export(ctx, built)
 				if err != nil {
-					return err
+					return exportErrorScrubber(*otlpEndpoint, headers)(err)
 				}
 				return emit(out, delivery)
 			}
@@ -957,7 +991,7 @@ func runCLI(args []string, out io.Writer) error {
 		if err := fs.Parse(args[2:]); err != nil {
 			return err
 		}
-		s, err := store.OpenDSN(ctx, *dbPath)
+		s, err := openForReading(ctx, *dbPath, store.SchemaVersionLedger, "inspection")
 		if err != nil {
 			return err
 		}
@@ -1090,6 +1124,22 @@ func addSecurity(ctx context.Context, result map[string]any, s *store.Store, run
 	return nil
 }
 func emit(out io.Writer, value any) error { return json.NewEncoder(out).Encode(value) }
+
+// benchMeasuredNothing is the error for a bench report in which every case
+// errored, naming the first one, and nil otherwise. A run with some verdicts
+// stays a success: its errored cases are counted in the summary.
+func benchMeasuredNothing(report bench.Report) error {
+	if len(report.Cases) == 0 {
+		return nil
+	}
+	for _, c := range report.Cases {
+		if c.Status != "error" {
+			return nil
+		}
+	}
+	first := report.Cases[0]
+	return fmt.Errorf("bench: every case errored, so the report measured nothing; the first error was in case %q: %s", first.ID, first.Error)
+}
 
 func looksLikeBenchReport(path string) bool {
 	data, err := os.ReadFile(path)

@@ -1710,6 +1710,32 @@ cases:
 	}
 }
 
+// Go's flag parser stops at the first argument that is not a flag, so a
+// positional argument (the shape `run <scenario>` teaches) silently dropped
+// every flag after it: `bench standard --agent openai --trials 10 --out c.json`
+// ran the scripted agent, one trial, wrote no report and exited 0. The gate
+// refuses positionals for the same reason.
+func TestBenchRefusesPositionalArguments(t *testing.T) {
+	examples := filepath.Join("..", "..", "examples")
+	dir := t.TempDir()
+	reportPath := filepath.Join(dir, "report.json")
+	var out bytes.Buffer
+	err := runCLI([]string{"bench", "standard", "--suite", "does-not-exist", "--examples", examples,
+		"--db-dir", filepath.Join(dir, "dbs"), "--trials", "10", "--out", reportPath}, &out)
+	if err == nil {
+		t.Fatalf("a positional argument was accepted and the flags after it dropped:\n%s", out.String())
+	}
+	if !strings.Contains(err.Error(), "positional") || !strings.Contains(err.Error(), `"standard"`) {
+		t.Fatalf("error %q must say positional arguments are refused and name the argument", err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("nothing may run before the arguments are refused, got output:\n%s", out.String())
+	}
+	if _, statErr := os.Stat(reportPath); !os.IsNotExist(statErr) {
+		t.Fatalf("a report was written: %v", statErr)
+	}
+}
+
 func TestBenchCLIRefusesNonPositiveTrials(t *testing.T) {
 	examples := filepath.Join("..", "..", "examples")
 	for _, value := range []string{"0", "-1"} {
@@ -1717,6 +1743,55 @@ func TestBenchCLIRefusesNonPositiveTrials(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "--trials must be positive") {
 			t.Errorf("--trials %s: err=%v want an error naming --trials", value, err)
 		}
+	}
+}
+
+// A bench run in which no case reached a verdict measured nothing. Run without
+// credentials, every case errors in the provider lookup and the run used to exit
+// 0 with a report that looked like any other, which is how an unusable baseline
+// gets committed. The command must fail and name the first error, and the gate
+// must refuse the report it wrote.
+func TestBenchExitsNonZeroWhenEveryCaseErrored(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "")
+	examples := filepath.Join("..", "..", "examples")
+	dir := t.TempDir()
+	suitePath := filepath.Join(dir, "tiny.yaml")
+	suiteYAML := []byte(`
+version: 1
+suite: tiny
+cases:
+  - id: billing-duplicate
+    category: reasoning
+    world: billing
+    scenario: duplicate-charge
+    assertions: assertions/duplicate-charge.yaml
+    dimensions: [task]
+`)
+	if err := os.WriteFile(suitePath, suiteYAML, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reportPath := filepath.Join(dir, "report.json")
+	var out bytes.Buffer
+	err := runCLI([]string{"bench", "--suite-file", suitePath, "--examples", examples, "--agent", "openai", "--model", "any-model",
+		"--db-dir", filepath.Join(dir, "dbs"), "--out", reportPath}, &out)
+	if err == nil {
+		t.Fatalf("a bench in which every case errored exited 0:\n%s", out.String())
+	}
+	if got := exitCode(err); got != 1 {
+		t.Fatalf("exit code = %d, want 1 (the gate's 2 means bad input to the gate)", got)
+	}
+	for _, want := range []string{"billing-duplicate", "OPENAI_API_KEY is required for openai"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q must name %q", err, want)
+		}
+	}
+
+	// The report is still written, so each case's error can be read, but it is
+	// not a usable baseline.
+	good := writeGateReport(t, dir, "good.json", "tiny", "passed")
+	gateErr := runCLI([]string{"gate", "--baseline", reportPath, "--candidate", good}, &bytes.Buffer{})
+	if got := exitCode(gateErr); got != 2 {
+		t.Fatalf("gate exit = %d (%v), want 2 for a baseline in which nothing was measured", got, gateErr)
 	}
 }
 
@@ -1760,6 +1835,10 @@ func TestGateExitCodes(t *testing.T) {
 	if err := os.WriteFile(empty, []byte(`{"suite":"standard","schema_version":2,"cases":[]}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// A baseline in which every case errored, as a bench without credentials
+	// writes, gates nothing just as an empty one does.
+	errored := writeGateReport(t, dir, "errored.json", "standard", "error")
+	unknownStatus := writeGateReport(t, dir, "unknown-status.json", "standard", "skipped")
 	tests := []struct {
 		name string
 		args []string
@@ -1767,6 +1846,8 @@ func TestGateExitCodes(t *testing.T) {
 	}{
 		{"identical reports", []string{"--baseline", good, "--candidate", good}, 0},
 		{"empty baseline", []string{"--baseline", empty, "--candidate", good}, 2},
+		{"baseline with no measured case", []string{"--baseline", errored, "--candidate", good}, 2},
+		{"candidate case with a status the gate does not know", []string{"--baseline", good, "--candidate", unknownStatus}, 2},
 		{"regression", []string{"--baseline", good, "--candidate", bad}, 1},
 		{"missing candidate file", []string{"--baseline", good, "--candidate", filepath.Join(dir, "absent.json")}, 2},
 		{"missing baseline file", []string{"--baseline", filepath.Join(dir, "absent.json"), "--candidate", good}, 2},
@@ -2117,6 +2198,7 @@ func TestSelectProviderDoesNotOpenARecording(t *testing.T) {
 // collectedPost is one request a test collector received.
 type collectedPost struct {
 	Path   string
+	Query  string
 	Header http.Header
 	Body   []byte
 }
@@ -2130,14 +2212,21 @@ type testCollector struct {
 }
 
 func newTestCollector(t *testing.T, status int) *testCollector {
+	return newTestCollectorWithBody(t, status, "")
+}
+
+// newTestCollectorWithBody answers every request with status and body, as a
+// collector reporting a partial success does.
+func newTestCollectorWithBody(t *testing.T, status int, body string) *testCollector {
 	t.Helper()
 	c := &testCollector{}
 	c.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
+		posted, _ := io.ReadAll(r.Body)
 		c.mu.Lock()
-		c.posts = append(c.posts, collectedPost{Path: r.URL.Path, Header: r.Header.Clone(), Body: body})
+		c.posts = append(c.posts, collectedPost{Path: r.URL.Path, Query: r.URL.RawQuery, Header: r.Header.Clone(), Body: posted})
 		c.mu.Unlock()
 		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
 	}))
 	t.Cleanup(c.Close)
 	return c
@@ -2183,12 +2272,12 @@ func traceIDs(t *testing.T, post collectedPost) []string {
 // workerOutcome mirrors the fields of worker.Outcome these tests read, so the
 // test decodes the JSON the operator sees rather than the Go struct.
 type workerOutcome struct {
-	WorkerID      string `json:"worker_id"`
-	RunID         string `json:"run_id"`
-	Disposition   string `json:"disposition"`
-	RunStatus     string `json:"run_status"`
-	TraceID       string `json:"trace_id"`
-	TraceExported bool   `json:"trace_exported"`
+	WorkerID          string `json:"worker_id"`
+	RunID             string `json:"run_id"`
+	Disposition       string `json:"disposition"`
+	RunStatus         string `json:"run_status"`
+	TraceID           string `json:"trace_id"`
+	TraceExportQueued bool   `json:"trace_export_queued"`
 }
 
 // enqueueBillingRun creates a duplicate-charge run on the queue without
@@ -2248,7 +2337,7 @@ func TestWorkerExportsACompletedRunsTrace(t *testing.T) {
 	if outcome.TraceID != wantTraceID {
 		t.Fatalf("outcome trace id=%q want %q", outcome.TraceID, wantTraceID)
 	}
-	if !outcome.TraceExported {
+	if !outcome.TraceExportQueued {
 		t.Fatalf("outcome does not report the export: %+v", outcome)
 	}
 
@@ -2275,7 +2364,7 @@ func TestWorkerExportsACompletedRunsTrace(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, event := range events {
-		for _, banned := range []string{"export-worker", wantTraceID, "otlp", "trace_exported"} {
+		for _, banned := range []string{"export-worker", wantTraceID, "otlp", "trace_exported", "trace_export_queued"} {
 			if strings.Contains(string(event.Payload), banned) || strings.Contains(event.Type, banned) {
 				t.Fatalf("ledger event %d (%s) mentions %q: %s", event.Seq, event.Type, banned, event.Payload)
 			}
@@ -2343,8 +2432,11 @@ func TestWorkerExportFailureDoesNotFailTheRun(t *testing.T) {
 			if outcome.Disposition != "finished" || outcome.RunStatus != "completed" {
 				t.Fatalf("a failed export changed the outcome: %+v", outcome)
 			}
-			if outcome.TraceExported {
-				t.Fatalf("outcome claims an export the collector refused: %+v", outcome)
+			// The outcome is printed when the worker ends, after the export it queued
+			// has finished, but it only says the trace was handed to the exporter;
+			// the refusal is in the worker's log (TestWorkerExportFailureWarnsWithoutLeakingCredentials).
+			if !outcome.TraceExportQueued {
+				t.Fatalf("outcome does not say the export was queued: %+v", outcome)
 			}
 			if outcome.TraceID != trace.TraceIDFor(runID) {
 				t.Fatalf("trace id=%q want %q", outcome.TraceID, trace.TraceIDFor(runID))
@@ -2378,7 +2470,7 @@ func TestWorkerDoesNotExportWithoutTheFlag(t *testing.T) {
 	if len(outcomes) != 1 || outcomes[0].Disposition != "finished" {
 		t.Fatalf("outcomes=%+v", outcomes)
 	}
-	if outcomes[0].TraceExported {
+	if outcomes[0].TraceExportQueued {
 		t.Fatalf("worker exported without --otlp-endpoint: %+v", outcomes[0])
 	}
 	if posts := collector.received(); len(posts) != 0 {
@@ -2423,7 +2515,7 @@ func TestWorkerExportFailureWarnsWithoutLeakingCredentials(t *testing.T) {
 	db := filepath.Join(dir, "world.db")
 	runID := enqueueBillingRun(t, manifestPath, db)
 	outcomes := drainWorker(t, manifestPath, db, "--otlp-endpoint", endpoint, "--otlp-header", "X-Api-Key: "+token)
-	if len(outcomes) != 1 || outcomes[0].Disposition != "finished" || outcomes[0].TraceExported {
+	if len(outcomes) != 1 || outcomes[0].Disposition != "finished" || !outcomes[0].TraceExportQueued {
 		t.Fatalf("outcomes=%+v", outcomes)
 	}
 
@@ -2643,6 +2735,11 @@ func TestInstrumentedWorkerCountsRenewalsAndTimesEveryClaim(t *testing.T) {
 
 // The wiring test above covers the pieces; this one runs the command itself and
 // scrapes the endpoint it serves.
+//
+// The command is handed a listener the test already holds, on a port the system
+// chose, instead of an address the test found free, closed and hoped to find free
+// again: another process could take the port in between, and the command then
+// served nothing while the test waited for a body that never came.
 func TestWorkerMetricsEndpointServesTheCompleteSet(t *testing.T) {
 	dir := t.TempDir()
 	manifestPath := buildBillingManifest(t, dir)
@@ -2652,10 +2749,11 @@ func TestWorkerMetricsEndpointServesTheCompleteSet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = listener.Close() })
 	addr := listener.Addr().String()
-	if err = listener.Close(); err != nil {
-		t.Fatal(err)
-	}
+	previous := listenMetrics
+	listenMetrics = func(string) (net.Listener, error) { return listener, nil }
+	t.Cleanup(func() { listenMetrics = previous })
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)

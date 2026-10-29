@@ -374,12 +374,26 @@ is what it is trusted with, and the answer is deliberately small.
 - Its stdout is read through a 1 MiB limit and strictly: an unknown field, a
   missing or different `protocol`, a missing `content` or `tool_calls`, and data
   after the object are all errors. Its stderr is kept to the last 4 KiB, and that
-  tail, every other error text and the agent's own stdout are masked with the
-  passed values.
+  tail, every other error text and the strings of the agent's decoded answer (the
+  content, and the id, operation and arguments of each call) are masked with the
+  passed values; a value of fewer than 8 characters is never masked. In the tail
+  the values are masked as written, as a JSON string and as a Go quoted string,
+  before the tail is quoted and before it is cut. The answer is masked after it is
+  decoded, never in its bytes, so a value cannot break a valid response and the
+  agent's own escaping does not matter; a value the agent uses as an argument is
+  masked before the call is dispatched, so the tool receives the mask.
 - A turn that overruns its deadline gets SIGTERM, then SIGKILL after 500 ms, to the
-  whole process group, and the child is always waited for.
-- The command line and the environment names are not part of the run, so the
-  ledger records nothing about how the agent was started.
+  whole process group, and the child is always waited for. Every other turn ends
+  with SIGKILL to the group too, so what the agent started and left in its group
+  does not outlive the turn; on Linux the agent is also killed if Twinwright dies
+  mid-turn. A process that left the group, grandchildren of a killed Twinwright
+  and platforms other than unix are not covered.
+- The command line and the environment names are not part of the run, so a run
+  that succeeds records nothing about how the agent was started. An agent that
+  cannot be started fails with the operating system's reason and not the command
+  (`TestExecStartFailureNeverPutsTheCommandInTheLedger`); the stderr tail of an
+  agent that failed after it started is its own text and can name its script, which
+  the masking of passed values and key-like tokens does not cover.
 
 Container mode (`--agent-container`) puts the same process behind
 `docker run --rm -i --read-only --cap-drop ALL --security-opt no-new-privileges
@@ -388,17 +402,19 @@ Container mode (`--agent-container`) puts the same process behind
 `Validate` refuses `host` networking by name, an image that is not an image
 reference (so `--privileged` cannot ride in as one), network, memory and CPU
 values that fail the patterns a sidecar config is held to (shared through
-`internal/container/limits.go`), fewer than one process, an environment entry that
+`internal/container/limits.go`) and a memory or CPU of zero, which docker reads as
+no limit, fewer than one process, an environment entry that
 is not a bare name, and a mount that is relative, missing, not a directory or
 contains a colon.
 
 **Evidence.**
 
 - `internal/agent/exec_test.go` - `TestExecProviderRejectsMisbehavingAgents` runs
-  a real child in fourteen misbehaving modes: not JSON, no output, exit 3 (the
+  a real child in seventeen misbehaving modes: not JSON, no output, exit 3 (the
   error carries the stderr tail with the passed secret masked), an unknown
   response field, a different and a missing protocol, a missing `tool_calls` and
-  `content`, no content and no calls, data after the object, a stdout flood past
+  `content`, no content and no calls, data after the object, a usage that is
+  empty, partial or null, a stdout flood past
   1 MiB, a hang, a hang that ignores SIGTERM, and a hang whose child ignores
   SIGTERM and holds the output pipes. The last four assert the process is gone
   afterwards, including the grandchild, and that the timeout is an interruption
@@ -407,8 +423,30 @@ contains a colon.
   requires the child's environment names to be exactly `HOME`, `PATH` and the
   passed ones. `TestExecProviderMasksPassedSecretsInTheAnswer` and
   `TestExecProviderKeepsOnlyTheTailOfStderr` hold the masking and the 4 KiB bound,
-  and `TestExecProviderDoesNotBlockOnAnAgentThatNeverReads` holds that a 4 MiB
-  request to an agent that never reads does not stall the turn.
+  `TestExecStderrMasksValuesWithEscapedCharacters`, `TestExecStderrMasksAValueCutByTheTail`
+  and `TestExecStderrSecretsNeverReachTheLedger` hold that a passed value holding a
+  quote, a backslash, a newline or a non-ASCII character, written raw, Go-quoted or
+  as JSON and cut or not by the window, is in neither the error text nor the `error`
+  event read back from SQLite after a real run, and
+  `TestExecChildEnvironmentStaysEmptyWithoutPathAndHome` holds that a parent with no
+  `PATH` and no `HOME` gives the agent an empty environment, not its own,
+  `TestExecProviderKillsTheGroupAfterACleanExit` and
+  `TestExecProviderKillsTheGroupOnWaitDelay` hold that a process the agent left in its
+  group is gone when the turn returns, and `TestExecAgentDiesWithTheProcessThatStartedIt`
+  holds that on Linux an agent is gone after the Twinwright that started it is killed
+  with SIGKILL, `TestExecMaskingKeepsTheResponseValid` holds that a passed value that is
+  the digits of a number does not invalidate the response,
+  `TestExecMasksEveryStringOfTheDecodedResponse` and
+  `TestExecMasksValuesHoweverTheAgentEncodedThem` hold that content, ids and arguments at
+  any depth are masked whatever escaping the agent used (`TestExecMasksWhatPythonEncodes`
+  runs the real `json.dumps`), and `TestExecMaskedArgumentsAreWhatTheLedgerAndTheToolSee`
+  holds that a value used as an argument is `[REDACTED]` in the ledger and in the
+  arguments the tool received,
+  and `TestExecProviderTimesOutAnAgentThatNeverReadsALargeRequest` holds that a 4 MiB
+  request to an agent that never reads and never exits does not stall the turn past
+  its deadline, and that the agent is gone afterwards (a synchronous write fails it;
+  `TestExecProviderDoesNotBlockOnAnAgentThatNeverReads` covers only the agent that
+  exits without reading, and a synchronous write passes it).
   `TestExecAgentCannotExceedThePrincipalsPolicy` has an agent ask for a refund its
   principal may not make: the call is answered 403, no refund row exists, and the
   operation was never offered.
@@ -423,20 +461,41 @@ contains a colon.
   holds that `$HOME`, `*.py`, `$(id)` and `a;b|c` stay literal words.
   `TestResumeOfExecRunNeedsTheCommand` runs the CLI end to end and requires the
   resume without the command to fail naming `--agent-command`.
+  `cmd/twinwright/exec_fleet_test.go` holds that a worker given `--agent-command`
+  drains a scripted run and an exec run from one queue, that `resume`, `fork` and
+  `counterfactual` do the same for a scripted parent, and that `run` and `fork --agent`
+  still refuse the agent flags for a provider the operator named.
   `TestSelectProviderRefusesBadContainerConfigurations` and
   `TestSelectProviderWrapsTheAgentInAContainer` hold the container flags through
   the CLI, including that the mount is made absolute.
 - `internal/agent/execcontainer_test.go` - `TestContainerWrapIsHardened` asserts
   the whole argv in order, with and without a mount and with passed names (names
-  only, never values), so adding or reordering a flag changes a test.
-  `TestContainerOptionsRejectBadValues` is twenty-three named refusals, including
-  `host` by name, `container:abc`, an image of `--privileged` and a mount of
-  `<dir>:/etc:rw`.
+  only, never values), so adding or reordering a flag changes a test; the random
+  `--name` is checked for its shape and taken out first, and
+  `TestContainerWrapNamesEachTurnsContainer` holds that two turns never share one.
+  `TestContainerWrapNeverCarriesTheDockerConnectionVariables` holds that none of
+  the daemon connection variables or their values is in the argv.
+  `TestContainerOptionsRejectBadValues` is thirty named refusals, including
+  `host` by name, `container:abc`, an image of `--privileged`, a mount of
+  `<dir>:/etc:rw`, and memory and CPU values of zero in seven spellings (docker
+  reads zero as no limit).
+- `internal/agent/execcontainer_unix_test.go` - a fake docker client on `PATH`
+  records what it is asked. `TestContainerIsRemovedWhenTheTurnIsCutShort` holds that
+  a timeout, an output overflow and a cancellation each end with `docker rm -f` on
+  the name the container was given, `TestContainerIsLeftAloneAfterANormalTurn` that a
+  turn that ends by itself does not, `TestContainerRemovalFailureIsLoggedNotReturned`
+  that a failed removal is logged and the turn's own error stands, and
+  `TestExecContainerClientGetsTheDockerConnectionVariables` that the client's
+  environment has `DOCKER_HOST` and the others while the command line has none.
 - `internal/agent/execcontainer_integration_test.go` - `TestPythonAgentInHardenedContainer`
   runs the reference agent through the hardened command line against a real daemon
   and requires the billing run to pass evaluation, and has an agent inside
-  `--network none` try an outbound TCP connection and requires that it did not
-  connect.
+  `--network none` try an outbound TCP connection and requires that it was blocked
+  with errno 101; a control subtest requires the same probe to connect on the bridge
+  network (it skips with a logged reason on a runner without outbound network).
+  `TestHardenedContainerIsGoneAfterOverflowAndTimeout` requires the container to be
+  gone after a timeout and after an output flood, with a control that shows it still
+  running when the removal is not done. The `docker` job requires the passes by name.
 
 **Known limits.**
 
@@ -452,14 +511,23 @@ contains a colon.
   network access for the agent's own model calls is not limited by Twinwright
   unless the operator chooses `--agent-network none`. On macOS and Windows the
   boundary is the Docker Desktop VM, not the host kernel.
-- A timeout kills the docker client's process group, but Docker does not stop a
-  container when its client dies, and a Python agent running as PID 1 ignores
-  SIGTERM, so a hung containerized agent can keep running until its own process
-  exits. No test covers this; it is stated as a limit, not fixed.
-- `TestPythonAgentInHardenedContainer` is skipped without
+- A turn that ends by a timeout, a cancellation or an output overflow kills the docker
+  client's process group and then runs `docker rm -f` on the turn's container, which
+  has a name of its own (`tw-agent-` and 16 hexadecimal digits), because Docker does not
+  stop a container when its client dies and a Python agent running as PID 1 ignores
+  SIGTERM. The removal is best effort and bounded to 10 seconds, and its failure is
+  logged. A Twinwright that is killed mid-turn leaves the container running until its
+  own process exits.
+- The docker client is given `DOCKER_HOST`, `DOCKER_CONTEXT`, `DOCKER_CONFIG`,
+  `DOCKER_CERT_PATH` and `DOCKER_TLS_VERIFY` when they are set, and the container never
+  gets them. `--agent-memory 0` and `--agent-cpus 0`, which docker reads as no limit, are
+  refused.
+- `TestPythonAgentInHardenedContainer` and `TestHardenedContainerIsGoneAfterOverflowAndTimeout`
+  are skipped without
   `TWINWRIGHT_TEST_DOCKER=1` and the image, so a default `go test ./...` proves the
   argv and the validation but not that a daemon accepts the command line. That
-  evidence is the `docker` job of `.github/workflows/integration.yml`.
+  evidence is the `docker` job of `.github/workflows/integration.yml`, which fails
+  if either test does not report its passes by name.
 - The process group is a unix feature. Elsewhere the agent alone is killed.
 
 ## 8. What this review deliberately does not cover
@@ -483,8 +551,9 @@ finding:
   model rather than a fourth registry entry.
 - **No hosted-provider call has ever been verified.** A run of a local Ollama model
   is recorded in `docs/live-model-run.md` and is what the Integration workflow's
-  `real-model` job runs (`.github/workflows/integration.yml`); that document does
-  not record the job's own result. There is no OpenAI or Anthropic API key on the
+  `real-model` job runs (`.github/workflows/integration.yml`); that document records that
+  the job passed on every Integration run from 2026-10-28 to 2026-10-29, and takes none of
+  its figures from those runs. There is no OpenAI or Anthropic API key on the
   development host, so every hosted-provider behaviour in this repository is held
   against an `httptest` server.
 - **Ownership history is deliberately not in the run ledger**, so this review makes

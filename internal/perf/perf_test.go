@@ -4,13 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"twinwright/internal/buildinfo"
 	"twinwright/internal/crashmatrix"
 	"twinwright/internal/dispatch"
 	"twinwright/internal/pgtest"
@@ -159,6 +162,65 @@ func TestPerfReportShape(t *testing.T) {
 	}
 	if keys := keysNamed(generic["config"], "examples"); len(keys) != 0 {
 		t.Errorf("config JSON exposes the examples path: %v", keys)
+	}
+}
+
+// environmentKeys runs the replay workload alone, which is the quickest, with
+// the given build description, and returns the keys of the report's environment
+// block as they are written to disk.
+func environmentKeys(t *testing.T, buildJSON string) map[string]any {
+	t.Helper()
+	var build buildinfo.Info
+	if err := json.Unmarshal([]byte(buildJSON), &build); err != nil {
+		t.Fatalf("build info %s: %v", buildJSON, err)
+	}
+	report, err := Run(context.Background(), Config{
+		Examples:   examplesRoot,
+		Workloads:  []string{WorkloadReplay},
+		ReplayRuns: 1,
+		Build:      build,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	encoded, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var generic struct {
+		Environment map[string]any `json:"environment"`
+	}
+	if err = json.Unmarshal(encoded, &generic); err != nil {
+		t.Fatal(err)
+	}
+	return generic.Environment
+}
+
+// A build with no VCS settings, such as a go run binary, never read the tree. A
+// report from it must not say the tree was clean, and it must not look as if it
+// had a revision either.
+func TestReportFromABuildWithoutVCSSettingsDoesNotAssertACleanTree(t *testing.T) {
+	env := environmentKeys(t, `{"twinwright_version":"dev","go_version":"go1.27.3"}`)
+	if value, present := env["git_modified"]; present {
+		t.Errorf("git_modified = %v in a report whose build recorded no tree state: %v", value, env)
+	}
+	if value, present := env["git_revision"]; present {
+		t.Errorf("git_revision = %v in a report whose build recorded none: %v", value, env)
+	}
+}
+
+// A stamped build keeps both answers, including a recorded false: that is the
+// statement the committed reports make.
+func TestReportFromAStampedBuildRecordsTheTreeState(t *testing.T) {
+	for _, modified := range []bool{false, true} {
+		raw := `{"twinwright_version":"v0.1.2","git_revision":"abc123","git_modified":` + strconv.FormatBool(modified) + `,"go_version":"go1.27.3"}`
+		env := environmentKeys(t, raw)
+		if env["git_revision"] != "abc123" {
+			t.Errorf("git_revision = %v, want abc123: %v", env["git_revision"], env)
+		}
+		if got, present := env["git_modified"]; !present || got != modified {
+			t.Errorf("git_modified = %v (present %v), want the recorded %v", got, present, modified)
+		}
 	}
 }
 
@@ -351,6 +413,36 @@ func TestConfigJSONUsesMillisecondsAndOmitsPrivateFields(t *testing.T) {
 	}
 }
 
+// malformedDSNs are DSNs whose password holds a reserved character that was not
+// percent-encoded, so url.Parse rejects them and the error it builds quotes the
+// part of the string it choked on. Each one makes the underlying error carry the
+// password, which is the only input on which the scrubber has anything to do:
+// pgx's own connection errors never contain it.
+var malformedDSNs = map[string]struct{ dsn, password string }{
+	"slash":             {"postgres://perf:hunter2/secret@127.0.0.1:1/perf?sslmode=disable", "hunter2/secret"},
+	"hash":              {"postgres://perf:hunter2#secret@127.0.0.1:1/perf?sslmode=disable", "hunter2#secret"},
+	"question mark":     {"postgres://perf:hunter2?secret@127.0.0.1:1/perf?sslmode=disable", "hunter2?secret"},
+	"bad escape":        {"postgres://perf:hun%zzer2-secret@127.0.0.1:1/perf?sslmode=disable", "hun%zzer2-secret"},
+	"digits then slash": {"postgres://perf:12345/secret@127.0.0.1:1/perf?sslmode=disable", "12345/secret"},
+	"digits then hash":  {"postgres://perf:12345#secret@127.0.0.1:1/perf?sslmode=disable", "12345#secret"},
+}
+
+// assertNoPasswordIn fails when text carries the DSN, the password, or any four
+// character piece of the password: a scrubber that removes the whole password and
+// leaves its first half has not scrubbed anything.
+func assertNoPasswordIn(t *testing.T, text, dsn, password string) {
+	t.Helper()
+	if strings.Contains(text, strings.TrimSpace(dsn)) {
+		t.Errorf("the DSN itself is in the text: %s", text)
+	}
+	for i := 0; i+4 <= len(password); i++ {
+		if piece := password[i : i+4]; strings.Contains(text, piece) {
+			t.Errorf("a piece of the password (%q) is in the text: %s", piece, text)
+			return
+		}
+	}
+}
+
 func TestScrubErrorRemovesTheDSN(t *testing.T) {
 	const dsn = "postgres://perf:hunter2-secret@db.internal:5432/perf?sslmode=disable&password=also-secret"
 	cause := errors.New("connect to " + dsn + ": refused for password hunter2-secret")
@@ -375,6 +467,50 @@ func TestScrubErrorRemovesTheDSN(t *testing.T) {
 	}
 }
 
+// url.Parse quotes what it rejects, so an error about a DSN that does not parse
+// carries the password, in a form (a piece of it, in a message about a bad port)
+// that no replacement of the whole DSN can find. The scrubber therefore drops the
+// cause's text for such a DSN and says only what is wrong.
+func TestScrubErrorDropsTheTextOfAnErrorAboutAMalformedDSN(t *testing.T) {
+	for name, tc := range malformedDSNs {
+		_, parseErr := url.Parse(tc.dsn)
+		if parseErr == nil {
+			// These parse, with the front of the password as the port. The error
+			// pgx builds for them is not url.Parse's, so Run's test covers them.
+			continue
+		}
+		t.Run(name, func(t *testing.T) {
+			// The shape the store gives it: its own prefix around url.Parse's text.
+			cause := errors.New("parse postgres DSN: " + parseErr.Error())
+			scrubbed := scrubError(cause, tc.dsn)
+			assertNoPasswordIn(t, scrubbed.Error(), tc.dsn, tc.password)
+			if !errors.Is(scrubbed, cause) {
+				t.Error("scrubbing hid the cause from errors.Is")
+			}
+			if !strings.Contains(scrubbed.Error(), "--db") {
+				t.Errorf("the scrubbed error does not say which flag is wrong: %s", scrubbed)
+			}
+		})
+	}
+}
+
+// Run's error is what the command prints, so this is the path that matters. The
+// DSN must be one whose unscrubbed error carries the password; with the scrubber
+// removed, every case here fails.
+func TestRunNeverPrintsAMalformedDSN(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	for name, tc := range malformedDSNs {
+		t.Run(name, func(t *testing.T) {
+			_, err := Run(ctx, Config{DSN: tc.dsn, Examples: examplesRoot, Workloads: []string{WorkloadReplay}, ReplayRuns: 1})
+			if err == nil {
+				t.Fatal("Run succeeded against a DSN that cannot be parsed")
+			}
+			assertNoPasswordIn(t, err.Error(), tc.dsn, tc.password)
+		})
+	}
+}
+
 func TestRunNeverPrintsTheDSNOnAConnectionFailure(t *testing.T) {
 	const dsn = "postgres://perf:hunter2-secret@127.0.0.1:1/perf?sslmode=disable"
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -385,6 +521,40 @@ func TestRunNeverPrintsTheDSNOnAConnectionFailure(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "hunter2-secret") || strings.Contains(err.Error(), dsn) {
 		t.Errorf("error text carries the DSN: %v", err)
+	}
+}
+
+// Ctrl-C cancels the measurement through the context, and the wait for a
+// recovery is where that usually lands. Reporting it as a timeout would send
+// the reader looking for a recovery bug in a run they interrupted themselves.
+func TestAwaitRecoveryReportsACancellationAsOne(t *testing.T) {
+	sc := duplicateCharge(t)
+	s := openSQLite(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w := worker.New(s, fleetExecute(s, sc), worker.Config{
+		ID: "perf-await", LeaseTTL: time.Second, PollInterval: time.Millisecond, Logger: quietLogger(),
+	})
+	if err := w.Register(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// The queue is empty, so the wait would run to its limit of five TTLs and ten
+	// seconds if nothing cancelled it.
+	time.AfterFunc(200*time.Millisecond, cancel)
+
+	started := time.Now()
+	_, err := awaitRecovery(ctx, w, time.Second)
+	if err == nil {
+		t.Fatal("awaitRecovery returned no error with nothing to recover")
+	}
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Errorf("awaitRecovery ran for %s after the context was cancelled", elapsed)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("a cancelled wait must unwrap to context.Canceled, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "not recovered within") {
+		t.Errorf("a cancelled wait is reported as a timeout: %v", err)
 	}
 }
 
@@ -540,6 +710,18 @@ func TestProblems(t *testing.T) {
 	}
 	if got := both.Problems(); len(got) != 2 {
 		t.Errorf("want one problem per finding, got %v", got)
+	}
+
+	// Replay verification has a right answer, like the other two: a run the ledger
+	// cannot reproduce is a finding, not a slower figure.
+	allVerified := Report{Replay: &ReplayResult{Runs: 2, Verified: 2}}
+	if got := allVerified.Problems(); len(got) != 0 {
+		t.Errorf("a replay that verified every run is not a problem: %v", got)
+	}
+	unverified := Report{Replay: &ReplayResult{Runs: 2, Verified: 1}}
+	got = unverified.Problems()
+	if len(got) != 1 || !strings.Contains(got[0], "replay") || !strings.Contains(got[0], "1 of 2") {
+		t.Errorf("an unverified replay must be named with its counts: %v", got)
 	}
 }
 

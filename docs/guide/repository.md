@@ -1,6 +1,6 @@
 # Repository layout and architecture decisions
 
-This page was moved out of the project README when the README was rewritten as the Twinwright Cloud overview. It holds the README sections "Repository layout", "Architecture decisions", unchanged except where noted. The ADR count was corrected from 29 to 34, and the layout lists the packages, scripts and documents added since it was written. Paths in backticks are relative to the repository root. [Back to the guide index](README.md).
+This page was moved out of the project README when the README was rewritten as the Twinwright Cloud overview. It holds the README sections "Repository layout", "Architecture decisions", unchanged except where noted. The ADR count was corrected from 28 to 34, and the layout lists the packages, scripts and documents added since it was written. Paths in backticks are relative to the repository root. [Back to the guide index](README.md).
 
 ## Repository layout
 

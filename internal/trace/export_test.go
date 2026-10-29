@@ -145,6 +145,69 @@ func TestExporterTreatsRejectionAsFailure(t *testing.T) {
 	}
 }
 
+// OTLP/HTTP answers 200 with partialSuccess.rejectedSpans when it kept some spans
+// and refused others. The status code alone reads as a full delivery, which is
+// the silent loss the exporter exists to prevent, so a rejected span is a
+// failure. The count is a 64-bit integer, which the protobuf JSON mapping writes
+// as a string; a number is accepted too.
+func TestExporterReportsAPartialSuccess(t *testing.T) {
+	const headerValue = "header-value-not-a-secret"
+	for _, tc := range []struct {
+		name      string
+		body      string
+		rejected  int
+		delivered bool
+		text      []string
+	}{
+		{"rejected spans as a string", `{"partialSuccess":{"rejectedSpans":"2","errorMessage":"2 spans are too old"}}`, 2, false,
+			[]string{"2 of 3 spans", "2 spans are too old"}},
+		{"rejected spans as a number", `{"partialSuccess":{"rejectedSpans":1}}`, 1, false, []string{"1 of 3 spans"}},
+		{"every span rejected", `{"partialSuccess":{"rejectedSpans":"3","errorMessage":"quota"}}`, 3, false, []string{"3 of 3 spans", "quota"}},
+		{"the reason is scrubbed", `{"partialSuccess":{"rejectedSpans":"1","errorMessage":"bad key ` + headerValue + `"}}`, 1, false, []string{"1 of 3 spans"}},
+		// A message with nothing rejected is a warning, not a loss.
+		{"zero rejected with a warning", `{"partialSuccess":{"rejectedSpans":"0","errorMessage":"deprecated field"}}`, 0, true, nil},
+		{"empty partial success", `{"partialSuccess":{}}`, 0, true, nil},
+		{"empty object", `{}`, 0, true, nil},
+		{"empty body", ``, 0, true, nil},
+		{"a body that is not JSON", `OK`, 0, true, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			collector := newRecordingCollector(t, http.StatusOK, tc.body)
+			exporter := Exporter{Endpoint: collector.URL, Headers: map[string]string{"X-Api-Key": headerValue}}
+			delivery, err := exporter.Export(context.Background(), sampleTrace())
+			if tc.delivered {
+				if err != nil || !delivery.Delivered || delivery.RejectedSpans != 0 {
+					t.Fatalf("delivery=%+v err=%v, want a full delivery", delivery, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("a partial success was reported as a delivery: %+v", delivery)
+			}
+			if delivery.Delivered || delivery.RejectedSpans != tc.rejected || delivery.Spans != 3 || delivery.Status != http.StatusOK {
+				t.Fatalf("delivery=%+v, want not delivered, %d rejected of 3, status 200", delivery, tc.rejected)
+			}
+			for _, want := range tc.text {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("err = %q, want it to say %q", err, want)
+				}
+			}
+			encoded, jsonErr := json.Marshal(delivery)
+			if jsonErr != nil {
+				t.Fatal(jsonErr)
+			}
+			if want := `"rejected_spans":`; !strings.Contains(string(encoded), want) {
+				t.Fatalf("delivery JSON %s lacks %s", encoded, want)
+			}
+			for _, text := range []string{err.Error(), delivery.Response, string(encoded)} {
+				if strings.Contains(text, headerValue) {
+					t.Fatalf("a header value reached the report: %s", text)
+				}
+			}
+		})
+	}
+}
+
 func TestExporterRequiresAnEndpoint(t *testing.T) {
 	if _, err := (Exporter{}).Export(context.Background(), sampleTrace()); err == nil {
 		t.Fatal("expected an explicit missing-endpoint error")

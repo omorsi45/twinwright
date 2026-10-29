@@ -45,10 +45,12 @@ configuration. The collector `depends_on` Jaeger, which orders the start and doe
 not wait for Jaeger to be ready; the exporter retries.
 
 Prometheus is configured by `deploy/prometheus.yml`: a two second scrape interval
-and one job, `twinwright-workers`, with the static target
-`host.docker.internal:9095`. The service maps that name with
-`extra_hosts: host.docker.internal:host-gateway`, so a worker running on the host
-with `--metrics-addr` on port 9095 is scraped.
+and one job, `twinwright-workers`, with two static targets,
+`host.docker.internal:9095` and `host.docker.internal:9096`. The first is the
+integration test's listener and the demo's first worker; the second is the demo's
+second worker, and a port nobody listens on is a target that is down. The service
+maps that name with `extra_hosts: host.docker.internal:host-gateway`, so a worker
+running on the host with `--metrics-addr` on port 9095 or 9096 is scraped.
 
 The default test suite starts none of this, and `docker compose up -d` is still
 optional for development. It now starts all four services, PostgreSQL included.
@@ -71,9 +73,11 @@ operation name is the local root's name, and at least one span with the tag
 `metrics.Serve` on `0.0.0.0:9095` over a store holding one queued run, and polls
 `GET {TW_PROMETHEUS_URL}/api/v1/query` (default `http://127.0.0.1:9090`) every
 500 ms for up to 60 s. It passes when `twinwright_queue_entries` has a sample with
-`state="runnable"` and value 1, and `twinwright_worker_claims_total` has a sample
+`state="runnable"` and value 1 and `twinwright_worker_claims_total` has a sample
 labelled with the test worker's ID, which exists at 0 because every counter
-renders before its first use.
+renders before its first use. Both queries name the instance
+`host.docker.internal:9095` and the check requires that label on what comes back,
+so a worker listening on the other target cannot satisfy or break it.
 
 On a timeout, each fails with the last problem found and the last answer, cut to
 4 KiB, so a CI failure can be diagnosed from its log.
@@ -95,6 +99,11 @@ The `observability` job in `.github/workflows/integration.yml` runs on
 ```
 TWINWRIGHT_TEST_OTEL=1 go test -count=1 -v -run 'TestSpansAreQueryableInJaeger|TestPrometheusScrapesAWorker' ./internal/trace/ ./internal/metrics/
 ```
+
+and then requires a `--- PASS:` line for each of the two tests in the `-v` output. `go
+test` exits 0 when a test skips and when the `-run` pattern matches nothing, so a
+renamed test, a renamed environment variable or a skip would otherwise leave the
+job green with nothing checked. The step fails for each of those.
 
 A failed job prints `docker compose logs`, and `docker compose down -v` runs
 whatever happened. **The CI job is the evidence for what follows. This ADR does not
@@ -137,10 +146,13 @@ When the job passes, for one scripted run and the pinned images:
   at, so several workers on one database serve the same values. Scrape one of them,
   or aggregate with `max`; `sum` multiplies every such gauge by the worker count.
   The job scrapes one worker and does not test a multi-worker setup.
-- **Trace export from a worker is best effort.** A failure is logged and never
-  changes a claim's disposition. The job exports with `trace.Exporter` directly; it
-  does not start a worker with `--otlp-endpoint`, whose wiring is covered by tests
-  against an in-process server.
+- **Trace export from a worker is best effort, and runs behind the claim loop.** A failure is
+  logged and never changes a claim's disposition. The export is a goroutine of its own, one at a
+  time per worker: a run that finishes while one is in flight is not exported (logged at warn with
+  its trace ID), and a stop waits at most 10 seconds for the one running. The outcome's
+  `trace_export_queued` says the trace was handed over, not that it arrived; the result is in the
+  log. The job exports with `trace.Exporter` directly; it does not start a worker with
+  `--otlp-endpoint`, whose wiring is covered by tests against an in-process server.
 - **Nothing about traces or metrics is written to the event ledger.** The ledger
   records the agent's trajectory and never a worker's identity, and an export or a
   scrape leaves it as it was.
@@ -159,9 +171,22 @@ When the job passes, for one scripted run and the pinned images:
 
 ## Consequences
 
-- A change to the OTLP encoding, the span attributes or the exposition document is
-  checked against real software on every integration run.
+- A change that the pinned collector, Jaeger or Prometheus rejects, or that makes
+  the spans or series the two tests read unqueryable, fails the integration job.
+  What the tests read is narrow: the span count, the root's operation name and
+  whether any span carries the tag key `twinwright.event.start_seq` (not its value),
+  and two Prometheus series. A change to any other span attribute, the timestamps,
+  the parent links, the histogram, the age gauges or any other metric family passes
+  as long as the payload is accepted and those few things still read back.
 - The pinned versions are part of what is verified. Changing one is a change to the
   job's evidence and is reviewed with it.
 - `docker compose up -d` pulls and starts two more services than before. Name the
   services to start fewer.
+
+## Corrections
+
+- 2026-10-28: the exporter returned the collector endpoint as it was given, so `trace --otlp-endpoint` printed the endpoint's userinfo and query in its delivery report and in its errors, which the worker's log line had always scrubbed. `Delivery.Endpoint` and every error the exporter returns now name the address without userinfo or query, and mask header values and the endpoint's own credentials if a collector echoes them back. An endpoint with a query string was posted to the wrong path and now keeps its query. Collector headers can be set with the standard `OTEL_EXPORTER_OTLP_HEADERS` variable (comma-separated `name=value` pairs, values percent-decoded) on both `trace` and `worker` when `--otlp-header` is not given, so a worker's credential need not sit in its command line.
+- 2026-10-28: the `observability` job trusted `go test`'s exit status, which is 0 when a test skips and when the `-run` pattern matches no test, so a renamed test or environment variable left it green with nothing checked. The step now requires a `--- PASS:` line for each of the two tests in the `-v` output and fails otherwise.
+- 2026-10-28: a worker exported a finished run's trace inside `ClaimAndRun`, so a collector that did not answer held the worker for the whole export bound (10 seconds) after every completed run, and nothing in the metrics showed it. The export now runs in a goroutine of its own, at most one per worker: a run that finishes while one is in flight is not exported and is logged at warn with its trace ID, and a stop waits at most `trace.DefaultExportTimeout` for the one running. `Outcome.TraceExported` (`trace_exported`, unreleased) therefore could not say a trace was delivered, and is replaced by `TraceExportQueued` (`trace_export_queued`), which says it was handed to the exporter; the result is in the log. The Limits entry on worker export now says so.
+- 2026-10-28: the Consequences section said a change to the OTLP encoding, the span attributes or the exposition document "is checked against real software on every integration run". The two tests read the span count, the root's operation name, the presence of one tag key and two Prometheus series, so a change to any other attribute, the timestamps, the parent links or any other metric family passes the job. The sentence now says what is read (OBS-7).
+- 2026-10-28: the section on the stack named one Prometheus target, `host.docker.internal:9095`; `deploy/prometheus.yml` has had two since the demo (`:9096` is the demo's second worker). The text names both. `TestPrometheusScrapesAWorker` took the first `twinwright_queue_entries{state="runnable"}` sample from any target, so a worker on `:9096` could satisfy or break its `== 1` assertion; both its queries now name the instance `host.docker.internal:9095` and the check requires that label on the answer (`TestWaitForScrapeReadsOnlyTheTestsOwnInstance`, `TestWaitForScrapeRefusesWhatIsNotTheServedStore`) (OBS-8).

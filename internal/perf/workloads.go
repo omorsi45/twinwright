@@ -21,11 +21,11 @@ import (
 )
 
 const (
-	// fleetLeaseTTL and fleetPoll are the throughput workers' settings. The TTL
-	// is the worker package's own default, so no lease lapses mid-trial and
-	// throughput does not include a takeover.
+	// fleetLeaseTTL is the throughput workers' lease. It is the worker package's
+	// own default, so no lease lapses mid-trial and throughput does not include a
+	// takeover. There is no poll interval to set: drain stops at a worker's first
+	// empty claim, so no throughput worker ever waits for work.
 	fleetLeaseTTL = 30 * time.Second
-	fleetPoll     = 10 * time.Millisecond
 
 	// recoveryPoll is how often the recovering worker looks for work. It is part
 	// of the recovery time it measures: a takeover cannot happen between polls.
@@ -248,10 +248,9 @@ func runFleet(ctx context.Context, s *store.Store, workers, want int, execute wo
 		go func() {
 			defer wg.Done()
 			w := worker.New(s, execute, worker.Config{
-				ID:           fmt.Sprintf("perf-%d", i+1),
-				LeaseTTL:     fleetLeaseTTL,
-				PollInterval: fleetPoll,
-				Logger:       quietLogger(),
+				ID:       fmt.Sprintf("perf-%d", i+1),
+				LeaseTTL: fleetLeaseTTL,
+				Logger:   quietLogger(),
 			})
 			results[i] = drain(ctx, w)
 		}()
@@ -361,9 +360,12 @@ func (h *harness) recovery(ctx context.Context, ttl time.Duration) (RecoveryResu
 // The crash reuses crashmatrix.CrashWith, which claims the run under a manually
 // advanced clock. Its lease therefore expires a TTL after the clock's start, a
 // little before the crash itself. Renewing the dead worker's lease at the crash
-// instant, as a live worker's heartbeat would have, makes the expiry exactly a
-// TTL after the crash, which is the relation the measurement states and keeps
-// the figure from depending on how long the run took to reach its crash point.
+// instant, as a live worker's heartbeat would have, makes the expiry a TTL after
+// the crash, which is the relation the measurement states and keeps the figure
+// from depending on how long the run took to reach its crash point, provided it
+// reached it within one TTL of its claim. The store refuses to renew an expired
+// lease, so a slower run fails the trial with the error below instead of
+// producing a figure.
 // The renewal touches the lease row only; it adds nothing to the ledger.
 func (h *harness) recoveryTrial(ctx context.Context, s *store.Store, ttl time.Duration) (time.Duration, int, error) {
 	if err := requireIdleQueue(ctx, s); err != nil {
@@ -424,10 +426,13 @@ func (h *harness) recoveryTrial(ctx context.Context, s *store.Store, ttl time.Du
 
 // awaitRecovery polls for the crashed run until a claim ends finished, giving
 // up after five TTLs and ten seconds. A run that was requeued or fenced is tried
-// again; one that exhausted its retries is final and fails the trial at once.
-func awaitRecovery(ctx context.Context, w *worker.Worker, ttl time.Duration) (worker.Outcome, error) {
+// again; one that exhausted its retries is final and fails the trial at once. If
+// the caller's context ends first, as Ctrl-C does, the error says so and unwraps
+// to the context's own, instead of describing the interruption as a run that
+// never recovered.
+func awaitRecovery(parent context.Context, w *worker.Worker, ttl time.Duration) (worker.Outcome, error) {
 	limit := ttl*5 + 10*time.Second
-	ctx, cancel := context.WithTimeout(ctx, limit)
+	ctx, cancel := context.WithTimeout(parent, limit)
 	defer cancel()
 	last := "no claim"
 	for {
@@ -446,6 +451,9 @@ func awaitRecovery(ctx context.Context, w *worker.Worker, ttl time.Duration) (wo
 		}
 		select {
 		case <-ctx.Done():
+			if cause := parent.Err(); cause != nil {
+				return worker.Outcome{}, fmt.Errorf("the wait for the run's recovery was cancelled (last claim: %s): %w", last, cause)
+			}
 			return worker.Outcome{}, fmt.Errorf("the run was not recovered within %s (last claim: %s)", limit, last)
 		case <-time.After(recoveryPoll):
 		}

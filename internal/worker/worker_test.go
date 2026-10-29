@@ -274,9 +274,12 @@ func TestCrashedWorkerIsTakenOverAndRunCompletesOnce(t *testing.T) {
 	}
 }
 
-// TestDuplicateDeliveryDoesNotDuplicateCommittedEffects states the delivery
-// contract directly: the same run delivered twice, with the same call IDs,
-// commits its side effects once.
+// TestDuplicateDeliveryDoesNotDuplicateCommittedEffects shows that delivering a
+// finished run a second time commits nothing new. It does not exercise the
+// call-ID cache: the second delivery returns at the run's completed status
+// (internal/agent/runner.go), before any call is dispatched, so no call ID is
+// presented twice. TestCommittedCallIsAnsweredFromTheCacheUnderTheNewOwner is the
+// test of that.
 func TestDuplicateDeliveryDoesNotDuplicateCommittedEffects(t *testing.T) {
 	ctx := context.Background()
 	manifest := billingManifest(t)
@@ -542,7 +545,7 @@ func TestClaimFinishedCarriesTheTraceID(t *testing.T) {
 	if outcome.TraceID != want {
 		t.Fatalf("outcome trace id=%q want %q", outcome.TraceID, want)
 	}
-	if outcome.TraceExported {
+	if outcome.TraceExportQueued {
 		t.Fatal("a worker with no ExportTrace reports an export")
 	}
 	if !strings.Contains(logs.String(), "msg=\"claim finished\"") || !strings.Contains(logs.String(), "trace_id="+want) {
@@ -580,6 +583,9 @@ func TestWorkerExportsACompletedRunsTraceThroughTheHook(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The export runs behind the claim; Close waits for it, so what the hook saw
+	// can be read.
+	w.Close()
 	if len(exported) != 1 || exported[0] != run.ID {
 		t.Fatalf("exported=%v want [%s]", exported, run.ID)
 	}
@@ -589,12 +595,12 @@ func TestWorkerExportsACompletedRunsTraceThroughTheHook(t *testing.T) {
 	if remaining := time.Until(deadline); remaining <= 0 || remaining > trace.DefaultExportTimeout {
 		t.Fatalf("export deadline is %v away, want within (0, %v]", remaining, trace.DefaultExportTimeout)
 	}
-	if outcome.Disposition != Finished || !outcome.TraceExported || outcome.TraceID != trace.TraceIDFor(run.ID) {
+	if outcome.Disposition != Finished || !outcome.TraceExportQueued || outcome.TraceID != trace.TraceIDFor(run.ID) {
 		t.Fatalf("outcome=%+v", outcome)
 	}
 	// Observers (the metrics endpoint, tests) must see the finished outcome,
-	// export result included, not a copy taken before the export ran.
-	if len(observed) != 1 || !observed[0].TraceExported {
+	// export hand-off included, not a copy taken before it happened.
+	if len(observed) != 1 || !observed[0].TraceExportQueued {
 		t.Fatalf("observer saw %+v", observed)
 	}
 	if strings.Contains(logs.String(), "trace export failed") {
@@ -628,9 +634,13 @@ func TestWorkerExportFailureKeepsTheDisposition(t *testing.T) {
 	if outcome.Disposition != Finished || outcome.RunStatus != "completed" || outcome.Err != "" {
 		t.Fatalf("outcome=%+v", outcome)
 	}
-	if outcome.TraceExported {
-		t.Fatal("outcome reports an export that failed")
+	// The outcome is returned before the export ends, so it can only say the trace
+	// was handed to the exporter. The failure is reported where it is known: in the
+	// log, below.
+	if !outcome.TraceExportQueued {
+		t.Fatal("outcome does not say the export was queued")
 	}
+	w.Close()
 	entry, err := s.QueueEntryFor(ctx, run.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -696,7 +706,7 @@ func TestWorkerExportsOnlyWhenTheClaimFinishedACompletedRun(t *testing.T) {
 			if outcome.Disposition != tc.want || outcome.RunStatus != tc.status {
 				t.Fatalf("outcome=%+v want %s/%q", outcome, tc.want, tc.status)
 			}
-			if calls != 0 || outcome.TraceExported {
+			if calls != 0 || outcome.TraceExportQueued {
 				t.Fatalf("exported %d times for a claim that did not complete the run: %+v", calls, outcome)
 			}
 			if outcome.TraceID != trace.TraceIDFor(run.ID) {
@@ -742,7 +752,8 @@ func TestWorkerExportsARunSettledPastTheDeliveryLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if outcome.Disposition != Finished || !outcome.TraceExported || len(exported) != 1 || exported[0] != run.ID {
+	b.Close()
+	if outcome.Disposition != Finished || !outcome.TraceExportQueued || len(exported) != 1 || exported[0] != run.ID {
 		t.Fatalf("outcome=%+v exported=%v", outcome, exported)
 	}
 }

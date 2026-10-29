@@ -68,6 +68,18 @@ func (e *transportError) Error() string {
 // deadline, without keeping the original URL reachable from the error text.
 func (e *transportError) Unwrap() error { return e.err }
 
+// invalidURLText is all a URL that will not parse gets to say. url.Parse quotes
+// the part of the string it choked on (a bad port is printed as ":" followed by
+// the text that was meant to be one), and that part is where a password with an
+// unencoded reserved character ends up, so its own text is never repeated.
+const invalidURLText = "invalid URL (spaces, control characters and unencoded %, /, # or ? in the userinfo are the usual causes)"
+
+// safeURL is a URL made safe to print: redact.URL, then the configured secrets,
+// since some gateways carry the key in the path.
+func safeURL(raw string, secrets ...string) string {
+	return redact.Secrets(redact.URL(raw), secrets...)
+}
+
 // safeTransportError rewrites the *url.Error that http.Client.Do returns. The
 // standard library prints the full request URL, and an OpenAI-compatible base
 // URL may carry userinfo or a key in its query. The cause text is also masked,
@@ -77,7 +89,21 @@ func safeTransportError(err error, secrets ...string) error {
 	if !errors.As(err, &urlErr) {
 		return err
 	}
-	return &transportError{op: urlErr.Op, url: redact.URL(urlErr.URL), text: redact.String(urlErr.Err.Error(), secrets...), err: urlErr.Err}
+	return &transportError{op: urlErr.Op, url: safeURL(urlErr.URL, secrets...), text: redact.String(urlErr.Err.Error(), secrets...), err: urlErr.Err}
+}
+
+// safeRequestError is safeTransportError for an error from building a request,
+// where the address was never sent anywhere. address is the string the request
+// was built from. It is passed in because the *url.Error that url.Parse returns
+// holds only the part before a "#", which can hide an "@" that follows it, so it
+// cannot be trusted to say what was configured. The cause of a parse failure is
+// dropped for the reason given at invalidURLText.
+func safeRequestError(err error, address string, secrets ...string) error {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) && urlErr.Op == "parse" {
+		return &transportError{op: urlErr.Op, url: safeURL(address, secrets...), text: invalidURLText}
+	}
+	return safeTransportError(err, secrets...)
 }
 
 // redactOutput masks the configured secret in a model's own output items. It
@@ -87,7 +113,33 @@ func safeTransportError(err error, secrets ...string) error {
 func redactOutput(raws []json.RawMessage, secrets ...string) []json.RawMessage {
 	out := make([]json.RawMessage, len(raws))
 	for i, raw := range raws {
-		out[i] = json.RawMessage(redact.Secrets(string(raw), secrets...))
+		out[i] = json.RawMessage(maskSecrets(string(raw), secrets))
 	}
 	return out
+}
+
+// maskSecrets hides each secret in s, both as written and as it appears inside
+// a JSON string, which is where a model's answer carries it. A
+// server's encoder chooses the spelling: Go's escapes "&", "<" and ">" as
+// \u0026, \u003c and \u003e, and others escape "/" as "\/". A key spelled any of
+// those ways, or both, would pass a mask that looked only for the raw key. The
+// result is still valid JSON: the replacement has no characters that need
+// escaping. Secrets under the redact floor of eight characters are ignored.
+func maskSecrets(s string, secrets []string) string {
+	for _, secret := range secrets {
+		if len(secret) < 8 {
+			continue
+		}
+		spellings := []string{secret}
+		if encoded, err := json.Marshal(secret); err == nil {
+			spellings = append(spellings, string(encoded[1:len(encoded)-1]))
+		}
+		for _, spelling := range spellings {
+			s = redact.Secrets(s, spelling)
+			if strings.Contains(spelling, "/") {
+				s = redact.Secrets(s, strings.ReplaceAll(spelling, "/", `\/`))
+			}
+		}
+	}
+	return s
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -14,6 +15,7 @@ import (
 	"unicode"
 
 	"twinwright/internal/agent"
+	"twinwright/internal/redact"
 )
 
 // providerConfig is everything a command needs to say to build a provider.
@@ -106,6 +108,25 @@ func recordCassetteFlag(fs *flag.FlagSet, cfg *providerConfig) {
 // several providers cannot leak one choice into the next.
 func (c providerConfig) with(name, model, scenario string) providerConfig {
 	c.Name, c.Model, c.Scenario = name, model, scenario
+	return c
+}
+
+// forRun is with for a run whose provider was recorded rather than chosen on
+// this command line: what a worker, resume or fork finds in the ledger.
+//
+// The agent flags describe an exec agent, and a command that serves runs of every
+// provider (one worker serves scripted fixtures and live-provider runs from the
+// same queue) cannot apply them to all of them: for a run whose provider is not
+// exec they are dropped, where openProvider would refuse them. A command that
+// names the provider itself, such as run, bench and shadow, uses with and keeps
+// the refusal, because there the operator asked for a provider and an agent that
+// cannot both be used. The copy leaves the shared config alone.
+func (c providerConfig) forRun(name, model, scenario string) providerConfig {
+	c = c.with(name, model, scenario)
+	if name != "exec" {
+		c.AgentCommand, c.AgentEnv = "", nil
+		c.AgentContainer, c.AgentMount = "", ""
+	}
 	return c
 }
 
@@ -205,6 +226,14 @@ func openProvider(cfg providerConfig) (agent.Provider, io.Closer, error) {
 	}
 	if cfg.Model == "" {
 		return nil, nil, fmt.Errorf("model is required for %s", cfg.Name)
+	}
+	// Refused here, before a run exists, with the address redacted: the adapter
+	// would only discover it on the first model call, after the run was created.
+	// url.Parse's own error quotes the string, so it is not repeated.
+	if cfg.Name == "openai-compatible" && cfg.Cassette == "" {
+		if _, err := url.Parse(cfg.BaseURL); err != nil {
+			return nil, nil, fmt.Errorf("--base-url is an invalid URL (%s): remove spaces and control characters, and percent-encode any %%, /, # or ? in the userinfo", redact.URL(cfg.BaseURL))
+		}
 	}
 
 	var client *http.Client
@@ -308,6 +337,10 @@ func openExecProvider(cfg providerConfig) (agent.Provider, io.Closer, error) {
 		return nil, nil, fmt.Errorf("--agent-container: %w", err)
 	}
 	provider.Wrap = options.Wrap
+	provider.Cleanup = options.Cleanup
+	// The docker client finds its daemon through its own environment. The
+	// variables go to the client and never into the container.
+	provider.ClientEnv = agent.DockerClientEnv
 	return provider, closerFunc(noClose), nil
 }
 

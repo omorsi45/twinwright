@@ -21,8 +21,8 @@ Newer commands, and what has to stay aligned with them:
   `TestRegressedBenchFailsTheGate`. The gate must stay able to fail: the CI job
   requires exit 1 on `--model fixture-regressed-v1`.
 - `run --fail-on-eval`: opt-in, and refused with `--enqueue`.
-- `perf`: writes its report before it exits 1 on a duplicated mutation or a
-  crash-matrix violation, exits 2 on bad input, and never prints a DSN. The
+- `perf`: writes its report before it exits 1 on a duplicated mutation, a replay
+  that did not verify or a crash-matrix violation, exits 2 on bad input, and never prints a DSN. The
   throughput table in `docs/performance.md` is held to the committed reports in
   `docs/benchmarks/` by `TestBenchmarkDocsMatchTheirReports`.
 - `run --record-cassette` and `replay --cassette`: the recording flag exists on
@@ -33,10 +33,14 @@ Newer commands, and what has to stay aligned with them:
 - `--agent exec` with `--agent-command`, `--agent-env` and the `--agent-container`
   family: the child environment is `PATH`, `HOME` and the named variables only, a
   `NAME=value` is refused, and the command is not stored with the run, so `resume`
-  and `worker` need it again. Keep the flag help, `docs/protocol/agent-v1.md` and
-  its JSON Schemas, `exec_test.go` and ADR 0033 in line.
+  and `worker` need it again. Commands that take a run's provider from its record
+  (`worker`, `resume`, `fork`, `counterfactual`) use `providerConfig.forRun`, which
+  applies the agent flags to exec runs only; commands that name the provider use
+  `with` and refuse them for any other. Keep the flag help, `docs/protocol/agent-v1.md` and
+  its JSON Schemas, `exec_test.go`, `exec_fleet_test.go` and ADR 0033 in line.
 - `make demo` and `make demo-stack`: `make demo` builds the CLI and runs the
-  twelve-step `demo` in a temporary directory, and `ci.yml` runs it. `make
+  twelve-step `demo` in a temporary directory that it removes when the demo
+  succeeds and keeps when it fails, and `ci.yml` runs it. `make
   demo-stack` runs `scripts/demo-stack.sh` against Compose, and the `demo-stack`
   job in `integration.yml` runs that. Keep the Makefile targets, the README quick
   start and those two jobs saying the same thing.

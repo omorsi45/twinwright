@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -120,6 +122,61 @@ func TestHandlerFailsRatherThanReturningPartialMetrics(t *testing.T) {
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusInternalServerError {
 		t.Fatalf("status=%d want 500", response.StatusCode)
+	}
+}
+
+// ServeListener answers on the listener it is given and closes it when the
+// context ends, and Serve reports a bind failure to its caller instead of
+// swallowing it in a goroutine.
+func TestServeListenerServesOnTheListenerItWasGiven(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := listener.Addr().String()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- ServeListener(ctx, listener, Collector{Counters: NewCounters(), WorkerID: "w"})
+	}()
+
+	for path, want := range map[string]string{"/healthz": "ok", "/metrics": "twinwright_worker_claims_total"} {
+		response, err := http.Get("http://" + address + path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		body, _ := io.ReadAll(response.Body)
+		response.Body.Close()
+		if response.StatusCode != http.StatusOK || !strings.Contains(string(body), want) {
+			t.Fatalf("GET %s = %d %q, want 200 and %q", path, response.StatusCode, body, want)
+		}
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("ServeListener returned %v after its context ended", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("ServeListener did not return after its context ended")
+	}
+	if conn, err := net.DialTimeout("tcp", address, time.Second); err == nil {
+		conn.Close()
+		t.Fatal("the listener is still accepting connections after ServeListener returned")
+	}
+}
+
+func TestServeReportsAnAddressThatCannotBeBound(t *testing.T) {
+	held, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	address := held.Addr().String()
+	err = Serve(context.Background(), address, Collector{Counters: NewCounters(), WorkerID: "w"})
+	if err == nil || !strings.Contains(err.Error(), address) {
+		t.Fatalf("Serve on a taken address returned %v, want an error naming %s", err, address)
 	}
 }
 
@@ -632,6 +689,69 @@ func TestRunDurationIgnoresNonFiniteObservations(t *testing.T) {
 	}
 }
 
+// Prometheus reads any decrease of a counter as a reset, so rate() and increase()
+// jump by the whole accumulated total. A counter therefore only goes up: a
+// negative delta (a duration measured across a backward clock step, say) and a
+// delta that is not a finite number are dropped.
+func TestCountersRefuseNegativeDeltas(t *testing.T) {
+	counters := NewCounters()
+	counters.Add(WorkerRunSeconds, "", 5)
+	counters.Add(WorkerRunSeconds, "", -2)
+	counters.Add(WorkerRunSeconds, "", math.NaN())
+	counters.Add(WorkerRunSeconds, "", math.Inf(1))
+	counters.Add(WorkerRunSeconds, "", math.Inf(-1))
+	counters.Add(WorkerClaims, "", 1)
+	counters.Add(WorkerClaims, "", -1)
+	counters.Add(WorkerDispositions, "finished", 2)
+	counters.Add(WorkerDispositions, "finished", -1)
+	counters.Add(WorkerClaims, "", 0) // a zero delta is a valid no-op, not a refusal
+
+	body, err := Collector{Counters: counters, WorkerID: "w"}.Render(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	families := mustParse(t, body)
+	worker := map[string]string{"worker": "w"}
+	if got := sampleValue(t, families[WorkerRunSeconds], WorkerRunSeconds, worker); got != 5 {
+		t.Fatalf("run seconds=%v want 5: a negative or non-finite delta was applied", got)
+	}
+	if got := sampleValue(t, families[WorkerClaims], WorkerClaims, worker); got != 1 {
+		t.Fatalf("claims=%v want 1", got)
+	}
+	if got := sampleValue(t, families[WorkerDispositions], WorkerDispositions, map[string]string{"disposition": "finished", "worker": "w"}); got != 2 {
+		t.Fatalf("finished=%v want 2", got)
+	}
+}
+
+// A histogram's sum is a counter too, so a negative observation would lower it,
+// and an average-duration query built on sum and count would go wrong with it.
+// The observation is dropped whole: counting it without summing it would skew the
+// average the other way. Zero is a real duration and is kept.
+func TestRunDurationIgnoresNegativeObservations(t *testing.T) {
+	counters := NewCounters()
+	counters.Observe(WorkerRunDuration, 2)
+	counters.Observe(WorkerRunDuration, -2)
+	counters.Observe(WorkerRunDuration, math.Inf(-1))
+	counters.Observe(WorkerRunDuration, 0)
+	body, err := Collector{Counters: counters, WorkerID: "w"}.Render(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	family := mustParse(t, body)[WorkerRunDuration]
+	worker := map[string]string{"worker": "w"}
+	if sum := sampleValue(t, family, WorkerRunDuration+"_sum", worker); sum != 2 {
+		t.Fatalf("sum=%v want 2", sum)
+	}
+	if count := sampleValue(t, family, WorkerRunDuration+"_count", worker); count != 2 {
+		t.Fatalf("count=%v want 2 (the 2s run and the 0s run)", count)
+	}
+	// The first bucket holds the zero observation only, so a negative one did not
+	// land there.
+	if first := sampleValue(t, family, WorkerRunDuration+"_bucket", map[string]string{"le": "0.05", "worker": "w"}); first != 1 {
+		t.Fatalf("le=0.05 bucket=%v want 1", first)
+	}
+}
+
 func TestOldestRunnableAge(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)
@@ -697,6 +817,308 @@ func TestOldestRunnableAge(t *testing.T) {
 	}
 }
 
+// oldestRunnableAgeFor renders the gauge for a store at the given instant.
+func oldestRunnableAgeFor(t *testing.T, s *store.Store, now time.Time) float64 {
+	t.Helper()
+	body, err := Collector{Store: s, Counters: NewCounters(), WorkerID: "w", Clock: func() time.Time { return now }}.Render(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	family := mustParse(t, body)[queueOldestRunnableAge]
+	return sampleValue(t, family, queueOldestRunnableAge, map[string]string{})
+}
+
+// queuedRun creates a run and enqueues it as available at availableAt.
+func queuedRun(t *testing.T, s *store.Store, availableAt time.Time) string {
+	t.Helper()
+	ctx := context.Background()
+	world, err := s.Seed(ctx, 42, "digest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := s.CreateRun(ctx, world.ID, "duplicate-charge", "scripted", "fixture-v1", "task", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Enqueue(ctx, run.ID, 10, availableAt); err != nil {
+		t.Fatal(err)
+	}
+	return run.ID
+}
+
+// A worker that dies leaves its run marked leased with a lease that then
+// expires, and ClaimRun takes such a run over: it is the product's recovery path.
+// The gauge has to count it, from the moment the lease expired, or an alert on it
+// stays silent while a crashed fleet leaves work claimable.
+func TestOldestRunnableAgeCountsAnExpiredLease(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	runID := queuedRun(t, s, now.Add(-20*time.Minute))
+	// worker-a claims ten minutes ago with a one minute lease and is never heard
+	// from again, so the lease expired nine minutes ago.
+	if _, _, err := s.ClaimRun(ctx, "worker-a", time.Minute, now.Add(-10*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := oldestRunnableAgeFor(t, s, now.Add(-10*time.Minute+30*time.Second)); got != 0 {
+		t.Fatalf("while the lease is still live: age=%v want 0", got)
+	}
+	// Measured from the expiry, not from the enqueue time: for twenty minutes
+	// the run was not claimable for eleven of them.
+	if got := oldestRunnableAgeFor(t, s, now); got != 540 {
+		t.Fatalf("lease expired 9 minutes ago: age=%v want 540", got)
+	}
+	// The gauge's claim is true: a worker can take the run.
+	lease, entry, err := s.ClaimRun(ctx, "worker-b", time.Minute, now)
+	if err != nil || entry.RunID != runID || !entry.Takeover || lease.Token != 2 {
+		t.Fatalf("worker-b claim: entry=%+v lease=%+v err=%v", entry, lease, err)
+	}
+	if got := oldestRunnableAgeFor(t, s, now); got != 0 {
+		t.Fatalf("after the takeover: age=%v want 0", got)
+	}
+}
+
+// An operator who re-enqueues a run that another worker is executing resets the
+// queue row to runnable and leaves the live lease alone. ClaimRun refuses that
+// run, so no worker can end its wait and the gauge must not report one.
+func TestOldestRunnableAgeIgnoresARunHeldByALiveLease(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	runID := queuedRun(t, s, now.Add(-5*time.Minute))
+	if _, _, err := s.ClaimRun(ctx, "worker-a", time.Hour, now.Add(-5*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Enqueue(ctx, runID, 10, now.Add(-4*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.ClaimRun(ctx, "worker-b", time.Minute, now); !errors.Is(err, store.ErrNoWork) {
+		t.Fatalf("worker-b claim err=%v, want ErrNoWork: the premise of the test is a run no worker can claim", err)
+	}
+	if got := oldestRunnableAgeFor(t, s, now); got != 0 {
+		t.Fatalf("a run held by a live lease: age=%v want 0", got)
+	}
+
+	// Once the holder's lease lapses the same run is claimable, and it has been
+	// since the lease expired (an hour after it was taken), not since the re-enqueue.
+	later := now.Add(-5*time.Minute + time.Hour + 90*time.Second)
+	if got := oldestRunnableAgeFor(t, s, later); got != 90 {
+		t.Fatalf("90s after the holder's lease lapsed: age=%v want 90", got)
+	}
+}
+
+// The gauge may only count what ClaimRun would take. Both read the same
+// predicate (store.Store.OldestClaimableSince), and this walks the states a queue
+// entry can be in so that a change to one cannot leave the other behind.
+func TestOldestRunnableAgeAgreesWithClaimRun(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, s *store.Store)
+		want  bool // claimable
+	}{
+		{"empty queue", func(*testing.T, *store.Store) {}, false},
+		{"runnable and available", func(t *testing.T, s *store.Store) { queuedRun(t, s, now.Add(-time.Minute)) }, true},
+		{"runnable in backoff", func(t *testing.T, s *store.Store) { queuedRun(t, s, now.Add(time.Minute)) }, false},
+		{"leased with a live lease", func(t *testing.T, s *store.Store) {
+			queuedRun(t, s, now.Add(-time.Minute))
+			if _, _, err := s.ClaimRun(ctx, "worker-a", time.Hour, now); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+		{"leased with an expired lease", func(t *testing.T, s *store.Store) {
+			queuedRun(t, s, now.Add(-time.Hour))
+			if _, _, err := s.ClaimRun(ctx, "worker-a", time.Minute, now.Add(-30*time.Minute)); err != nil {
+				t.Fatal(err)
+			}
+		}, true},
+		{"runnable with a live foreign lease", func(t *testing.T, s *store.Store) {
+			id := queuedRun(t, s, now.Add(-time.Hour))
+			if _, _, err := s.ClaimRun(ctx, "worker-a", time.Hour, now); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.Enqueue(ctx, id, 10, now.Add(-time.Minute)); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+		{"runnable with an expired lease", func(t *testing.T, s *store.Store) {
+			id := queuedRun(t, s, now.Add(-time.Hour))
+			if _, _, err := s.ClaimRun(ctx, "worker-a", time.Minute, now.Add(-30*time.Minute)); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.Enqueue(ctx, id, 10, now.Add(-time.Minute)); err != nil {
+				t.Fatal(err)
+			}
+		}, true},
+		{"finished", func(t *testing.T, s *store.Store) {
+			queuedRun(t, s, now.Add(-time.Hour))
+			lease, _, err := s.ClaimRun(ctx, "worker-a", time.Hour, now.Add(-time.Minute))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = s.FinishRun(ctx, lease, now); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+		{"failed", func(t *testing.T, s *store.Store) {
+			queuedRun(t, s, now.Add(-time.Hour))
+			lease, _, err := s.ClaimRun(ctx, "worker-a", time.Hour, now.Add(-time.Minute))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = s.FailRun(ctx, lease, now, "boom"); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := testStore(t)
+			tc.setup(t, s)
+			gauge := oldestRunnableAgeFor(t, s, now)
+			if (gauge > 0) != tc.want {
+				t.Fatalf("gauge=%v, want it above zero: %v", gauge, tc.want)
+			}
+			_, _, err := s.ClaimRun(ctx, "worker-z", time.Minute, now)
+			if claimable := err == nil; claimable != tc.want {
+				t.Fatalf("ClaimRun err=%v, claimable=%v want %v", err, claimable, tc.want)
+			}
+		})
+	}
+}
+
+// Every worker process with the default ID adds a row, and nothing used to remove
+// one, so the last-seen series and the registered count grew by one per restart and
+// an alert on last-seen age fired forever for each past process. A worker not seen
+// within the window is left out of both. The count and the gauge agree on which
+// workers there are.
+func TestLastSeenAgeOmitsPrunedWorkers(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	for id, seen := range map[string]time.Time{
+		"seen-now":      now.Add(-5 * time.Second),
+		"inside":        now.Add(-DefaultWorkerWindow + time.Second),
+		"on-the-edge":   now.Add(-DefaultWorkerWindow),
+		"just-outside":  now.Add(-DefaultWorkerWindow - time.Second),
+		"long-gone":     now.Add(-72 * time.Hour),
+		"clock-skewed":  now.Add(30 * time.Second),
+		"older-restart": now.Add(-24 * time.Hour),
+	} {
+		if err := s.RegisterWorker(ctx, id, "host", seen); err != nil {
+			t.Fatal(err)
+		}
+	}
+	render := func(window time.Duration) (map[string]float64, float64, string) {
+		t.Helper()
+		body, err := Collector{Store: s, Counters: NewCounters(), WorkerID: "w", Clock: func() time.Time { return now }, WorkerWindow: window}.Render(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		families := mustParse(t, body)
+		ages := map[string]float64{}
+		for _, sample := range families[workerLastSeenAge].samples {
+			ages[sample.labels["worker"]] = sample.value
+		}
+		return ages, sampleValue(t, families["twinwright_workers_registered"], "twinwright_workers_registered", map[string]string{}), body
+	}
+
+	ages, registered, body := render(0)
+	want := []string{"clock-skewed", "inside", "on-the-edge", "seen-now"}
+	if len(ages) != len(want) {
+		t.Fatalf("last seen series = %v, want exactly %v", ages, want)
+	}
+	for _, id := range want {
+		if _, ok := ages[id]; !ok {
+			t.Fatalf("last seen series = %v, want %s in it", ages, id)
+		}
+	}
+	if registered != float64(len(want)) {
+		t.Fatalf("registered = %v, want %d: the count must agree with the series", registered, len(want))
+	}
+	if !strings.Contains(body, DefaultWorkerWindow.String()) {
+		t.Fatalf("the HELP text does not state the window %s\n%s", DefaultWorkerWindow, body)
+	}
+
+	// A narrower window drops more, and a wider one keeps the day-old restart.
+	if ages, registered, _ = render(time.Minute); len(ages) != 2 || registered != 2 {
+		t.Fatalf("one minute window: series=%v registered=%v, want seen-now and clock-skewed", ages, registered)
+	}
+	if ages, registered, _ = render(48 * time.Hour); len(ages) != 6 || registered != 6 {
+		t.Fatalf("48 hour window: series=%v registered=%v, want every worker but long-gone", ages, registered)
+	}
+}
+
+// The first takeover, the first fencing rejection or the first denial would
+// otherwise appear in the endpoint as a new series at 1, and increase() over a
+// window that holds no earlier sample reads nothing: the first event is the one an
+// alert exists for. ADR 0021 says every series is emitted even when its value is
+// zero, so the kinds the ownership log can hold render at zero, and so do the
+// ledger event types the metrics already single out.
+func TestOwnershipEventsRenderEveryKindAtZero(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	render := func() map[string]*expoFamily {
+		t.Helper()
+		body, err := Collector{Store: s, Counters: NewCounters(), WorkerID: "w", Clock: func() time.Time { return now }}.Render(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return mustParse(t, body)
+	}
+	ownership := func(families map[string]*expoFamily, kind string) float64 {
+		t.Helper()
+		return sampleValue(t, families["twinwright_ownership_events"], "twinwright_ownership_events", map[string]string{"kind": kind})
+	}
+
+	families := render()
+	if got, want := len(families["twinwright_ownership_events"].samples), len(store.OwnershipKinds()); got != want {
+		t.Fatalf("an empty database renders %d ownership series, want %d", got, want)
+	}
+	for _, kind := range store.OwnershipKinds() {
+		if got := ownership(families, kind); got != 0 {
+			t.Fatalf("kind %q = %v on an empty database", kind, got)
+		}
+	}
+	for _, typ := range []string{"tool.response", "retry", "authorization.denied", "chaos.injected"} {
+		if got := sampleValue(t, families["twinwright_ledger_events"], "twinwright_ledger_events", map[string]string{"type": typ}); got != 0 {
+			t.Fatalf("ledger type %q = %v on an empty database", typ, got)
+		}
+	}
+
+	// The first rejection moves its own series from 0 to 1 and no other.
+	run := queuedRun(t, s, now.Add(-time.Minute))
+	if err := s.RecordFenceRejection(ctx, store.Fence{RunID: run, Owner: "worker-a", Token: 1}, now, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Append(ctx, run, "retry", map[string]any{"attempt": 1}); err != nil {
+		t.Fatal(err)
+	}
+	families = render()
+	for _, kind := range store.OwnershipKinds() {
+		want := 0.0
+		if kind == store.OwnershipFenced {
+			want = 1
+		}
+		if got := ownership(families, kind); got != want {
+			t.Fatalf("after one fencing rejection kind %q = %v want %v", kind, got, want)
+		}
+	}
+	if got := sampleValue(t, families["twinwright_ledger_events"], "twinwright_ledger_events", map[string]string{"type": "retry"}); got != 1 {
+		t.Fatalf("ledger type retry = %v after one retry event", got)
+	}
+
+	// A kind this build does not know, written by another build, is still shown.
+	if err := s.AppendOwnership(ctx, run, "lease.future-kind", "worker-a", 1, now, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := ownership(render(), "lease.future-kind"); got != 1 {
+		t.Fatalf("an unknown kind = %v, want it counted", got)
+	}
+}
+
 func TestWorkerLastSeenAge(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)
@@ -749,7 +1171,10 @@ func TestExpositionIsWellFormed(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err = s.AcquireRunLease(ctx, run.ID, "worker-a", time.Minute, now); err != nil {
+	// The lease is acquired long ago and has expired. A live lease on a runnable
+	// entry would make the entry unclaimable, and this test reads the age of one a
+	// worker can claim.
+	if _, err = s.AcquireRunLease(ctx, run.ID, "worker-a", time.Minute, now.Add(-time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	// Worker IDs are operator input and other workers' IDs are rendered too, so

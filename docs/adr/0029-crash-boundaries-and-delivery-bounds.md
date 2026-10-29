@@ -55,8 +55,10 @@ delivery there, expires the lease, lets a second worker take over, and checks:
 - `replay.Verify` passes on the recovered ledger;
 - the latest checkpoint at or before the crash, and the final one, reconstruct;
 - model requests equal model responses;
-- the dead worker's fence is refused for a new mutating call and for a call ID
-  that was already committed.
+- the dead worker's fence is refused for a new mutating call, for a call ID
+  that was already committed, and for the runner's own writes (a model turn,
+  which would overwrite the transcript and step, and a status change), which
+  leave the run row and the ledger as they were.
 
 `TestCrashMatrixSQLite` runs every (point, occurrence) of three scenarios:
 `duplicate-charge` (25 cases), `ambiguous-commit` (15) and `company-incident`
@@ -109,8 +111,9 @@ a claim could miss an expired lease or a run that had become available.
 Every time written to `run_leases`, `work_queue` and `workers` now uses
 `store.CoordinationLayout`, `2006-01-02T15:04:05.000000000Z`, in UTC. It is still
 RFC 3339, so existing parsers read it, and lexical order equals time order.
-Ledger `events` timestamps are not coordination times and are unchanged, because
-replay compares them byte for byte.
+Ledger `events` timestamps are not coordination times and are unchanged. Replay does
+not compare them either: it compares an event's type and decoded payload and never
+its `recorded_at`.
 
 Migration 3, "canonical coordination timestamps" (`store.CurrentSchemaVersion` is
 now 3), rewrites existing rows into the new form. It leaves an empty value alone,
@@ -131,6 +134,16 @@ rewritten. The migration only rewrites what exists when it runs.
 dies returns nothing, so a run that killed its worker every time was taken over
 forever. The claim count is the one signal a crash leaves behind, so a delivery
 that never reports back now counts toward the bound.
+
+A worker that is told to stop (Ctrl-C or `SIGTERM`) while a run executes does
+report back. It releases its claim under a context the stop does not reach, the
+run becomes runnable at once, and the delivery that claim counted is given back
+(`store.ReleaseClaim`, fenced like every completion), so rolling restarts cannot
+use up a run's attempts. A worker that is killed instead of stopped reports
+nothing and its delivery stays counted. If the release itself fails, the lease
+lapses on its TTL and the delivery stays counted, which is the crash path.
+`TestWorkerStoppedMidRunReleasesAndReportsStopped` and
+`TestWorkerStopDuringADrainIsACleanStop` hold this.
 
 When a claim's attempts exceed `MaxAttempts` (default 3, so the fourth delivery):
 
@@ -216,11 +229,14 @@ delivery safe". During recovery the resumed runner dispatches only calls that ha
 no tool message in the transcript (`pending` in `internal/agent/runner.go`), and
 that transcript entry commits in the same transaction as the effect. A committed
 call therefore is not presented to the dispatcher again. The saved-result lookup
-still answers a repeated (run, call ID) pair, and
-`TestDuplicateDeliveryDoesNotDuplicateCommittedEffects` shows a redelivered
-finished run committing nothing new, but the crash tests do not depend on the
-cache to avoid a duplicate. Atomic commit of effect and transcript, plus the
-fence, carry that load.
+still answers a repeated (run, call ID) pair:
+`TestCommittedCallIsAnsweredFromTheCacheUnderTheNewOwner` shows a new owner, at a
+higher fence, getting the saved result for a committed call and committing
+nothing. `TestDuplicateDeliveryDoesNotDuplicateCommittedEffects` shows only that a
+redelivered finished run commits nothing new; it returns at the completed status
+before any call is dispatched, so it does not exercise the cache. The crash tests
+do not depend on the cache to avoid a duplicate. Atomic commit of effect and
+transcript, plus the fence, carry that load.
 
 **The lease unit tests did not run against PostgreSQL.** ADR 0020 said each test
 "runs against SQLite by default and against real PostgreSQL when a DSN is
@@ -266,3 +282,10 @@ than the tests. The cost is an upgrade step, stopping old workers before migrati
 3, and a run that kills its worker three times now ends `failed` with a ledger
 event saying why, where before it was retried indefinitely. An operator who
 believes the cause was transient re-enqueues it and gets a fresh budget.
+
+## Corrections
+
+- 2026-10-28: the paragraph on the call-ID cache no longer credits `TestDuplicateDeliveryDoesNotDuplicateCommittedEffects` with showing the saved-result lookup, because that test redelivers a finished run, which returns before any call is dispatched, and a mutation that disables the cache passes it (CORE-5). `TestCommittedCallIsAnsweredFromTheCacheUnderTheNewOwner` is the test of the lookup under a new owner, and fails under that mutation.
+- 2026-10-28: a worker told to stop while a run executes now hands its claim back and gives the delivery back instead of leaving the lease to lapse with the delivery counted, because a review found that `worker --drain` and `--max-runs` exited with a requeue error on SIGTERM and every graceful stop burned an attempt (CORE-9). The sentence "a delivery that never reports back now counts toward the bound" is unchanged for a worker that dies.
+- 2026-10-28: the crash matrix's stale-worker check covers the runner's own writes (a model turn and a status change) as well as the dispatcher's, because a review found that dropping the fence from every runner write passed all suites (CORE-1). `TestStaleRunnerWritesNothingAfterTakeover` reaches each of the runner's seven durable writes with a superseded fence.
+- 2026-10-28: the paragraph on coordination timestamps gave "replay compares them byte for byte" as the reason ledger `events` timestamps were left unchanged, and the design spec repeats it. Replay does not compare them: `replay.compareEvents` compares an event's type and its decoded payload and never `recorded_at`, which differs in every event of a recovered run. The conclusion stands, since ledger timestamps are not coordination times and migration 3 does not touch them, and the sentence now says what replay compares (F3-C4). The world tables' `created_at` columns are compared, but they are not ledger timestamps. The design spec is a dated record of the design and is not edited.

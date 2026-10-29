@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"twinwright/internal/bench"
 	"twinwright/internal/gate"
 	"twinwright/internal/store"
 )
@@ -46,18 +47,68 @@ func TestRegressedBenchFailsTheGate(t *testing.T) {
 			}
 			if tc.wantExit == 0 {
 				// The approved baseline is the healthy fixture's own report, so
-				// it must compare clean; a warning here is drift nobody approved.
+				// it must compare clean. The gate would exit 0 on a warning, so
+				// this is the repository's own, stricter rule (ADR 0030, "Updating
+				// the baseline"): a warning here is drift nobody approved, and the
+				// fix is to regenerate the baseline with the change that caused it.
 				if len(result.Warnings) != 0 {
-					t.Fatalf("healthy fixture compared with warnings: %+v", result.Warnings)
+					t.Fatalf("healthy fixture compared with warnings, which the gate tolerates and this repository does not; regenerate the baseline with the change that caused them: %+v", result.Warnings)
 				}
 				return
 			}
-			for _, r := range result.Regressions {
-				if r.Case == "billing-duplicate-charge" {
-					return
-				}
+			// Two cases error under this fixture and are regressions on their own,
+			// so "the gate failed" would be true even if the failed-status path
+			// were broken. The claim is the missing write, so require that case,
+			// that kind and a candidate that failed without making it.
+			regressed, readErr := readBenchReport(candidate)
+			if readErr != nil {
+				t.Fatal(readErr)
 			}
-			t.Fatalf("no regression for billing-duplicate-charge: %+v", result.Regressions)
+			if err := missingWriteRegression(result, regressed); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+// missingWriteRegression is the check every end-to-end "the gate fails" step
+// shares, and the cases below are what it must refuse. Under the regressed
+// fixture two cases error ("no crash was injected", "has no call refund-first")
+// and each is a regression, so a check that accepts any regression, or any
+// regression on billing-duplicate-charge, passes without the failed-status path
+// ever running.
+func TestMissingWriteRegressionNeedsTheFailedCaseNotAnyRegression(t *testing.T) {
+	const id = "billing-duplicate-charge"
+	failedWithoutWrite := bench.Report{Cases: []bench.CaseResult{{ID: id, Status: "failed", Mutations: 0}}}
+	failedFinding := gate.Finding{Case: id, Kind: gate.KindNewlyFailing, Detail: "the baseline passed and the candidate failed: failed checks: refund_once"}
+	verdict := func(findings ...gate.Finding) gate.Result { return gate.Result{Regressions: findings} }
+
+	if err := missingWriteRegression(verdict(failedFinding), failedWithoutWrite); err != nil {
+		t.Fatalf("the genuine shape was refused: %v", err)
+	}
+
+	erroredElsewhere := []gate.Finding{
+		{Case: "distributed-crash-after-refund-commit", Kind: gate.KindNewlyFailing, Detail: "the baseline passed and the candidate errored: error: no crash was injected"},
+		{Case: "counterfactual-unsafe-retry", Kind: gate.KindNewlyFailing, Detail: "the baseline passed and the candidate errored: error: has no call refund-first"},
+	}
+	tests := []struct {
+		name      string
+		result    gate.Result
+		candidate bench.Report
+	}{
+		{"only the two errored cases regressed", verdict(erroredElsewhere...), failedWithoutWrite},
+		{"the right case with another kind", verdict(gate.Finding{Case: id, Kind: gate.KindPassRateDrop, Detail: "pass rate fell"}), failedWithoutWrite},
+		{"the right case and kind, but it errored", verdict(gate.Finding{Case: id, Kind: gate.KindNewlyFailing, Detail: "the baseline passed and the candidate errored: error: boom"}), failedWithoutWrite},
+		{"the candidate case errored", verdict(failedFinding), bench.Report{Cases: []bench.CaseResult{{ID: id, Status: "error", Mutations: 0}}}},
+		{"the candidate case wrote", verdict(failedFinding), bench.Report{Cases: []bench.CaseResult{{ID: id, Status: "failed", Mutations: 1}}}},
+		{"the candidate report lacks the case", verdict(failedFinding), bench.Report{Cases: []bench.CaseResult{{ID: "other", Status: "failed"}}}},
+		{"no regression at all", verdict(), failedWithoutWrite},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := missingWriteRegression(tc.result, tc.candidate); err == nil {
+				t.Fatal("accepted a result that does not show the missing write")
+			}
 		})
 	}
 }

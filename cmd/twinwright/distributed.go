@@ -7,9 +7,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -17,7 +17,6 @@ import (
 	"twinwright/internal/compiler"
 	"twinwright/internal/dispatch"
 	"twinwright/internal/metrics"
-	"twinwright/internal/redact"
 	"twinwright/internal/store"
 	"twinwright/internal/trace"
 	"twinwright/internal/worker"
@@ -65,7 +64,25 @@ func enqueueCommand(ctx context.Context, args []string, out io.Writer) error {
 	})
 }
 
+// openForReading opens the database a read-only command examines. It uses the
+// read-only open, so it never creates a database for a mistyped path and never
+// migrates one, and then checks that the schema has what the command reads.
+// The docs and AGENTS.md promise that inspection never changes the source; an
+// operator who watches a rolling upgrade with `queue` or `doctor` depends on it.
+func openForReading(ctx context.Context, dsn string, minSchema int, feature string) (*store.Store, error) {
+	s, err := store.OpenReadOnlyDSN(ctx, dsn)
+	if err != nil {
+		return nil, err
+	}
+	if err = s.RequireSchema(ctx, minSchema, feature); err != nil {
+		s.Close()
+		return nil, err
+	}
+	return s, nil
+}
+
 // queueCommand reports queue depth, the registered fleet and per-run ownership.
+// It only reads: see openForReading.
 func queueCommand(ctx context.Context, args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("queue", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -74,7 +91,7 @@ func queueCommand(ctx context.Context, args []string, out io.Writer) error {
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
-	s, err := store.OpenDSN(ctx, *dbPath)
+	s, err := openForReading(ctx, *dbPath, store.SchemaVersionQueue, "the work queue")
 	if err != nil {
 		return err
 	}
@@ -161,6 +178,14 @@ func localRunError(runID string, err error) error {
 	return fmt.Errorf("run %s failed: %w", runID, err)
 }
 
+// listenMetrics binds the address given to --metrics-addr. It is a variable so a
+// test can hand the command a listener it already holds, on a port the system chose,
+// instead of finding a free port, closing it and hoping nothing else takes it
+// before the command binds.
+var listenMetrics = func(address string) (net.Listener, error) {
+	return net.Listen("tcp", address)
+}
+
 // workerCommand runs a worker process that claims and executes queued runs.
 func workerCommand(ctx context.Context, args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("worker", flag.ContinueOnError)
@@ -179,7 +204,7 @@ func workerCommand(ctx context.Context, args []string, out io.Writer) error {
 	// OTEL_EXPORTER_OTLP_ENDPOINT: a worker that exports every completed run's
 	// trace is new behaviour, so it must be asked for with the flag.
 	otlpEndpoint := fs.String("otlp-endpoint", "", "POST each completed run's trace to this OpenTelemetry collector (empty disables export)")
-	otlpHeader := fs.String("otlp-header", "", "extra request header for the collector, as Name: value")
+	otlpHeader := fs.String("otlp-header", "", "extra request header for the collector, as Name: value; with none, OTEL_EXPORTER_OTLP_HEADERS (name=value,...) is used, which keeps a credential out of the process listing")
 	providerCfg := providerFlags(fs)
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
@@ -187,11 +212,24 @@ func workerCommand(ctx context.Context, args []string, out io.Writer) error {
 	// Checked before any file or database is touched, like a missing manifest.
 	var otlpHeaders map[string]string
 	if *otlpEndpoint != "" {
-		headers, err := parseOTLPHeader(*otlpHeader)
+		headers, err := resolveOTLPHeaders(*otlpHeader)
 		if err != nil {
 			return err
 		}
 		otlpHeaders = headers
+	}
+	// Bound here, before the worker registers or claims anything, so an address that
+	// cannot be served is an error and not a worker that runs without the metrics it
+	// was asked for. With another process on the port, Prometheus would otherwise
+	// scrape that process and never see this worker's counters.
+	var metricsListener net.Listener
+	if *metricsAddr != "" {
+		listener, err := listenMetrics(*metricsAddr)
+		if err != nil {
+			return fmt.Errorf("--metrics-addr %s cannot be served: %w", *metricsAddr, err)
+		}
+		defer listener.Close()
+		metricsListener = listener
 	}
 	manifest, err := readManifest(*manifestPath)
 	if err != nil {
@@ -210,7 +248,7 @@ func workerCommand(ctx context.Context, args []string, out io.Writer) error {
 		if err != nil {
 			return store.Run{}, err
 		}
-		provider, err := selectProvider(providerCfg.with(run.Provider, run.Model, run.Scenario))
+		provider, err := selectProvider(providerCfg.forRun(run.Provider, run.Model, run.Scenario))
 		if err != nil {
 			return store.Run{}, err
 		}
@@ -240,17 +278,22 @@ func workerCommand(ctx context.Context, args []string, out io.Writer) error {
 	// so they cannot drift from the ledger.
 	counters := metrics.NewCounters()
 	instrumentWorker(w, counters)
+	// A run's trace is exported behind the claim loop, so the last one may still be
+	// on its way when the command ends. This runs before the store is closed, which
+	// the export reads from.
+	defer w.Close()
 
-	// Ctrl-C and SIGTERM cancel the context. An in-flight run is abandoned
-	// rather than force-committed; its lease lapses and another worker picks it
-	// up, which is the same path as a crash and is already tested.
+	// Ctrl-C and SIGTERM cancel the context. A run in flight is not committed
+	// half way: ClaimAndRun hands its claim back (runnable at once, the delivery
+	// it counted given back) and returns, and the worker then stops. Only a worker
+	// that is killed leaves its lease to lapse, which is the crash path.
 	signalCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if *metricsAddr != "" {
+	if metricsListener != nil {
 		collector := metrics.Collector{Store: s, Counters: counters, WorkerID: w.ID()}
 		go func() {
-			if err := metrics.Serve(signalCtx, *metricsAddr, collector); err != nil {
+			if err := metrics.ServeListener(signalCtx, metricsListener, collector); err != nil {
 				fmt.Fprintf(os.Stderr, "twinwright: metrics endpoint stopped: %v\n", err)
 			}
 		}()
@@ -267,32 +310,46 @@ func workerCommand(ctx context.Context, args []string, out io.Writer) error {
 		return err
 	}
 	var outcomes []worker.Outcome
+	// A stop request (Ctrl-C or SIGTERM) ends the loop cleanly, like Serve: the
+	// claim in flight has already been handed back by ClaimAndRun, so there is
+	// nothing to report as an error. The summary says it stopped.
+	stopped := false
+claims:
 	for *maxRuns == 0 || len(outcomes) < *maxRuns {
 		outcome, err := w.ClaimAndRun(signalCtx)
-		if errors.Is(err, store.ErrNoWork) {
+		switch {
+		case errors.Is(err, store.ErrNoWork):
 			if *drain {
-				break
+				break claims
 			}
 			select {
 			case <-signalCtx.Done():
-				break
 			case <-time.After(*poll):
-				continue
+				continue claims
 			}
-			break
+		case err != nil:
+			if signalCtx.Err() == nil || !errors.Is(err, context.Canceled) {
+				return err
+			}
+		default:
+			outcomes = append(outcomes, outcome)
 		}
-		if err != nil {
-			return err
+		if signalCtx.Err() != nil {
+			stopped = true
+			break claims
 		}
-		outcomes = append(outcomes, outcome)
 	}
-	return writeJSON(out, map[string]any{
+	summary := map[string]any{
 		"worker":   w.ID(),
 		"claims":   len(outcomes),
 		"outcomes": outcomes,
 		"delivery": "at_least_once",
 		"backend":  string(s.Dialect),
-	})
+	}
+	if stopped {
+		summary["stopped"] = true
+	}
+	return writeJSON(out, summary)
 }
 
 // instrumentWorker connects a worker's events to the in-process counters the
@@ -334,12 +391,7 @@ func traceExporter(s *store.Store, endpoint string, headers map[string]string) f
 	for _, value := range headers {
 		secrets = append(secrets, value)
 	}
-	rawEndpoint := strings.TrimRight(endpoint, "/")
-	safeEndpoint := strings.TrimRight(redact.URL(endpoint), "/")
-	scrub := func(err error) error {
-		text := redact.String(err.Error(), secrets...)
-		return errors.New(strings.ReplaceAll(text, rawEndpoint, safeEndpoint))
-	}
+	scrub := exportErrorScrubber(endpoint, headers)
 	return func(ctx context.Context, runID string) error {
 		built, err := trace.Build(ctx, s, runID, secrets...)
 		if err != nil {

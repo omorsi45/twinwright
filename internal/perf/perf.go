@@ -27,6 +27,7 @@ import (
 	"twinwright/internal/bench"
 	"twinwright/internal/buildinfo"
 	"twinwright/internal/redact"
+	"twinwright/internal/store"
 )
 
 // SchemaVersion is the report layout this build writes.
@@ -271,9 +272,10 @@ type ThroughputResult struct {
 //
 // RecoveryMS runs from the moment the first worker has died, with its lease
 // renewed at that instant, to the moment a second worker reports the run
-// finished. A worker that dies right after a renewal is the longest wait a
-// lease allows, so this is the bound, not the average: a worker that died
-// earlier in its renewal period would be recovered sooner.
+// finished. A worker that dies right after a renewal waits the longest a lease
+// allows, so the figure is that longest wait plus the recovering worker's poll
+// and the rest of the run, not an average: a worker that died earlier in its
+// renewal period would be recovered sooner.
 type RecoveryResult struct {
 	LeaseTTLMS int64 `json:"lease_ttl_ms"`
 	RecoveryMS Stat  `json:"recovery_ms"`
@@ -313,9 +315,10 @@ type Report struct {
 }
 
 // Problems lists the findings that should fail a run: a recovery that repeated
-// a committed effect, and a crash matrix that reported a violation. An empty
-// list means nothing the report measured broke an invariant. It does not judge
-// the speed figures, which have no pass mark.
+// a committed effect, a replay that did not verify, and a crash matrix that
+// reported a violation. Each has a right answer, which is why each is a finding
+// and a slow figure is not. An empty list means nothing the report measured broke
+// an invariant. It does not judge the speed figures, which have no pass mark.
 func (r Report) Problems() []string {
 	var problems []string
 	for _, row := range r.Recovery {
@@ -323,6 +326,10 @@ func (r Report) Problems() []string {
 			problems = append(problems, fmt.Sprintf(
 				"recovery with a %d ms lease duplicated %d committed mutation(s)", row.LeaseTTLMS, row.DuplicateMutations))
 		}
+	}
+	if rep := r.Replay; rep != nil && rep.Verified != rep.Runs {
+		problems = append(problems, fmt.Sprintf(
+			"replay verified %d of %d run(s)", rep.Verified, rep.Runs))
 	}
 	if m := r.CrashMatrix; m != nil && m.Violations > 0 {
 		problems = append(problems, fmt.Sprintf(
@@ -464,6 +471,19 @@ func scrubError(err error, dsn string) error {
 	if err == nil || dsn == "" {
 		return err
 	}
+	// A PostgreSQL URL that does not parse cleanly is the case replacement cannot
+	// fix. url.Parse quotes what it rejected, and for a password with an
+	// unencoded "/", "#" or "?" that is a piece of the password in a message about
+	// a bad port, which no search for the whole DSN or the parsed password will
+	// find. pgx builds the same kind of message for the ones that parse. So the
+	// text is not cleaned, it is replaced, and the cause stays reachable for
+	// errors.Is and errors.As.
+	if store.IsPostgresDSN(dsn) && !redact.WellFormedURL(dsn) {
+		return &scrubbedError{
+			text: fmt.Sprintf("the --db value is not a usable postgres URL (%s): percent-encode any %%, /, # or ? in the password and remove spaces and control characters", redact.URL(dsn)),
+			err:  err,
+		}
+	}
 	text := err.Error()
 	clean := strings.ReplaceAll(text, dsn, redact.URL(dsn))
 	for _, secret := range dsnSecrets(dsn) {
@@ -477,8 +497,8 @@ func scrubError(err error, dsn string) error {
 
 // dsnSecrets returns the parts of a URL-form DSN that must not be printed on
 // their own: the password and any query value whose key suggests a credential.
-// A DSN that does not parse as a URL has no parts to find, and is covered by
-// the whole-string replacement in scrubError.
+// A DSN that does not parse as a URL has no parts to find; scrubError replaces
+// the whole text of an error about one instead.
 func dsnSecrets(dsn string) []string {
 	parsed, err := url.Parse(dsn)
 	if err != nil {

@@ -44,8 +44,8 @@ the benchmark suite run, so a figure describes code a test already proves correc
 - **`throughput`.** For each fleet size in `--workers` (default 1,2,4,8) and each of
   `--trials` trials (default 3): take a store, seed and enqueue `--runs` runs (default
   40), each in a world of its own, start that many in-process `worker.Worker`s on a
-  real clock with a 30 s lease and a 10 ms poll, and let each claim and run until
-  nothing is claimable. Each run executes under the fence of the claim that holds it,
+  real clock with a 30 s lease, and let each claim and run until its first empty claim
+  (a worker never waits for work, so no poll interval applies). Each run executes under the fence of the claim that holds it,
   which is the wiring `twinwright worker` uses. The trial's result is `--runs` divided
   by the wall time from just before the first worker starts to the return of the last,
   and worker registration is inside that time. Every run must end finished and
@@ -55,8 +55,9 @@ the benchmark suite run, so a figure describes code a test already proves correc
   enqueue one run, register a second worker that polls every 100 ms, and crash the
   first with `crashmatrix.CrashWith` at `after-tool-commit` on `createRefund`,
   occurrence 1, which is just after the refund commits. The dead worker's lease is then
-  renewed at that instant, so it expires exactly one TTL later, whatever time the run
-  took to reach its crash point. The result is the time from that instant until the
+  renewed at that instant, so it expires one TTL later, provided the run reached its
+  crash point within one TTL of its claim: the store refuses to renew an expired lease,
+  and a slower run fails the trial with an error instead of producing a figure. The result is the time from that instant until the
   second worker's claim ends finished, with the run completed and the claim a takeover
   of the expired lease. The wait gives up after five TTLs plus ten seconds. The refunds in the
   run's world beyond one are counted as `duplicate_mutations` and summed over the
@@ -70,7 +71,7 @@ the benchmark suite run, so a figure describes code a test already proves correc
   per-case store setup included. It is one pass and has no spread.
 
 The command writes the report, prints a short summary, and then exits 1 if any recovery
-duplicated a committed mutation or the matrix reported a violation, and 2 for bad
+duplicated a committed mutation, a replay did not verify every run or the matrix reported a violation, and 2 for bad
 input. Speed has no pass mark. A mark would have to come from a measurement, and the
 two published so far are one run each on two different machines.
 
@@ -99,6 +100,11 @@ first PostgreSQL report) is reported as it is, not explained.
 Each report records the build version and git revision, whether the tree was modified,
 the Go version, `goos`, `goarch`, the CPU count, the seed and the start time in UTC,
 beside the backend and the settings. Those are what the binary can read about itself.
+The git revision and the modified flag are the toolchain's VCS stamp, so a binary
+started with `go run`, which carries none, writes a report with neither key, and
+`make perf` builds the binary first for that reason. `TestMakePerfBuildsAStampedBinary`
+holds the Makefile to it, and `TestReportFromABuildWithoutVCSSettingsDoesNotAssertACleanTree`
+holds the report to omitting `git_modified` when nothing was recorded.
 The host operating system and its version, the CPU model, the memory, the PostgreSQL
 server version and how busy the machine was are not in the report. Each published
 report is documented with them, read off the machine when it was taken, or, for the
@@ -113,10 +119,17 @@ or `postgres`,
 and the copy of the config in the report has the DSN cleared. An error from `perf.Run`
 has the DSN removed from its text, with its password and any credential-like query
 value, before the command prints it, while still unwrapping to the original cause.
+A PostgreSQL DSN that does not parse as a URL, such as one with an unencoded `/`, `#`
+or `?` in the password, gets the cause's text replaced entirely by a fixed message
+about the `--db` value, because `url.Parse` quotes what it rejected, a piece of the
+password among it, and no search for the whole DSN finds that piece.
 `TestPerfReportShape` and `TestPerfCLIWritesTheReport` require that the report holds no
 `dsn` key and does not mention one, `TestConfigJSONUsesMillisecondsAndOmitsPrivateFields`
-holds the config's wire form, and `TestScrubErrorRemovesTheDSN` and
-`TestRunNeverPrintsTheDSNOnAConnectionFailure` hold the error text.
+holds the config's wire form, and `TestScrubErrorRemovesTheDSN`,
+`TestRunNeverPrintsAMalformedDSN` and `TestPerfCLINeverPrintsTheDSN` hold the error
+text. The last two use DSNs whose unscrubbed error carries the password, so they fail
+when the scrubber is removed; `TestRunNeverPrintsTheDSNOnAConnectionFailure` does not
+prove that, because a refused connection never puts the password in the error.
 
 ### Where published figures come from, and how they are labelled
 
@@ -141,9 +154,14 @@ of it that is cheap to hold exactly. It decodes every `docs/benchmarks/*.json` a
 object, a report with an unknown field or data after it) fails. It reads the Results
 section of `docs/performance.md`, finds each table headed `Runs/s median`, and requires
 every row's minimum, median and maximum to equal, as numbers, the row of the report the
-table cites for the same worker count. It fails when there is no report, no Results
-section, no quoted median, a citation of a file that is not committed, or a row whose
-worker count the report lacks. It runs with `go test ./...` and needs nothing outside
+table cites for the same worker count, and its `Runs per trial` to equal the report's
+`runs`. It also requires the worker counts a table quotes to be exactly the report's,
+each once, and every committed report to be quoted by some table, so an omitted or
+repeated row fails as well as an altered one. It fails when there is no report, no
+Results section, no quoted median, a citation of a file that is not committed, or a row
+whose worker count the report lacks. `TestBenchmarkDocsCheckNoticesWhatItWasWrittenToCatch`
+edits the real section (a row deleted, a row repeated, a stale `Runs per trial`, a whole
+table removed) and requires the comparison to report each. It runs with `go test ./...` and needs nothing outside
 the repository.
 
 It does not read the recovery, replay and crash matrix tables or the prose. They were
@@ -163,8 +181,8 @@ and uploads both files as the artifact `perf-postgres17`. It fails if perf exits
 non-zero. It is dispatch-only because it takes minutes and the figures mean something
 only when someone intends to record them. Running it on every push or pull request
 would spend runner time on numbers nobody reads and invite comparing two runs from
-different shared machines. Integration run 40743500240 produced the committed
-PostgreSQL report.
+different shared machines. The first manual dispatch of the job, on 2026-10-28,
+produced the committed PostgreSQL report.
 
 ## What is proven
 
@@ -225,7 +243,7 @@ shared machines. It stays on demand.
 
 **A threshold on speed.** It would fail on the noise of a shared runner, and it would
 turn a measurement into a target. The command's findings are the invariants that
-have a right answer: no duplicated mutation, no crash matrix violation.
+have a right answer: no duplicated mutation, no unverified replay, no crash matrix violation.
 
 **One table comparing the backends.** The two reports differ in machine as well as
 backend, so a joint table would invite a conclusion they do not support.
@@ -243,3 +261,11 @@ backend, so a joint table would invite a conclusion they do not support.
 - The `perf` job costs runner time only when someone dispatches it.
 - The report carries `schema_version`, 1 today. The test refuses a committed report
   whose version is 0 or newer than the build writes.
+
+## Corrections
+
+- 2026-10-28: "The database address is never recorded" claimed that an error from `perf.Run` has the DSN and its password removed, and cited two tests for it that pass with the scrubber removed. That held only for a DSN that parses: for a PostgreSQL password with an unencoded `/`, `#` or `?` the error quoted a piece of the password, and `redact.URL` kept the userinfo of such a string. The scrubber now replaces the text of an error about a DSN that does not parse cleanly, and the cited tests now use such DSNs.
+- 2026-10-28: `make perf` ran `go run`, whose binary carries no VCS stamp, so its report named no commit and still wrote `git_modified: false`, a statement about a tree nobody read (PERF-2). The target now depends on `build` and runs `./twinwright perf`. `git_modified` is omitted, not false, when the build recorded no tree state: the field kept its name and its meaning when present, so schema version 1 and the committed reports, which carry `git_modified: false` from stamped builds, read as before.
+- 2026-10-28: `perf` now exits 1, after writing the report, when a replay verified fewer runs than it executed (PERF-4). The ADR listed replay verification as a measured invariant ("replay verified 20 of 20") while only a duplicated mutation and a crash matrix violation could fail the run, so an unverified replay left the CI `perf` job green. The consequence recorded in the ledger ruling for the original task, that an unverified replay is reported in the JSON but does not change the exit code, is superseded.
+- 2026-10-28: `TestBenchmarkDocsMatchTheirReports` is now what the ADR said it was, a table equal to its report "row for row" (PERF-5). It checked each row that was present, so a dropped row, a table missing for a committed report and a stale `Runs per trial` all passed (a copy of the document with the PostgreSQL 8-worker row deleted and `40` changed to `400` still passed). It now also requires the worker counts of each table to equal its report's, once each, compares `Runs per trial` with the report's `runs`, and requires every committed report to be quoted; `TestBenchmarkDocsCheckNoticesWhatItWasWrittenToCatch` shows each of those edits failing.
+- 2026-10-28: the `throughput` bullet no longer says the workers ran with a 10 ms poll, and the `recovery` bullet no longer says the dead worker's lease expires "exactly one TTL later, whatever time the run took to reach its crash point" (PERF-6, PERF-9). Throughput workers stop at their first empty claim and never wait a poll interval, so the setting was never exercised and is removed; the figures were not affected. The lease pin is a renewal and the store refuses to renew an expired lease, so the sentence holds only when the run reaches its crash point within one TTL of its claim, and a slower run fails the trial with an error instead of publishing a figure. The `RecoveryResult` comment no longer calls the figure "the bound": it includes the recovering worker's poll and the rest of the run.

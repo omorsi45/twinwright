@@ -113,6 +113,54 @@ func (s *Store) ClaimRun(ctx context.Context, owner string, ttl time.Duration, n
 // in walking a long queue of busy runs inside a single call.
 const maxClaimAttempts = 8
 
+// claimableWhere is the condition under which a worker can claim a queue entry,
+// over work_queue as q and its lease as l (a LEFT JOIN on run_id). It is the one
+// definition of "claimable": claimOnce selects with it, and OldestClaimableSince
+// reads the same text, so the metrics gauge for the age of the oldest claimable
+// entry cannot disagree with what ClaimRun can take.
+//
+// An entry is claimable when its available_at has passed (a requeued run waits
+// out its backoff) and either it is runnable, or it is marked leased and its lease
+// is missing or expired. A lease that is live and held by someone other than the
+// claimant makes the entry unclaimable whatever the queue row says. The four
+// placeholders are bound by claimableArgs.
+const claimableWhere = `q.available_at <= ?
+  AND ( q.state = '` + QueueRunnable + `'
+        OR ( q.state = '` + QueueLeased + `' AND (l.run_id IS NULL OR l.expires_at <= ?) ) )
+  AND ( l.run_id IS NULL OR l.owner = '' OR l.owner = ? OR l.expires_at <= ? )`
+
+// claimableArgs binds claimableWhere for a claimant at the instant stamp. An
+// empty owner is nobody, so every live lease counts as someone else's.
+func claimableArgs(stamp, owner string) []any {
+	return []any{stamp, stamp, owner, stamp}
+}
+
+// OldestClaimableSince reports when the entry that has been claimable longest
+// became claimable, as a CoordinationLayout stamp, and false when no worker could
+// claim anything at now. It uses claimableWhere, so it answers for the entries
+// ClaimRun would take: a runnable entry counts from its available_at, and an entry
+// whose lease expired (a crashed worker's) counts from the later of its
+// available_at and the expiry, because it was not claimable before the lease ran
+// out. A run another worker's live lease still holds is not counted. It reads
+// only, and takes no lock.
+func (s *Store) OldestClaimableSince(ctx context.Context, now time.Time) (string, bool, error) {
+	var since string
+	err := s.DB.QueryRowContext(ctx, `
+SELECT CASE WHEN l.owner <> '' AND l.expires_at > q.available_at THEN l.expires_at ELSE q.available_at END AS claimable_since
+FROM work_queue q
+LEFT JOIN run_leases l ON l.run_id = q.run_id
+WHERE `+claimableWhere+`
+ORDER BY claimable_since
+LIMIT 1`, claimableArgs(CoordinationTime(now), "")...).Scan(&since)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return since, true, nil
+}
+
 // claimOnce selects one candidate and leases it, skipping the given run ids.
 func (s *Store) claimOnce(ctx context.Context, owner string, ttl time.Duration, now time.Time, skip []string) (RunLease, QueueEntry, error) {
 	tx, err := s.DB.BeginTx(ctx, nil)
@@ -129,7 +177,9 @@ func (s *Store) claimOnce(ctx context.Context, owner string, ttl time.Duration, 
 		lock = " FOR UPDATE OF q SKIP LOCKED"
 	}
 	stamp := CoordinationTime(now)
-	args := []any{stamp, stamp, stamp, owner, stamp}
+	// The first placeholder belongs to the displaced column of the SELECT list;
+	// the rest bind claimableWhere.
+	args := append([]any{stamp}, claimableArgs(stamp, owner)...)
 	// Placeholders are generated; the ids themselves are always bound values.
 	exclude := ""
 	if len(skip) > 0 {
@@ -150,10 +200,7 @@ SELECT q.run_id, q.state, q.max_steps, q.attempts, q.enqueued_at, q.available_at
        CASE WHEN l.owner <> '' AND l.expires_at <= ? THEN 1 ELSE 0 END
 FROM work_queue q
 LEFT JOIN run_leases l ON l.run_id = q.run_id
-WHERE q.available_at <= ?
-  AND ( q.state = '`+QueueRunnable+`'
-        OR ( q.state = '`+QueueLeased+`' AND (l.run_id IS NULL OR l.expires_at <= ?) ) )
-  AND ( l.run_id IS NULL OR l.owner = '' OR l.owner = ? OR l.expires_at <= ? )`+exclude+`
+WHERE `+claimableWhere+exclude+`
 ORDER BY q.enqueued_at, q.run_id
 LIMIT 1`+lock, args...).
 		Scan(&entry.RunID, &entry.State, &entry.MaxSteps, &entry.Attempts, &entry.EnqueuedAt, &entry.AvailableAt, &displaced)
@@ -205,6 +252,35 @@ func (s *Store) FailRun(ctx context.Context, lease RunLease, now time.Time, reas
 // and idempotent tool effects are what keep the repeat safe.
 func (s *Store) RequeueRun(ctx context.Context, lease RunLease, now, availableAt time.Time, reason string) error {
 	return s.completeQueueEntry(ctx, lease, now, QueueRunnable, OwnershipReleased, reason, availableAt)
+}
+
+// ReleaseClaim hands a claimed run back to the queue, runnable at once, and gives
+// back the delivery that claim counted. It is for a worker that was told to stop
+// while the run was executing: the work was cut short by the worker's own
+// shutdown, which says nothing about the run, so it must not count toward the
+// delivery bound or wait out a backoff. A few rolling restarts during one long run
+// would otherwise fail it at the limit.
+//
+// The release is fenced like every completion, in one transaction with the queue
+// update, the lease release and the ownership row, so only the current owner can
+// undo its own delivery. A worker that was killed instead of stopped never gets
+// here, and its delivery stays counted: that is the path a crash takes.
+func (s *Store) ReleaseClaim(ctx context.Context, lease RunLease, now time.Time, reason string) error {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err = GuardFenceTx(ctx, tx, s.Dialect, lease.Fence(), now); err != nil {
+		return err
+	}
+	if err = completeQueueEntryTx(ctx, tx, lease, now, QueueRunnable, OwnershipReleased, reason, now); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, "UPDATE work_queue SET attempts=CASE WHEN attempts>0 THEN attempts-1 ELSE 0 END WHERE run_id=?", lease.RunID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) completeQueueEntry(ctx context.Context, lease RunLease, now time.Time, state, kind, reason string, availableAt time.Time) error {
@@ -329,6 +405,27 @@ ON CONFLICT(id) DO UPDATE SET host=excluded.host, last_seen_at=excluded.last_see
 func (s *Store) TouchWorker(ctx context.Context, id string, now time.Time) error {
 	_, err := s.DB.ExecContext(ctx, "UPDATE workers SET last_seen_at=? WHERE id=?", CoordinationTime(now), id)
 	return err
+}
+
+// RemoveWorker takes a worker's row out of the fleet table when the worker stops
+// cleanly, and reports whether it removed one. A worker that still owns a live
+// lease at now keeps its row: the lease is an unfinished run, and the row is how an
+// operator finds who holds it. The row of a worker that was killed instead of
+// stopped stays, and the metrics leave it out once it has not been seen for their
+// window. Removing a row that is not there is not an error.
+func (s *Store) RemoveWorker(ctx context.Context, id string, now time.Time) (bool, error) {
+	result, err := s.DB.ExecContext(ctx, `
+DELETE FROM workers
+WHERE id=? AND NOT EXISTS (SELECT 1 FROM run_leases WHERE owner=? AND expires_at > ?)`,
+		id, id, CoordinationTime(now))
+	if err != nil {
+		return false, err
+	}
+	removed, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return removed > 0, nil
 }
 
 // WorkerRecord is one registered worker.

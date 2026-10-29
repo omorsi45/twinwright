@@ -1,6 +1,6 @@
 # Safety, scope and current limitations
 
-This page was moved out of the project README when the README was rewritten as the Twinwright Cloud overview. It holds the README sections "Safety and scope", "Current limitations", unchanged except where noted. The live-provider and performance bullets were corrected, and one link was adjusted. Paths in backticks are relative to the repository root. [Back to the guide index](README.md).
+This page was moved out of the project README when the README was rewritten as the Twinwright Cloud overview. It holds the README sections "Safety and scope", "Current limitations", unchanged except where noted. The live-provider bullet was corrected (a local model has been run and the `real-model` job runs it, while hosted providers are unverified), the container bullet says what the `docker` job showed, the delivery bullet gained atomic commit and the cost of a repeated model call, the performance bullet now says three machines and that PostgreSQL figures exist, and the read-only bullet lists `inspect`, `queue` and `doctor` with the commands it already named. Two bullets are new: one on a run retried after the delivery limit and one on the bounds of the crash-recovery evidence. One link was adjusted. Paths in backticks are relative to the repository root. [Back to the guide index](README.md).
 
 ## Safety and scope
 
@@ -30,7 +30,8 @@ one that admits a gap.
   local HTTP servers, and the chat completions adapter has also been run against
   a local Ollama model: one run is recorded in `docs/live-model-run.md` (the model
   failed the scenario, and the recording replayed with the server stopped), and the
-  Integration workflow's `real-model` job runs the same thing. `TestLiveOpenAIToolCall`
+  Integration workflow's `real-model` job runs the same thing and has passed on
+  every Integration run since 2026-10-28. `TestLiveOpenAIToolCall`
   and `TestLiveAnthropicToolCall` would call the paid APIs, are opt-in, and have never
   run in this repository's CI, so no claim is made about hosted-provider behaviour
   beyond adapter conformance. Truncation detection
@@ -42,7 +43,8 @@ one that admits a gap.
   gating, bounded startup, cleanup with captured logs on failure, graceful stop,
   explicit network, and validated resource limits. Unit tests use an injected
   runner; the real-daemon tests are gated on `TWINWRIGHT_TEST_DOCKER=1` and run
-  in the Integration workflow. No world depends on a sidecar, and container
+  in the Integration workflow, where the `docker` job passed on every run on
+  2026-10-28 and 2026-10-29. No world depends on a sidecar, and container
   identity is not carried in traces, because no sidecar is associated with a run.
 - **Shadow mode reads recorded files only.** Three connectors decode native
   JSONL, sanitized audit logs and recorded HTTP interactions, all as pure
@@ -74,19 +76,22 @@ one that admits a gap.
   skipping `FinishRun`. The PostgreSQL matrix and the PostgreSQL real-process test run
   only when a DSN is set. The `postgres` job of the Integration workflow sets one and
   runs the whole suite against PostgreSQL 16 and 17; it passed on every Integration
-  run of this branch on 2026-10-28, so those tests have run against a server there.
+  run on 2026-10-28 and 2026-10-29, so those tests have run against a server there.
   `fork`, `counterfactual`, the non-distributed `bench`
   modes and the shadow simulation execute their own new runs without a lease.
 - **The metrics endpoint is unauthenticated** and off by default. Bind it to
   loopback.
-- **Published performance numbers cover two machines, and three micro-benchmarks
-  have no figure at all.** `docs/performance.md` reports what a Windows laptop
-  measured stably and names the three benchmarks whose wall clock moved while
-  their allocation counts stayed identical, which means the measurement described
-  the host rather than the code. PostgreSQL 17 figures from one GitHub runner are in the Platform benchmarks section of
-  `docs/performance.md`; they come from a different machine and operating system layer, so they
-  are not a comparison with the SQLite figures. Nothing has been optimised on the strength of
-  these numbers; they are a baseline.
+- **Published performance numbers cover three machines, and three micro-benchmarks
+  have no figure at all.** `docs/performance.md` reports what a Windows laptop (12th
+  Gen Intel Core i5-1245U) measured stably for the storage micro-benchmarks, and names
+  the three benchmarks whose wall clock moved while their allocation counts stayed
+  identical, which means the measurement described the host rather than the code. Its
+  platform report for SQLite comes from a Windows PC under WSL2 (AMD Ryzen 9 7900X,
+  not idle while it ran), where throughput did not scale with workers and the cause
+  was not investigated, and the PostgreSQL 17 report from one GitHub runner. The three
+  are different machines and operating system layers, so none is a comparison with
+  another, and each platform report is one machine with three trials. Nothing has been
+  optimised on the strength of these numbers; they are a baseline.
 - **Read-only opens of a SQLite database in WAL mode create `-wal` and `-shm`
-  sidecars**, so `replay`, `trace` and `evaluate` need a writable directory even
-  though they never write to the database itself.
+  sidecars**, so `replay`, `trace`, `evaluate`, `inspect`, `queue` and `doctor` need a
+  writable directory even though they never write to the database itself.

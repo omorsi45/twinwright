@@ -117,9 +117,39 @@ jobs:
 
       - name: the exec agent runs in a hardened container
         # The reference agent completes the billing run behind the hardened
-        # docker run, and an agent in --network none cannot open a connection.
-        # Without this step the argv is only asserted, never accepted by a daemon.
-        run: go test -count=1 -v -run 'TestPythonAgentInHardenedContainer' ./internal/agent/
+        # docker run, an agent in --network none cannot open a connection (and the
+        # same probe does connect on a bridge network), and a container is gone
+        # after its turn is cut short by a timeout or an output flood. Without this
+        # step the argv is only asserted, never accepted by a daemon.
+        #
+        # go test exits 0 when the pattern matches no test and when a test skips,
+        # and neither is evidence, so the passes are required by name in the -v
+        # output: a renamed test, a missing image or a daemon that did not answer
+        # the image check fails the step. The bridge control may skip with a logged
+        # reason on a runner that has no outbound network; it must still have run.
+        run: |
+          set -euo pipefail
+          go test -count=1 -v -run 'TestPythonAgentInHardenedContainer|TestHardenedContainerIsGoneAfterOverflowAndTimeout' ./internal/agent/ | tee exec-container.log
+          missing=0
+          for want in \
+            '--- PASS: TestPythonAgentInHardenedContainer (' \
+            '--- PASS: TestPythonAgentInHardenedContainer/the_reference_agent_completes_the_billing_run (' \
+            '--- PASS: TestPythonAgentInHardenedContainer/network_none_leaves_the_agent_without_a_network (' \
+            '--- PASS: TestHardenedContainerIsGoneAfterOverflowAndTimeout (' \
+            '--- PASS: TestHardenedContainerIsGoneAfterOverflowAndTimeout/timeout:_the_container_is_removed (' \
+            '--- PASS: TestHardenedContainerIsGoneAfterOverflowAndTimeout/timeout:_without_the_removal_the_container_outlives_its_client (' \
+            '--- PASS: TestHardenedContainerIsGoneAfterOverflowAndTimeout/stdout_overflow:_the_container_is_removed (' \
+            '--- PASS: TestHardenedContainerIsGoneAfterOverflowAndTimeout/stdout_overflow:_without_the_removal_the_container_outlives_its_client ('; do
+            if ! grep -qF -- "$want" exec-container.log; then
+              echo "::error::missing from the test output: $want"
+              missing=1
+            fi
+          done
+          if ! grep -qE -- '--- (PASS|SKIP): TestPythonAgentInHardenedContainer/the_probe_does_connect_on_a_bridge_network \(' exec-container.log; then
+            echo "::error::the bridge control subtest did not run"
+            missing=1
+          fi
+          exit "$missing"
 
       - name: the shipped example config starts and stops through the CLI
         run: |
@@ -176,7 +206,24 @@ jobs:
           exit 1
 
       - name: export a run and query it back, scrape a worker and query it back
-        run: go test -count=1 -v -run 'TestSpansAreQueryableInJaeger|TestPrometheusScrapesAWorker' ./internal/trace/ ./internal/metrics/
+        # go test exits 0 when the -run pattern matches no test and when a test
+        # skips (these two skip unless TWINWRIGHT_TEST_OTEL=1), and neither is
+        # evidence that Jaeger or Prometheus was asked anything. So the passes are
+        # required by name in the -v output: a renamed test, a renamed environment
+        # variable or a skip fails the step.
+        run: |
+          set -euo pipefail
+          go test -count=1 -v -run 'TestSpansAreQueryableInJaeger|TestPrometheusScrapesAWorker' ./internal/trace/ ./internal/metrics/ | tee observability.log
+          missing=0
+          for want in \
+            '--- PASS: TestSpansAreQueryableInJaeger (' \
+            '--- PASS: TestPrometheusScrapesAWorker ('; do
+            if ! grep -qF -- "$want" observability.log; then
+              echo "::error::missing from the test output: $want"
+              missing=1
+            fi
+          done
+          exit "$missing"
 
       - name: stack logs
         if: failure()
@@ -308,8 +355,8 @@ jobs:
     # only when someone intends to record them. A run on every push or pull
     # request would spend runner time on numbers nobody reads and would invite
     # comparing two runs from different shared machines. The job also fails when
-    # perf exits non-zero, which it does on a duplicated mutation or a
-    # crash-matrix violation.
+    # perf exits non-zero, which it does on a duplicated mutation, a replay
+    # that did not verify or a crash-matrix violation.
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -432,16 +479,27 @@ jobs:
 
       - name: stack logs and worker logs
         if: failure()
+        # Every file the script copied to TW_DEMO_LOGS, which is every file its
+        # failure messages point to (run statuses, the held run's queue state,
+        # the enqueue, bench and gate output as well as the worker logs). The
+        # last 300 lines of each are printed; the artifact below has them whole.
         run: |
           docker compose ps
           docker compose logs
-          for f in "$TW_DEMO_LOGS"/worker-*.log "$TW_DEMO_LOGS"/lock-session.log; do
+          for f in "$TW_DEMO_LOGS"/*; do
             if [ -f "$f" ]; then
               echo "::group::$(basename "$f")"
-              cat "$f"
+              tail -n 300 "$f"
               echo "::endgroup::"
             fi
           done
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: demo-stack-logs
+          path: ${{ runner.temp }}/demo-logs
+          if-no-files-found: warn
 
       - name: stop the stack
         if: always()

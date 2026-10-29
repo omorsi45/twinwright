@@ -67,6 +67,9 @@ func ExecuteLocal(ctx context.Context, s *store.Store, runID string, cfg Config,
 		cfg.LeaseTTL = DefaultLocalLeaseTTL
 	}
 	cfg = cfg.withDefaults()
+	if err := cfg.Validate(); err != nil {
+		return store.Run{}, err
+	}
 
 	lease, err := s.AcquireRunLease(ctx, runID, cfg.ID, cfg.LeaseTTL, cfg.Clock.Now())
 	if err != nil {
@@ -76,24 +79,18 @@ func ExecuteLocal(ctx context.Context, s *store.Store, runID string, cfg Config,
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	w := &Worker{Store: s, Config: cfg}
-	renewalLost := make(chan struct{})
+	loss := &leaseLoss{}
 	renewalDone := make(chan struct{})
 	go func() {
 		defer close(renewalDone)
-		w.renew(runCtx, lease, cancel, renewalLost)
+		w.renew(runCtx, lease, cancel, loss)
 	}()
 
 	run, fnErr := fn(runCtx, lease.Fence())
 	cancel()
 	<-renewalDone
 
-	lost := false
-	select {
-	case <-renewalLost:
-		lost = true
-	default:
-	}
-
+	lost := loss.lost
 	// Release even when ctx is cancelled: cancellation is the Ctrl-C path, and
 	// it is exactly when the lease must not be left behind. A release that is
 	// rejected as fenced means the lease was already lost, which is reported
@@ -109,6 +106,10 @@ func ExecuteLocal(ctx context.Context, s *store.Store, runID string, cfg Config,
 
 	var outcome error
 	switch {
+	case lost && loss.cause != nil && !errors.Is(loss.cause, store.ErrFenced):
+		// The lease lapsed while renewals were failing; say why, not just that it
+		// was lost.
+		outcome = fmt.Errorf("%w: %w", store.ErrFenced, loss.cause)
 	case lost && fnErr != nil && errors.Is(fnErr, store.ErrFenced):
 		outcome = fnErr
 	case lost && fnErr != nil:

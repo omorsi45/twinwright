@@ -27,9 +27,35 @@ import (
 // TestMain turns this test binary into the agent process when the exec provider
 // starts it with exectest.Mode set. Without the variable it is an ordinary
 // test run.
+//
+// It is also the Twinwright that the parent-death test kills: with
+// parentPIDFile set it runs one turn against a hanging agent and waits.
 func TestMain(m *testing.M) {
 	exectest.MaybeRun()
+	if file := os.Getenv(parentPIDFile); file != "" {
+		runAsParent(file)
+	}
 	os.Exit(m.Run())
+}
+
+// parentPIDFile names the file the hanging agent of runAsParent writes its pid
+// to; setting it turns this test binary into a Twinwright mid-turn.
+const parentPIDFile = "TW_EXEC_TEST_PARENT_PIDFILE"
+
+// runAsParent runs one turn against an agent that never answers, and never
+// returns normally: the test kills this process while the turn is running.
+func runAsParent(pidFile string) {
+	exe, err := os.Executable()
+	if err != nil {
+		os.Exit(2)
+	}
+	provider := ExecProvider{
+		Command: []string{exe},
+		Env:     []string{exectest.Mode + "=hang", exectest.PIDFile + "=" + pidFile},
+		Timeout: time.Minute,
+	}
+	provider.Next(context.Background(), "task", nil, nil)
+	os.Exit(3)
 }
 
 // helperProvider is an ExecProvider whose agent is this test binary in the
@@ -124,6 +150,9 @@ func TestExecProviderRejectsMisbehavingAgents(t *testing.T) {
 		{name: "no content", mode: "no-content", want: []string{"content"}},
 		{name: "neither content nor calls", mode: "nothing-to-say", want: []string{"no content and no tool calls"}},
 		{name: "data after the object", mode: "trailing", want: []string{"after the response"}},
+		{name: "usage with no counts", mode: "usage-empty", want: []string{"usage", "input_tokens"}},
+		{name: "usage with one count", mode: "usage-partial", want: []string{"usage", "output_tokens"}},
+		{name: "usage that is null", mode: "usage-null", want: []string{"usage", "object"}},
 		{name: "stdout flood", mode: "flood", within: 10 * time.Second, want: []string{"exceeded", strconv.Itoa(MaxAgentOutputBytes)}, gone: true},
 		{name: "hang", mode: "hang", timeout: 500 * time.Millisecond, within: 2 * time.Second, interrupted: true, gone: true},
 		{name: "hang that ignores SIGTERM", mode: "hang-ignore-term", timeout: 500 * time.Millisecond, within: 4 * time.Second, interrupted: true, gone: true},
@@ -182,7 +211,7 @@ func requireGone(t *testing.T, file string, patience time.Duration) {
 	if err != nil {
 		t.Fatalf("the process never wrote its pid, so its exit cannot be checked: %v", err)
 	}
-	pid, err := strconv.Atoi(string(raw))
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,6 +228,9 @@ func TestExecProviderRefusesAnUnstartableAgent(t *testing.T) {
 	_, err := ExecProvider{Command: []string{missing}, Timeout: time.Second}.Next(context.Background(), "task", nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "start") {
 		t.Fatalf("err = %v, want a start failure", err)
+	}
+	if strings.Contains(err.Error(), "no-such-agent") {
+		t.Fatalf("err = %v, which names the command that was run", err)
 	}
 	var interrupt *CallInterrupted
 	if errors.As(err, &interrupt) {
@@ -227,9 +259,12 @@ func TestExecProviderRefusesBadConfiguration(t *testing.T) {
 	}
 }
 
-// An agent that exits without reading its input must not hang the turn, even
-// when the request is far larger than a pipe buffer: the write would otherwise
-// block for ever.
+// An agent that exits without reading its input must not fail the turn, even when
+// the request is far larger than a pipe buffer: the write fails when the agent's
+// exit closes the pipe, and that is the agent's business, not an error of the
+// turn. This does not show that the write is off the turn's path; a synchronous
+// write would pass it too. TestExecProviderTimesOutAnAgentThatNeverReadsALargeRequest
+// is the test for that.
 func TestExecProviderDoesNotBlockOnAnAgentThatNeverReads(t *testing.T) {
 	p := helperProvider(t, "ignore-stdin")
 	p.Timeout = 10 * time.Second
@@ -372,6 +407,37 @@ func TestExecProviderRecordsUsageTheAgentReports(t *testing.T) {
 	}
 	if message.Content != "counted" || message.Usage == nil || *message.Usage != (Usage{InputTokens: 3, OutputTokens: 4, TotalTokens: 7}) {
 		t.Fatalf("message = %+v", message)
+	}
+}
+
+// A usage that is there follows the schema: an object with the three counts, as
+// integers, and nothing else. The three malformed ones in the misbehaving-agent
+// table are the cases the decoder used to accept; these are the ones it refuses.
+func TestExecUsageIsHeldToTheSchema(t *testing.T) {
+	head := `{"protocol":"twinwright.agent.v1","content":"x","tool_calls":[],"usage":`
+	for name, usage := range map[string]string{
+		"an unknown member":          `{"input_tokens":1,"output_tokens":2,"total_tokens":3,"cost":4}`,
+		"a count that is a string":   `{"input_tokens":"1","output_tokens":2,"total_tokens":3}`,
+		"a count that is fractional": `{"input_tokens":1.5,"output_tokens":2,"total_tokens":3}`,
+		"a count that is null":       `{"input_tokens":null,"output_tokens":2,"total_tokens":3}`,
+		"not an object":              `5`,
+		"an array":                   `[1,2,3]`,
+	} {
+		var response execResponse
+		if err := decodeExecResponse([]byte(head+usage+"}"), &response); err == nil {
+			t.Errorf("usage as %s was accepted: %s", name, usage)
+		}
+	}
+	var response execResponse
+	if err := decodeExecResponse([]byte(head+`{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.usage == nil || *response.usage != (Usage{InputTokens: 1, OutputTokens: 2, TotalTokens: 3}) {
+		t.Fatalf("usage = %+v", response.usage)
+	}
+	response = execResponse{}
+	if err := decodeExecResponse([]byte(`{"protocol":"twinwright.agent.v1","content":"x","tool_calls":[]}`), &response); err != nil || response.usage != nil {
+		t.Fatalf("a response without usage: err = %v, usage = %+v", err, response.usage)
 	}
 }
 
@@ -579,7 +645,7 @@ func TestAgentSchemasMatchTheProtocol(t *testing.T) {
 	checkObjectSchema(t, "request history interruption", schemaChild(t, request, "properties", "history", "items", "properties", "interruptions", "items"), reflect.TypeOf(Interruption{}))
 	checkObjectSchema(t, "response", response, reflect.TypeOf(execResponse{}))
 	checkObjectSchema(t, "response tool call", schemaChild(t, response, "properties", "tool_calls", "items"), reflect.TypeOf(execToolCall{}))
-	checkObjectSchema(t, "response usage", schemaChild(t, response, "properties", "usage"), reflect.TypeOf(Usage{}))
+	checkObjectSchema(t, "response usage", schemaChild(t, response, "properties", "usage"), reflect.TypeOf(execUsage{}))
 	if got := schemaChild(t, request, "properties", "protocol")["const"]; got != AgentProtocol {
 		t.Errorf("request protocol const = %v", got)
 	}

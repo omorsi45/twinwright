@@ -161,8 +161,8 @@ database, not an agent.
 
 | Workload | What one measurement is |
 | --- | --- |
-| `throughput` | For each fleet size and each trial: a fresh store, `--runs` seeded runs queued, then that many in-process workers (`worker.Worker`, a real clock, a 30 s lease, a 10 ms poll), each running its claims under that claim's fence, which is the wiring `twinwright worker` uses. The result is `--runs` divided by the wall time from just before the first worker starts until the last one returns, which it does when nothing is claimable. Every run must end finished and completed, or the trial is an error. |
-| `recovery` | For each lease TTL and each trial: one run is queued and a first worker is crashed in process at `after-tool-commit` on `createRefund`, just after the refund commits. The dead worker's lease is renewed at that instant, so it expires one TTL later. The result is the time from that instant until a second worker, polling every 100 ms, reports the run finished and completed through a takeover. `duplicate_mutations` counts committed refunds beyond the one the run owns, summed over the trials, and must be 0. |
+| `throughput` | For each fleet size and each trial: a fresh store, `--runs` seeded runs queued, then that many in-process workers (`worker.Worker`, a real clock, a 30 s lease), each running its claims under that claim's fence, which is the wiring `twinwright worker` uses. The result is `--runs` divided by the wall time from just before the first worker starts until the last one returns, which it does at its first empty claim, so no worker ever waits a poll interval. Every run must end finished and completed, or the trial is an error. |
+| `recovery` | For each lease TTL and each trial: one run is queued and a first worker is crashed in process at `after-tool-commit` on `createRefund`, just after the refund commits. The dead worker's lease is renewed at that instant, so it expires one TTL later, provided the run reached its crash point within one TTL of its claim; the store refuses to renew an expired lease, and a slower run fails the trial with an error. The result is the time from that instant until a second worker, polling every 100 ms, reports the run finished and completed through a takeover. `duplicate_mutations` counts committed refunds beyond the one the run owns, summed over the trials, and must be 0. |
 | `replay` | `--replay-runs` runs are executed to completion, then `replay.Verify` is timed on each. The statistics are over those per-run times, not over trials. |
 | `crash-matrix` | Every `duplicate-charge` crash case is enumerated and run to recovery. The result is the case count, the violations summed over the cases, and the wall time of the whole pass, enumeration and per-case store setup included. It is one pass, so it has no spread. |
 
@@ -171,13 +171,15 @@ database, not an agent.
 ```bash
 twinwright perf --out perf.json                              # every workload, temporary SQLite file
 twinwright perf --db "postgres://user:pw@host/db" --out perf.json
-make perf                                                    # the first form, via go run, into the git-ignored perf.json
+make perf                                                    # builds ./twinwright first, so the report names its commit; writes the git-ignored perf.json
 ```
 
 The defaults are fleet sizes 1,2,4,8, 40 runs per trial, 3 trials, lease TTLs
-1s,2s,5s, 20 replay runs, seed 42 and all four workloads. `--out` is required. The
+1s,2s,5s, 20 replay runs, seed 42 and all four workloads. `--out` is required, and the
+command checks that it can write there (exit 2 otherwise) before it measures anything, since the report is
+written only at the end. The
 command writes the report, prints a short summary, and then exits 1 if a recovery
-duplicated a committed mutation or the crash matrix reported a violation, or 2 for
+duplicated a committed mutation, a replay did not verify every run or the crash matrix reported a violation, or 2 for
 bad input.
 
 The PostgreSQL figures come from the `perf` job of
@@ -210,12 +212,14 @@ uploads both files as the artifact `perf-postgres17`.
 - **The environment travels with the figures.** Each report records the build
   version, git revision and whether the tree was modified, the Go version, `goos`,
   `goarch`, the CPU count, the seed and the start time (UTC), plus the backend and the
-  measurement settings. The host operating system, CPU model, memory and PostgreSQL
+  measurement settings. A binary started with `go run` carries no VCS information, so
+  its report has neither a revision nor `git_modified`; only a built binary (`make
+  perf` builds one) records both. The host operating system, CPU model, memory and PostgreSQL
   server version are not in the JSON; they are quoted beside each report below, from
   what was read off the machine or, for the runner, from its `runner.txt`.
 - **The database address is never recorded.** The report names the backend (`sqlite`
   or `postgres`), not the DSN, and an error from a failed run has the DSN removed
-  from its text.
+  from its text, including when the DSN is not a valid URL (`TestRunNeverPrintsAMalformedDSN`).
 - **Where published figures come from.** A figure in the Results section is copied
   from a report committed unchanged in `docs/benchmarks/`. The file name states the
   date and the machine. `TestBenchmarkDocsMatchTheirReports` reads those reports and

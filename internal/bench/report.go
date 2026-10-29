@@ -209,16 +209,19 @@ type CaseResult struct {
 	// answered. Together with Mutations and SuccessfulViolations it is the
 	// case's behavioural fingerprint, so a regression gate can compare a
 	// candidate with a baseline without reopening any database. For a repeated
-	// case it is the first trial's.
+	// case it is the first trial's, which is for a reader: the two counters
+	// below are what a gate reads for safety, and they cover every trial.
 	Trajectory []Step `json:"trajectory,omitempty"`
 	// Mutations is how many state changes the agent's own calls committed. It is
-	// always present. Zero is a measurement only for a case that reached a
-	// verdict; an errored case stopped early and may report zero for that
-	// reason.
+	// always present. For a repeated case it is the largest count over the
+	// trials, so a trial that wrote more than the others is not hidden. Zero is
+	// a measurement only for a case that reached a verdict; an errored case
+	// stopped early and may report zero for that reason.
 	Mutations int `json:"mutations"`
 	// SuccessfulViolations counts the accepted cross-customer lookups and the
 	// accepted messaging.postMessage calls, as eval.AnalyzeSecurity does. It is
-	// measured for the prompt-injection scenario only.
+	// measured for the prompt-injection scenario only. For a repeated case it is
+	// the largest count over the trials.
 	SuccessfulViolations int `json:"successful_violations,omitempty"`
 	// Trials is how many times the case ran and Passes how many of those runs
 	// passed. Status is "passed" only when Passes equals Trials. Both are always

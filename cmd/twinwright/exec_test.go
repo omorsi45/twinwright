@@ -269,6 +269,14 @@ func TestSelectProviderWrapsTheAgentInAContainer(t *testing.T) {
 		t.Fatalf("provider = %#v, want an ExecProvider with a wrapper", provider)
 	}
 	got := exec.Wrap(exec.Command)
+	// Each turn's container is named so that it can be removed after a timeout;
+	// the name is random, so it is checked for its shape and taken out, and the
+	// rest of the argv is what is compared whole.
+	nameAt := slices.Index(got, "--name")
+	if nameAt < 0 || nameAt+1 >= len(got) || !strings.HasPrefix(got[nameAt+1], "tw-agent-") {
+		t.Fatalf("argv has no tw-agent- container name: %q", got)
+	}
+	got = slices.Concat(got[:nameAt], got[nameAt+2:])
 	want := []string{
 		"docker", "run", "--rm", "-i", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
 		"--user", "65534:65534", "--network", "none", "--memory", "512m", "--cpus", "1", "--pids-limit", "128",
@@ -280,6 +288,16 @@ func TestSelectProviderWrapsTheAgentInAContainer(t *testing.T) {
 	}
 	if !slices.Equal(exec.Env, []string{"TW_AGENT_TOKEN=token-value-for-test"}) {
 		t.Fatalf("the docker client's environment = %q", exec.Env)
+	}
+	// The daemon's connection variables go to the docker client, from this
+	// process, and are never among the names passed into the container.
+	if !slices.Equal(exec.ClientEnv, agent.DockerClientEnv) || exec.Cleanup == nil {
+		t.Fatalf("client environment = %q, cleanup set = %v", exec.ClientEnv, exec.Cleanup != nil)
+	}
+	for _, arg := range got {
+		if strings.Contains(arg, "DOCKER_") {
+			t.Fatalf("the docker command line carries a connection variable: %q", arg)
+		}
 	}
 
 	// Without --agent-container the process runs directly.

@@ -211,7 +211,7 @@ func runCase(ctx context.Context, c Case, manifests worldManifests, options Opti
 // case's result. It is pure so the precedence can be tested without running
 // anything. The caller passes at least one result.
 //
-// Run identity, model, fingerprint and counts come from the first trial, so a
+// Run identity, model, trajectory and counts come from the first trial, so a
 // one-trial case reports exactly what it did before trials existed. WallMS is
 // the first trial's too: Summary latency percentiles read it, and a sum over
 // trials would make a --trials N run look N times slower than the same suite
@@ -227,9 +227,14 @@ func runCase(ctx context.Context, c Case, manifests worldManifests, options Opti
 // trial of the winning kind, so the report names a real failure and says which
 // trial's database to open.
 //
-// The duplicate-effects inputs cover every trial rather than the first: a
-// retry that happened in trial 2 is still a retry, so UnsafeRetry is true if
-// any trial retried unsafely and the refund counts take the maximum.
+// The safety and duplicate-effects inputs cover every trial rather than the
+// first: a retry, a refund, a state write or a cross-customer lookup that
+// happened in trial 2 still happened. UnsafeRetry is true if any trial retried
+// unsafely, and the refund, mutation and successful-violation counts take the
+// maximum. Mutations and SuccessfulViolations are what the regression gate
+// compares, and a live-model report is gated with a tolerance that absorbs a
+// lost trial, so reading them from trial 1 alone would let a leak in any later
+// trial through and make the gate's verdict depend on which trial leaked.
 func foldTrials(trials []CaseResult) CaseResult {
 	result := trials[0]
 	result.Trials = len(trials)
@@ -247,6 +252,8 @@ func foldTrials(trials []CaseResult) CaseResult {
 		result.UnsafeRetry = result.UnsafeRetry || one.UnsafeRetry
 		result.AgentRefunds = max(result.AgentRefunds, one.AgentRefunds)
 		result.DuplicateRefunds = max(result.DuplicateRefunds, one.DuplicateRefunds)
+		result.Mutations = max(result.Mutations, one.Mutations)
+		result.SuccessfulViolations = max(result.SuccessfulViolations, one.SuccessfulViolations)
 	}
 	result.Passes = passes
 	verdict := failing
