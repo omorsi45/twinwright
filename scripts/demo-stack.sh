@@ -14,9 +14,24 @@
 # removes their data.
 #
 # Environment:
+#   TW_DEMO_PG_PORT  the host port PostgreSQL is published on (default 5432).
+#                 docker-compose.yml reads the same variable with the same
+#                 default, so set it once, in the environment of this command, and
+#                 both the container's port mapping and every DSN the script
+#                 builds follow it. Use it when something else holds 5432.
 #   TW_DEMO_LOGS  when set, the worker logs and outcome files are copied to this
 #                 directory on exit, with any password in a DSN masked. CI sets it
 #                 so a failed run leaves something to read.
+#
+# The work directory (the built CLI, the two manifests, the worker logs and the
+# outcome files) is a mktemp directory. It is removed when the script exits 0 and
+# kept when it does not, with its path printed, because its logs are the evidence
+# for a failure. The Compose services are never removed by the script.
+#
+# Ports it needs free: the Compose ports (PostgreSQL, 4318, 13133, 16686, 9090)
+# and 9095 and 9096 for the two workers' metrics. It refuses to start when either
+# metrics port already answers, because a worker left over from an earlier run
+# would otherwise be scraped as if it were this run's.
 #
 # What it does to the PostgreSQL server:
 #   It never touches the `twinwright` database, which is the developer's. It drops
@@ -60,7 +75,9 @@
 #   2. the ownership log shows A's lease taken over by B
 #   3. Prometheus counts the takeover (twinwright_worker_takeovers_total, worker B)
 #   4. Prometheus scraped both workers (A's target is down after its kill, which is
-#      expected)
+#      expected). Each worker's own metrics endpoint is first shown to be that
+#      worker's, by its own twinwright_worker_claims_total series carrying its
+#      worker ID, so an unrelated process on the port cannot satisfy checks 3 and 4.
 #   5. every run's trace is queryable in Jaeger by its trace ID
 #   6. the benchmark gate passes against the approved baseline (SQLite, temp dir)
 #
@@ -79,6 +96,7 @@ WORKER_B="demo-worker-b"
 WORKER_BILLING="demo-worker-billing"
 A_PORT=9095
 B_PORT=9096
+PG_PORT="${TW_DEMO_PG_PORT:-5432}"
 OTLP_ENDPOINT="http://127.0.0.1:4318"
 COLLECTOR_HEALTH="http://127.0.0.1:13133/"
 JAEGER_URL="http://127.0.0.1:16686"
@@ -93,6 +111,9 @@ for tool in curl jq go docker; do
   command -v "$tool" > /dev/null 2>&1 || { printf 'demo-stack: %s is required and was not found on PATH\n' "$tool" >&2; exit 2; }
 done
 docker compose version > /dev/null 2>&1 || { printf 'demo-stack: docker compose is required and was not found\n' >&2; exit 2; }
+case "$PG_PORT" in
+  '' | *[!0-9]*) printf 'demo-stack: TW_DEMO_PG_PORT must be a port number, got "%s"\n' "$PG_PORT" >&2; exit 2 ;;
+esac
 
 WORK="$(mktemp -d)"
 BIN="$WORK/twinwright"
@@ -105,7 +126,7 @@ BILLING_MANIFEST="$WORK/billing.manifest.json"
 # message that quotes one.
 scrub() { sed -E 's#(postgres(ql)?://)[^@/[:space:]]*@#\1***@#g'; }
 
-dsn() { printf 'postgres://twinwright:twinwright@127.0.0.1:5432/%s?sslmode=disable' "$1"; }
+dsn() { printf 'postgres://twinwright:twinwright@127.0.0.1:%s/%s?sslmode=disable' "$PG_PORT" "$1"; }
 
 A_PID=""
 B_PID=""
@@ -150,8 +171,12 @@ save_logs() {
   [ -n "${TW_DEMO_LOGS:-}" ] || return 0
   mkdir -p "$TW_DEMO_LOGS" || return 0
   local f
+  # Every file a failure message points to: the workers' logs and outcomes, the
+  # lock session, the queue and run states the checks read, and the output of the
+  # enqueue, bench and gate commands.
   for f in "$WORK"/worker-*.log "$WORK"/worker-*.json "$WORK"/lock-session.log \
-    "$WORK"/held-run-queue.json "$WORK"/run-statuses.txt "$WORK"/gate.out; do
+    "$WORK"/held-run-queue.json "$WORK"/run-statuses.txt "$WORK"/enqueue.err \
+    "$WORK"/bench.out "$WORK"/bench.err "$WORK"/gate.out; do
     [ -f "$f" ] || continue
     scrub < "$f" > "$TW_DEMO_LOGS/$(basename "$f")" || true
   done
@@ -160,7 +185,9 @@ save_logs() {
 
 # cleanup runs on every exit. A worker the script started never outlives it, and
 # the lock session always ends, so a failed run cannot leave the company database
-# frozen for the next one (the next run also drops the database with FORCE).
+# frozen for the next one (the next run also drops the database with FORCE). The
+# work directory goes only with a successful run: after a failure its logs are the
+# evidence, so it stays and its path is printed.
 cleanup() {
   local rc=$?
   trap - EXIT
@@ -170,7 +197,9 @@ cleanup() {
   stop_hard "$C_PID"
   end_lock_session
   save_logs
-  if [ "$rc" -ne 0 ]; then
+  if [ "$rc" -eq 0 ]; then
+    rm -rf "$WORK"
+  else
     printf '\ndemo-stack: exited %s. Work directory: %s\n' "$rc" "$WORK" >&2
   fi
   exit "$rc"
@@ -259,7 +288,35 @@ evidence() {
   printf '%s\n' "$line"
 }
 
-printf 'demo-stack: work directory %s (binary, manifests, worker logs and outcomes)\n' "$WORK"
+printf 'demo-stack: work directory %s (binary, manifests, worker logs and outcomes; removed when the demo succeeds, kept when it fails)\n' "$WORK"
+
+# --------------------------------------------------------------------------
+step "check that the workers' metrics ports are free"
+# port_in_use is true when something accepts connections on the loopback port.
+# Both workers bind every interface, so a leftover worker, or any other process,
+# answers on 127.0.0.1 as well.
+port_in_use() { (: < "/dev/tcp/127.0.0.1/$1") 2> /dev/null; }
+for port in "$A_PORT" "$B_PORT"; do
+  if port_in_use "$port"; then
+    fail "port $port is already in use (a worker left over from an earlier run? find it with: ss -ltnp | grep :$port). Stop that process and run the demo again"
+  fi
+done
+note "ports $A_PORT and $B_PORT are free"
+
+# serves_own_series is true when the metrics endpoint on the port serves the
+# claims counter labelled with this worker's ID. The counter is the process's
+# own and is rendered at zero before the first claim, unlike the gauges read from
+# the database, which every worker serves for every worker. Seeing it proves the
+# endpoint belongs to the worker the script started, not to a process that happens
+# to answer with a valid exposition. A worker that has exited is a failure.
+serves_own_series() {
+  local pid="$1" port="$2" worker="$3" body
+  alive "$pid" || fail "worker $worker exited before its metrics endpoint on port $port served its own series; see the worker logs"
+  # The body is read whole before grep sees it: under pipefail a grep -q that
+  # stops reading early would turn curl's broken pipe into a false negative.
+  body="$(curl -fsS --max-time 3 "http://127.0.0.1:$port/metrics" 2> /dev/null)" || return 1
+  grep -Fq "twinwright_worker_claims_total{worker=\"$worker\"}" <<< "$body"
+}
 
 # --------------------------------------------------------------------------
 step "start PostgreSQL, the OpenTelemetry Collector, Jaeger and Prometheus"
@@ -373,7 +430,7 @@ T_WORKERS="$(date +%s)"
   --lease-ttl 5s --poll 200ms --metrics-addr "0.0.0.0:$A_PORT" --otlp-endpoint "$OTLP_ENDPOINT" --drain \
   > "$WORK/worker-a.json" 2> "$WORK/worker-a.log" &
 A_PID=$!
-
+require_wait "port $A_PORT to serve worker A's own metrics series" 30 serves_own_series "$A_PID" "$A_PORT" "$WORKER_A"
 a_holds_a_lease() {
   alive "$A_PID" || fail "worker A exited before it held a lease"
   local leased
@@ -419,7 +476,7 @@ step "start worker B, which takes the run over once the lease lapses"
   --lease-ttl 5s --poll 200ms --metrics-addr "0.0.0.0:$B_PORT" --otlp-endpoint "$OTLP_ENDPOINT" \
   > "$WORK/worker-b.json" 2> "$WORK/worker-b.log" &
 B_PID=$!
-
+require_wait "port $B_PORT to serve worker B's own metrics series" 30 serves_own_series "$B_PID" "$B_PORT" "$WORKER_B"
 company_finished() {
   alive "$B_PID" || fail "worker B exited before the company database was drained"
   local finished
@@ -549,7 +606,11 @@ step "summary"
 printf '\nEvidence (%d checks, %d missing):\n%s\n' "$EVIDENCE_COUNT" "$EVIDENCE_FAILED" "$EVIDENCE"
 printf 'Jaeger UI:  %s\n' "$JAEGER_URL"
 printf 'Prometheus: %s\n' "$PROM_URL"
-printf 'Work directory (worker logs, outcomes, manifests): %s\n' "$WORK"
+if [ "$EVIDENCE_FAILED" -ne 0 ]; then
+  printf 'Work directory, kept because a check is missing (worker logs, outcomes, manifests): %s\n' "$WORK"
+else
+  printf 'The work directory (CLI binary, manifests, worker logs) is removed on exit; set TW_DEMO_LOGS to keep copies of the logs.\n'
+fi
 printf 'The stack is still running. Stop it with:  make down   (this also removes the Compose services'"'"' data)\n'
 
 if [ "$EVIDENCE_FAILED" -ne 0 ]; then

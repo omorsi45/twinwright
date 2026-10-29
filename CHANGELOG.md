@@ -13,6 +13,20 @@ database written by a newer build is refused rather than downgraded.
 
 ### Fixed
 
+- **`make demo-stack` no longer trusts whatever answers on the workers' metrics ports, follows the
+  PostgreSQL port Compose published, shows its failure files in CI, and cleans up after a success.**
+  Checks 3 and 4 read Prometheus, which scrapes ports 9095 and 9096 on the host, so a worker left
+  over from an earlier run (or any process) holding a port could satisfy them. The script now
+  refuses to start when either port answers and requires each endpoint to serve its own worker's
+  `twinwright_worker_claims_total` series (`TestDemoStackRefusesAnOccupiedMetricsPortBeforeStartingAnything`).
+  `docker-compose.yml` told readers to change the host port while the script connected to 5432; both
+  now read `TW_DEMO_PG_PORT`, default 5432 (`TestDemoStackPostgresPortComesFromOneVariable`). The
+  files its failure messages point to (`bench.err`, `bench.out`, `enqueue.err` as well as the worker
+  logs) are copied to `TW_DEMO_LOGS`, and the CI job prints and uploads all of them
+  (`TestDemoStackSavesAndShowsEveryFileItsFailuresPointTo`). `make demo` and `make demo-stack` each
+  removed nothing; both now remove their temporary directory when they succeed and keep it, printing
+  its path, when they fail (`TestDemoStackRemovesItsWorkDirectoryOnlyOnSuccess`,
+  `TestMakeDemoRemovesItsDirectoryOnlyOnSuccess`).
 - **`scripts/e2e.sh` fails when the run it expects to pass fails its evaluation.** It grepped the
   output of the duplicate-charge run and of the safe ambiguous-commit run for `"passed":true`, but
   `run` exits 0 on a failing evaluation and prints a `passed` for every check, so one passing check

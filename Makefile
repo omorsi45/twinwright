@@ -19,11 +19,13 @@ build: ## build the CLI into ./twinwright
 	go build -o twinwright ./cmd/twinwright
 
 .PHONY: demo
-demo: build ## run the 12-step scripted demo in a temporary directory (no network, no keys)
-	./twinwright demo --dir "$$(mktemp -d)/demo"
+demo: build ## run the 12-step scripted demo in a temporary directory, removed when it succeeds (no network, no keys)
+	@dir="$$(mktemp -d)"; \
+	if ./twinwright demo --dir "$$dir/demo"; then rm -rf "$$dir"; echo "make demo: removed the temporary demo directory (run twinwright demo --dir DIR to keep one)"; \
+	else rc=$$?; echo "make demo: the demo failed; its directory was kept at $$dir/demo" >&2; exit $$rc; fi
 
 .PHONY: demo-stack
-demo-stack: ## start the Compose stack and run the fleet, takeover and observability demo against it
+demo-stack: ## start the Compose stack and run the fleet, takeover and observability demo against it (TW_DEMO_PG_PORT sets PostgreSQL's host port, default 5432)
 	./scripts/demo-stack.sh
 
 .PHONY: fmt

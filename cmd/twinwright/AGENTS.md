@@ -39,7 +39,8 @@ Newer commands, and what has to stay aligned with them:
   `with` and refuse them for any other. Keep the flag help, `docs/protocol/agent-v1.md` and
   its JSON Schemas, `exec_test.go`, `exec_fleet_test.go` and ADR 0033 in line.
 - `make demo` and `make demo-stack`: `make demo` builds the CLI and runs the
-  twelve-step `demo` in a temporary directory, and `ci.yml` runs it. `make
+  twelve-step `demo` in a temporary directory that it removes when the demo
+  succeeds and keeps when it fails, and `ci.yml` runs it. `make
   demo-stack` runs `scripts/demo-stack.sh` against Compose, and the `demo-stack`
   job in `integration.yml` runs that. Keep the Makefile targets, the README quick
   start and those two jobs saying the same thing.

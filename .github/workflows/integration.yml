@@ -479,16 +479,27 @@ jobs:
 
       - name: stack logs and worker logs
         if: failure()
+        # Every file the script copied to TW_DEMO_LOGS, which is every file its
+        # failure messages point to (run statuses, the held run's queue state,
+        # the enqueue, bench and gate output as well as the worker logs). The
+        # last 300 lines of each are printed; the artifact below has them whole.
         run: |
           docker compose ps
           docker compose logs
-          for f in "$TW_DEMO_LOGS"/worker-*.log "$TW_DEMO_LOGS"/lock-session.log; do
+          for f in "$TW_DEMO_LOGS"/*; do
             if [ -f "$f" ]; then
               echo "::group::$(basename "$f")"
-              cat "$f"
+              tail -n 300 "$f"
               echo "::endgroup::"
             fi
           done
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: demo-stack-logs
+          path: ${{ runner.temp }}/demo-logs
+          if-no-files-found: warn
 
       - name: stop the stack
         if: always()

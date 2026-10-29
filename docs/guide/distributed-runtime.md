@@ -25,7 +25,11 @@ go run ./cmd/twinwright queue --db "$TW_DSN" --run <run-id>   # ownership histor
 ```
 
 `docker compose up -d` starts four services, each published on loopback only: PostgreSQL (5432),
-the OpenTelemetry collector (4318), Jaeger (16686) and Prometheus (9090). Name `postgres`
+the OpenTelemetry collector (4318), Jaeger (16686) and Prometheus (9090). PostgreSQL's host port
+is `${TW_DEMO_PG_PORT:-5432}`: set `TW_DEMO_PG_PORT` before `docker compose up` if something else
+holds 5432, and `make demo-stack` reads the same variable, so it connects to the port Compose
+published. The DSN above, `POSTGRES_DSN` in the Makefile and the README examples name 5432 and
+need the new port too. Name `postgres`
 (`docker compose up -d postgres`) to start the database alone. `make up` starts the same four and
 waits for PostgreSQL; `make down` runs `docker compose down -v`, which deletes the Compose volumes,
 including the `twinwright` database in that container.
