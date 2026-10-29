@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -16,6 +17,10 @@ import (
 	"unicode"
 
 	"gopkg.in/yaml.v3"
+
+	"twinwright/internal/crashmatrix"
+	"twinwright/internal/store"
+	"twinwright/internal/worker"
 )
 
 // docs/claims.md is the list of everything the README says is true, with the
@@ -1060,6 +1065,112 @@ func checkMutualB(t *testing.T)         { checkMutualA(t) }
 		got := index.gatesOf(test)
 		if strings.Join(got, ",") != strings.Join(want, ",") {
 			t.Errorf("gatesOf(%s) = %q, want %q", test, got, want)
+		}
+	}
+}
+
+// The README says it links the documentation a reader needs to judge it: the
+// claims table, the architecture page, the security review, the performance page
+// and the guide. TestDocLinksResolve proves a link that exists lands; it cannot
+// notice that a link was deleted. This does.
+var readmeRequiredLinks = []string{
+	"docs/claims.md",
+	"docs/architecture.md",
+	"docs/security-review.md",
+	"docs/performance.md",
+	"docs/guide/README.md",
+}
+
+func readmeLinkProblems(text string) []string {
+	var problems []string
+	for _, target := range readmeRequiredLinks {
+		if !strings.Contains(text, "]("+target) {
+			problems = append(problems, fmt.Sprintf("README.md has no link to %s", target))
+		}
+	}
+	return problems
+}
+
+func TestReadmeLinksTheDocumentationSet(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(filepath.FromSlash(claimsRepo), "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	for _, problem := range readmeLinkProblems(text) {
+		t.Error(problem)
+	}
+	// Each required link, removed in turn, must be noticed.
+	for _, target := range readmeRequiredLinks {
+		mutated := strings.ReplaceAll(text, "]("+target, "](nowhere")
+		problems := readmeLinkProblems(mutated)
+		if len(problems) != 1 || !strings.Contains(problems[0], target) {
+			t.Errorf("removing the link to %s was reported as %q, want exactly that link", target, problems)
+		}
+	}
+}
+
+// The delivery bound's default is quoted in the README, the fleet page and the
+// guide. A constant changed in worker.go would leave all three wrong, and no test
+// read them.
+func TestDocumentedDeliveryBoundMatchesTheCode(t *testing.T) {
+	want := fmt.Sprintf("`MaxAttempts` (default %d)", worker.DefaultMaxAttempts)
+	for _, name := range []string{"README.md", "docs/distributed.md", "docs/guide/distributed-runtime.md"} {
+		raw, err := os.ReadFile(filepath.Join(filepath.FromSlash(claimsRepo), filepath.FromSlash(name)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := strings.Join(strings.Fields(string(raw)), " ")
+		if !strings.Contains(text, want) {
+			t.Errorf("%s does not say %s, the default worker.DefaultMaxAttempts sets", name, want)
+		}
+	}
+}
+
+// The crash matrix is quoted as 120 cases (25, 15 and 80) in the README, the fleet
+// page and the guide. TestCrashMatrixSQLite runs whatever the harness enumerates,
+// so a harness that enumerated fewer cases would still pass it. This counts them
+// and holds each document that quotes the total to the count.
+func TestCrashMatrixCasesAreTheOnesTheDocumentsCount(t *testing.T) {
+	ctx := context.Background()
+	scenarios, err := crashmatrix.Scenarios(filepath.Join(filepath.FromSlash(claimsRepo), "examples"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]int{"duplicate-charge": 25, "ambiguous-commit": 15, "company-incident": 80}
+	got := map[string]int{}
+	total := 0
+	for _, sc := range scenarios {
+		s, err := store.Open(filepath.Join(t.TempDir(), sc.Name+".db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, cases, err := crashmatrix.Enumerate(ctx, s, sc)
+		_ = s.Close()
+		if err != nil {
+			t.Fatalf("enumerate %s: %v", sc.Name, err)
+		}
+		got[sc.Name] = len(cases)
+		total += len(cases)
+	}
+	for name, n := range want {
+		if got[name] != n {
+			t.Errorf("%s enumerates %d crash cases, the documents say %d", name, got[name], n)
+		}
+	}
+	if len(got) != len(want) {
+		t.Errorf("the matrix covers %d scenarios (%v), the documents say %d", len(got), got, len(want))
+	}
+	if total != 120 {
+		t.Errorf("the matrix enumerates %d cases, the documents say 120", total)
+	}
+	for _, name := range []string{"README.md", "docs/distributed.md", "docs/guide/distributed-runtime.md"} {
+		raw, err := os.ReadFile(filepath.Join(filepath.FromSlash(claimsRepo), filepath.FromSlash(name)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if text := strings.Join(strings.Fields(string(raw)), " "); !strings.Contains(text, fmt.Sprintf("%d cases", total)) {
+			t.Errorf("%s does not quote the matrix as %d cases", name, total)
 		}
 	}
 }
