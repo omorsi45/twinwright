@@ -13,6 +13,10 @@ database written by a newer build is refused rather than downgraded.
 
 ### Fixed
 
+- **`make gate` no longer leaves `bench-candidate.json` in the repository root.** The candidate
+  report is written to a temporary directory that is removed when the recipe ends, with the
+  gate's exit status unchanged (a regressed candidate still exits 1), and `bench-candidate.json`
+  is in `.gitignore` for checkouts that still have one.
 - **`twinwright bench` refuses a positional argument instead of dropping every flag after it.**
   Go's flag parser stops at the first argument that is not a flag, so
   `bench standard --agent openai --trials 10 --out c.json` ran the scripted agent, one trial,

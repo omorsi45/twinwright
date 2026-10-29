@@ -75,8 +75,9 @@ perf: ## measure the platform workloads on SQLite into perf.json (results are do
 
 .PHONY: gate
 gate: build ## bench the scripted suite and gate it against the approved baseline
-	./twinwright bench --suite standard --agent scripted --examples examples --out bench-candidate.json > /dev/null
-	./twinwright gate --baseline examples/bench/baselines/standard-scripted.json --candidate bench-candidate.json
+	dir="$$(mktemp -d)" && trap 'rm -rf "$$dir"' EXIT && \
+	  ./twinwright bench --suite standard --agent scripted --examples examples --out "$$dir/candidate.json" > /dev/null && \
+	  ./twinwright gate --baseline examples/bench/baselines/standard-scripted.json --candidate "$$dir/candidate.json"
 
 .PHONY: live-model
 live-model: ## run a local Ollama model on the billing world and replay it (needs TW_LIVE_MODEL; LIVE_BASE_URL optional)
