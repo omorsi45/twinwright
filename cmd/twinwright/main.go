@@ -760,7 +760,14 @@ func runCLI(args []string, out io.Writer) error {
 				return err
 			}
 		}
-		return emit(out, report)
+		if err := emit(out, report); err != nil {
+			return err
+		}
+		// A run in which no case reached a verdict measured nothing. The report
+		// is still printed and written, so each case's error can be read, but the
+		// command must not look like a success: a missing credential would
+		// otherwise produce a report that is easy to commit as a baseline.
+		return benchMeasuredNothing(report)
 	case "shadow":
 		fs := flag.NewFlagSet("shadow", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
@@ -1111,6 +1118,22 @@ func addSecurity(ctx context.Context, result map[string]any, s *store.Store, run
 	return nil
 }
 func emit(out io.Writer, value any) error { return json.NewEncoder(out).Encode(value) }
+
+// benchMeasuredNothing is the error for a bench report in which every case
+// errored, naming the first one, and nil otherwise. A run with some verdicts
+// stays a success: its errored cases are counted in the summary.
+func benchMeasuredNothing(report bench.Report) error {
+	if len(report.Cases) == 0 {
+		return nil
+	}
+	for _, c := range report.Cases {
+		if c.Status != "error" {
+			return nil
+		}
+	}
+	first := report.Cases[0]
+	return fmt.Errorf("bench: every case errored, so the report measured nothing; the first error was in case %q: %s", first.ID, first.Error)
+}
 
 func looksLikeBenchReport(path string) bool {
 	data, err := os.ReadFile(path)

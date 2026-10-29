@@ -125,7 +125,7 @@ control's `as_expected` is recomputed from its status, not trusted.
 | --- | --- |
 | 0 | no regressions |
 | 1 | one or more regressions |
-| 2 | the gate could not decide: unreadable or invalid input, suite name mismatch, a tolerance or trajectory value out of range, a repeated case ID, an empty baseline, bad flags |
+| 2 | the gate could not decide: unreadable or invalid input, suite name mismatch, a tolerance or trajectory value out of range, a repeated case ID, an empty baseline, a baseline in which no case reached a verdict, bad flags |
 
 The verdict JSON is printed before the command exits, so a CI log shows what
 regressed even when the step fails. `--markdown` and `--junit` additionally write
@@ -134,9 +134,14 @@ a summary, to a path or to stdout with `-`.
 ### An empty baseline is refused
 
 A baseline with no cases would compare against nothing and pass. `Compare`
-returns an error for it, which the CLI reports as exit 2. A repeated case ID in
-either report is refused for the same reason: the order of the file would decide
-the verdict.
+returns an error for it, which the CLI reports as exit 2. So does a baseline in
+which no case reached a verdict (every case errored and passed nothing): each case
+would be `baseline_unmeasured` and every candidate would pass. A repeated case ID
+in either report is refused for the same reason: the order of the file would decide
+the verdict. `twinwright bench` exits 1, with the first case's error in the
+message, when every case of the run errored, so a run without credentials does not
+exit 0 and leave a report that looks like a baseline. The exit codes above are the
+gate's; `bench` keeps the ordinary 0 and 1.
 
 ### The gate is shown to fail
 
@@ -197,3 +202,4 @@ job summary without blocking a merge.
 
 - 2026-10-28: the schema table and the trials paragraph now say that `mutations` and `successful_violations` of a repeated case are the largest count over its trials. They were taken from trial 1, so a leak in any later trial was invisible to `new_violation` and `extra_mutations`, and the verdict of a repeated case depended on which trial leaked, against the sentence that it is independent of trial order (GATE-1). `schema_version` stays 2: v0.1.0 predates trials, so no released report carried a trial-1 count for a repeated case, and a single-trial case reports the same values as before.
 - 2026-10-28: an errored repeated case is no longer skipped by the pass-rate comparison. The Trials paragraph says an errored trial is not counted as a pass and that the gate reads `passes` and `trials`, but the gate returned early on `status: error`: a candidate that kept 1 pass in 10, or none, was not even a warning against a baseline of 9 in 10, a baseline with one provider timeout among 10 trials was `baseline_unmeasured` for good, and against a 10 in 10 baseline one errored trial was `newly_failing` at any tolerance while one failed trial was tolerated (GATE-2). A case is now rated on the passes it recorded. `baseline_unmeasured` is kept for a baseline case that errored and passed nothing, and `newly_failing` for a baseline that passed every trial. A candidate that reached no verdict on any trial against a baseline that passed some of them is the new regression `candidate_unmeasured`, whatever the tolerance; against a baseline with no pass it is the new warning `candidate_errored`, as is an errored trial in a case that kept some passes. A candidate case with some completed trials is also compared on `mutations` and `successful_violations`, which are the largest over its trials, so an errored trial elsewhere cannot hide a leak (GATE-1); only a candidate with no completed trial skips them, and the trajectory, which is the first trial's, is skipped when either side errored. Negative controls are unchanged: any error leaves a control unmeasured, as the limit about controls below says. A single-trial case still has no tolerance.
+- 2026-10-28: a baseline in which every case errored is refused like an empty one, with exit 2, and `twinwright bench` exits 1 when every case of the run errored (GATE-3). The section on the empty baseline said it would "compare against nothing and pass", and the same was true of a baseline whose cases all errored: every case became `baseline_unmeasured`, the gate exited 0, and the deliberately regressed candidate passed against it. A bench run with a missing provider key reached exactly that state, with exit 0 and a report that looked like any other. The gate's exit codes keep their meaning; `bench` uses the ordinary 1 and names the first case's error.

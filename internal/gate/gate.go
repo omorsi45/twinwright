@@ -97,9 +97,9 @@ func (o Options) validate() error {
 // Compare gates candidate against baseline. It returns an error, instead of a
 // verdict, when the two reports measured different suites (a comparison between
 // them would be meaningless), when opts is out of range, or when the inputs
-// could not support a verdict: a baseline with no cases gates nothing, and a
-// repeated case ID in either report would let the order of the file decide the
-// result.
+// could not support a verdict: a baseline with no cases, or in which every case
+// errored, gates nothing, and a repeated case ID in either report would let the
+// order of the file decide the result.
 //
 // Fields that only a version 2 report carries (trials, mutations, violations,
 // trajectories) are compared only when both reports are version 2. Comparing a
@@ -114,6 +114,19 @@ func Compare(baseline, candidate bench.Report, opts Options) (Result, error) {
 	}
 	if len(baseline.Cases) == 0 {
 		return Result{}, fmt.Errorf("the baseline has no cases, so there is nothing to gate against")
+	}
+	// A baseline in which every case errored compares against nothing too: each
+	// case would be baseline_unmeasured and every candidate would pass. A bench
+	// run without credentials writes exactly that.
+	measured := false
+	for _, c := range baseline.Cases {
+		if !(c.Status == "error" && passedNothing(c)) {
+			measured = true
+			break
+		}
+	}
+	if !measured {
+		return Result{}, fmt.Errorf("the baseline has no case that reached a verdict (every case errored), so there is nothing to gate against")
 	}
 	base, err := index("baseline", baseline.Cases)
 	if err != nil {
@@ -207,10 +220,9 @@ func compareCase(r *Result, b, c bench.CaseResult, v2 bool, opts Options) {
 	// A control is the exception. Its Passes counts the trials where the broken
 	// case went undetected and an errored trial counts as caught (the limit
 	// ADR 0030 states), so for a control any error leaves the case unmeasured.
-	// A single trial that errored has no pass to count whatever Passes says.
 	isControl := b.Expect == bench.ExpectFail && c.Expect == bench.ExpectFail
 	unmeasured := func(x bench.CaseResult) bool {
-		return x.Status == "error" && (isControl || x.Passes == 0 || trials(x) <= 1)
+		return x.Status == "error" && (isControl || passedNothing(x))
 	}
 	bUnmeasured, cUnmeasured := unmeasured(b), unmeasured(c)
 	if bUnmeasured {
@@ -350,6 +362,13 @@ func trials(c bench.CaseResult) int {
 		return 1
 	}
 	return c.Trials
+}
+
+// passedNothing is whether a case has no recorded pass to its name. A single
+// trial that errored has none whatever Passes says, and a repeated case has none
+// when Passes is zero.
+func passedNothing(c bench.CaseResult) bool {
+	return c.Passes == 0 || trials(c) <= 1
 }
 
 func passRate(c bench.CaseResult) float64 {

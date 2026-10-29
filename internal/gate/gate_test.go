@@ -471,6 +471,44 @@ func TestGateRefusesAnEmptyBaseline(t *testing.T) {
 	}
 }
 
+// A baseline whose every case errored compares against nothing, like an empty
+// one: each case would be baseline_unmeasured and every candidate would pass.
+// It is what a bench run without credentials writes.
+func TestGateRefusesABaselineWithNoMeasuredCase(t *testing.T) {
+	single := func(id string) bench.CaseResult {
+		c := passing(id)
+		c.Status, c.Passed, c.AsExpected, c.Passes, c.Error = "error", false, false, 0, "OPENAI_API_KEY is required for openai"
+		return c
+	}
+	tests := []struct {
+		name string
+		base bench.Report
+	}{
+		{"single trials", report(2, single("a"), single("b"))},
+		{"repeated cases", report(2, repeated("a", "error", 10, 0), repeated("b", "error", 10, 0))},
+		{"version 1", report(1, single("a"), single("b"))},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Compare(tc.base, report(2, passing("a"), passing("b")), Options{})
+			if err == nil || !strings.Contains(err.Error(), "reached a verdict") {
+				t.Fatalf("want an error saying no baseline case reached a verdict, got %v", err)
+			}
+		})
+	}
+
+	// One measured case is enough: the others are warned about, as before.
+	base := report(2, single("a"), passing("b"))
+	if _, err := Compare(base, report(2, passing("a"), passing("b")), Options{}); err != nil {
+		t.Fatalf("a baseline with one measured case is gateable: %v", err)
+	}
+	// So is a repeated case that errored on a trial but passed the others.
+	partly := report(2, repeated("a", "error", 10, 9))
+	if _, err := Compare(partly, report(2, repeated("a", "passed", 10, 10)), Options{}); err != nil {
+		t.Fatalf("a baseline case with 9 passes is measured: %v", err)
+	}
+}
+
 func TestGateRefusesDuplicateCaseIDs(t *testing.T) {
 	// Which duplicate wins would decide the verdict, so neither is allowed to.
 	dup := report(2, passing("a"), passing("twice"), passing("twice"))
@@ -564,7 +602,9 @@ func TestGateWarnsAndSkipsWhenTheBaselineCaseErrored(t *testing.T) {
 	base.Status, base.Passed, base.AsExpected, base.Passes, base.Error = "error", false, false, 0, "boom"
 	cand := passing("a")
 	cand.UnsafeRetry, cand.AgentRefunds, cand.Mutations = true, 2, 9
-	result := mustCompare(t, report(2, base), report(2, cand), Options{})
+	// A second, measured case keeps the baseline gateable: a baseline in which
+	// every case errored is refused outright (TestGateRefusesABaselineWithNoMeasuredCase).
+	result := mustCompare(t, report(2, base, passing("b")), report(2, cand, passing("b")), Options{})
 	if !result.Passed {
 		t.Fatalf("an unmeasured baseline cannot be regressed against: %+v", result.Regressions)
 	}
@@ -664,8 +704,8 @@ func TestGateRatesARepeatedBaselineWithAnErroredTrial(t *testing.T) {
 	}
 
 	t.Run("a baseline with no pass stays unmeasured", func(t *testing.T) {
-		none := report(2, repeated("a", "error", 10, 0))
-		result := mustCompare(t, none, report(2, repeated("a", "failed", 10, 0)), Options{Tolerance: 0.1})
+		none := report(2, repeated("a", "error", 10, 0), passing("b"))
+		result := mustCompare(t, none, report(2, repeated("a", "failed", 10, 0), passing("b")), Options{Tolerance: 0.1})
 		if !result.Passed || !equalStrings(kinds(result.Warnings), []string{"a:baseline_unmeasured"}) {
 			t.Fatalf("passed=%v warnings=%v", result.Passed, kinds(result.Warnings))
 		}

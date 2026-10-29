@@ -13,6 +13,14 @@ database written by a newer build is refused rather than downgraded.
 
 ### Fixed
 
+- **A baseline in which every case errored is refused, and a bench run that measured nothing
+  exits non-zero.** `bench` with a missing provider key errored all 21 cases, exited 0 and wrote
+  a report that looked like any other; the gate then marked every case `baseline_unmeasured`
+  and exited 0, so the deliberately regressed candidate passed against it. `gate` now exits 2
+  for a baseline with no case that reached a verdict, as it does for an empty one, and
+  `bench` exits 1 naming the first case's error when every case errored, after printing and
+  writing the report so each error can be read (`TestGateRefusesABaselineWithNoMeasuredCase`,
+  `TestGateExitCodes`, `TestBenchExitsNonZeroWhenEveryCaseErrored`).
 - **The gate no longer skips a repeated bench case because a trial errored.** It returned early
   on `status: error`, so against a baseline of 9 passes in 10 a candidate that errored on every
   trial, or kept one pass, produced no finding at all; one provider timeout among a baseline's

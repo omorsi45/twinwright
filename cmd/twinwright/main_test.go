@@ -1720,6 +1720,55 @@ func TestBenchCLIRefusesNonPositiveTrials(t *testing.T) {
 	}
 }
 
+// A bench run in which no case reached a verdict measured nothing. Run without
+// credentials, every case errors in the provider lookup and the run used to exit
+// 0 with a report that looked like any other, which is how an unusable baseline
+// gets committed. The command must fail and name the first error, and the gate
+// must refuse the report it wrote.
+func TestBenchExitsNonZeroWhenEveryCaseErrored(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "")
+	examples := filepath.Join("..", "..", "examples")
+	dir := t.TempDir()
+	suitePath := filepath.Join(dir, "tiny.yaml")
+	suiteYAML := []byte(`
+version: 1
+suite: tiny
+cases:
+  - id: billing-duplicate
+    category: reasoning
+    world: billing
+    scenario: duplicate-charge
+    assertions: assertions/duplicate-charge.yaml
+    dimensions: [task]
+`)
+	if err := os.WriteFile(suitePath, suiteYAML, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reportPath := filepath.Join(dir, "report.json")
+	var out bytes.Buffer
+	err := runCLI([]string{"bench", "--suite-file", suitePath, "--examples", examples, "--agent", "openai", "--model", "any-model",
+		"--db-dir", filepath.Join(dir, "dbs"), "--out", reportPath}, &out)
+	if err == nil {
+		t.Fatalf("a bench in which every case errored exited 0:\n%s", out.String())
+	}
+	if got := exitCode(err); got != 1 {
+		t.Fatalf("exit code = %d, want 1 (the gate's 2 means bad input to the gate)", got)
+	}
+	for _, want := range []string{"billing-duplicate", "OPENAI_API_KEY is required for openai"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q must name %q", err, want)
+		}
+	}
+
+	// The report is still written, so each case's error can be read, but it is
+	// not a usable baseline.
+	good := writeGateReport(t, dir, "good.json", "tiny", "passed")
+	gateErr := runCLI([]string{"gate", "--baseline", reportPath, "--candidate", good}, &bytes.Buffer{})
+	if got := exitCode(gateErr); got != 2 {
+		t.Fatalf("gate exit = %d (%v), want 2 for a baseline in which nothing was measured", got, gateErr)
+	}
+}
+
 // writeGateReport saves a minimal v2 bench report whose only case has the given
 // status, so the gate's exit codes can be driven without running a suite.
 func writeGateReport(t *testing.T, dir, name, suite, status string) string {
@@ -1760,6 +1809,9 @@ func TestGateExitCodes(t *testing.T) {
 	if err := os.WriteFile(empty, []byte(`{"suite":"standard","schema_version":2,"cases":[]}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// A baseline in which every case errored, as a bench without credentials
+	// writes, gates nothing just as an empty one does.
+	errored := writeGateReport(t, dir, "errored.json", "standard", "error")
 	tests := []struct {
 		name string
 		args []string
@@ -1767,6 +1819,7 @@ func TestGateExitCodes(t *testing.T) {
 	}{
 		{"identical reports", []string{"--baseline", good, "--candidate", good}, 0},
 		{"empty baseline", []string{"--baseline", empty, "--candidate", good}, 2},
+		{"baseline with no measured case", []string{"--baseline", errored, "--candidate", good}, 2},
 		{"regression", []string{"--baseline", good, "--candidate", bad}, 1},
 		{"missing candidate file", []string{"--baseline", good, "--candidate", filepath.Join(dir, "absent.json")}, 2},
 		{"missing baseline file", []string{"--baseline", filepath.Join(dir, "absent.json"), "--candidate", good}, 2},
