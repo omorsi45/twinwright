@@ -67,7 +67,8 @@ one changes CI's contract:
 | --- | --- |
 | `case_missing` | the baseline has the case and the candidate does not |
 | `newly_failing` | the baseline passed and the candidate failed or errored |
-| `pass_rate_drop` | a repeated case's pass rate fell by more than the tolerance |
+| `candidate_unmeasured` | the baseline passed some but not all of a repeated case's trials and the candidate reached no verdict on any trial |
+| `pass_rate_drop` | a repeated case's pass rate fell by more than the tolerance; an errored trial counts as not passed |
 | `control_undetected` | a negative control the baseline caught is no longer caught, or its detection rate fell by more than the tolerance |
 | `extra_mutations` | the agent committed more state mutations than in the baseline |
 | `new_violation` | successful violations rose |
@@ -84,7 +85,8 @@ A warning is printed and never changes the exit code:
 | `trajectory_changed` | the tool-call sequence differs (the default, `--trajectory warn`) |
 | `case_added` | the candidate has a case the baseline lacks |
 | `suite_changed` | both reports are version 2 and their `content_digest` values differ |
-| `baseline_unmeasured` | the baseline errored on the case, so it cannot be gated |
+| `baseline_unmeasured` | the baseline errored on the case and passed none of its trials, so it cannot be gated |
+| `candidate_errored` | the candidate errored on the case: on some trials of a repeated case (judged on the passes it recorded), or on every trial against a baseline that had no pass to lose |
 
 Improvements (`newly_passing`, `control_detected`, `pass_rate_improved`) are
 reported separately and never gate.
@@ -194,3 +196,4 @@ job summary without blocking a merge.
 ## Corrections
 
 - 2026-10-28: the schema table and the trials paragraph now say that `mutations` and `successful_violations` of a repeated case are the largest count over its trials. They were taken from trial 1, so a leak in any later trial was invisible to `new_violation` and `extra_mutations`, and the verdict of a repeated case depended on which trial leaked, against the sentence that it is independent of trial order (GATE-1). `schema_version` stays 2: v0.1.0 predates trials, so no released report carried a trial-1 count for a repeated case, and a single-trial case reports the same values as before.
+- 2026-10-28: an errored repeated case is no longer skipped by the pass-rate comparison. The Trials paragraph says an errored trial is not counted as a pass and that the gate reads `passes` and `trials`, but the gate returned early on `status: error`: a candidate that kept 1 pass in 10, or none, was not even a warning against a baseline of 9 in 10, a baseline with one provider timeout among 10 trials was `baseline_unmeasured` for good, and against a 10 in 10 baseline one errored trial was `newly_failing` at any tolerance while one failed trial was tolerated (GATE-2). A case is now rated on the passes it recorded. `baseline_unmeasured` is kept for a baseline case that errored and passed nothing, and `newly_failing` for a baseline that passed every trial. A candidate that reached no verdict on any trial against a baseline that passed some of them is the new regression `candidate_unmeasured`, whatever the tolerance; against a baseline with no pass it is the new warning `candidate_errored`, as is an errored trial in a case that kept some passes. A candidate case with some completed trials is also compared on `mutations` and `successful_violations`, which are the largest over its trials, so an errored trial elsewhere cannot hide a leak (GATE-1); only a candidate with no completed trial skips them, and the trajectory, which is the first trial's, is skipped when either side errored. Negative controls are unchanged: any error leaves a control unmeasured, as the limit about controls below says. A single-trial case still has no tolerance.

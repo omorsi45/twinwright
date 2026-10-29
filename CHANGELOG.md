@@ -13,7 +13,22 @@ database written by a newer build is refused rather than downgraded.
 
 ### Fixed
 
-- **A leak in any trial of a repeated bench case now reaches the regression gate.** The fold of a
+- **The gate no longer skips a repeated bench case because a trial errored.** It returned early
+  on `status: error`, so against a baseline of 9 passes in 10 a candidate that errored on every
+  trial, or kept one pass, produced no finding at all; one provider timeout among a baseline's
+  ten trials made the case `baseline_unmeasured` permanently; and against a baseline of 10 in
+  10 one errored trial was `newly_failing` at every tolerance while one failed trial was
+  tolerated. A case is now rated on the passes it recorded, an errored trial counting as not
+  passed. A candidate that reached no verdict on any trial against a baseline that passed some
+  is the new regression `candidate_unmeasured`; an errored trial in a case that kept passes, or
+  an errored case whose baseline had no pass, is the new warning `candidate_errored`; a
+  candidate with some completed trials is compared on mutations and violations, so an errored
+  trial elsewhere cannot hide a leak. A baseline case is `baseline_unmeasured` only when it
+  errored and passed nothing. Negative controls and single-trial cases behave as before
+  (`TestGateRatesAnErroredRepeatedCandidate`, `TestGateRatesARepeatedBaselineWithAnErroredTrial`,
+  `TestGateToleratesOneErroredTrialLikeOneFailedTrial`,
+  `TestGateComparesSafetyCountersOfACandidateWithAnErroredTrial`).
+ The fold of a
   case's trials kept trial 1's state-mutation and successful-violation counts, so with a
   tolerance that absorbs one lost trial (the way a live-model report is gated) a cross-customer
   leak in trial 3 of 10 was a pass-rate drop of 0.1, allowed, and neither `new_violation` nor
