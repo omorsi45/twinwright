@@ -260,7 +260,8 @@ func distributedSchema(d Dialect) []string {
 		// cannot be regenerated. Keeping ownership in its own append-only
 		// audit table leaves the ledger a pure record of what the agent did,
 		// so a distributed run and a single-node replay of the same
-		// trajectory produce byte-identical ledgers.
+		// trajectory produce the same agent events, tool results and world
+		// rows. Replay compares them by value, not byte for byte.
 		`CREATE TABLE IF NOT EXISTS run_ownership_log (
   run_id TEXT NOT NULL,
   seq %INT% NOT NULL,

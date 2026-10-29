@@ -228,11 +228,14 @@ delivery safe". During recovery the resumed runner dispatches only calls that ha
 no tool message in the transcript (`pending` in `internal/agent/runner.go`), and
 that transcript entry commits in the same transaction as the effect. A committed
 call therefore is not presented to the dispatcher again. The saved-result lookup
-still answers a repeated (run, call ID) pair, and
-`TestDuplicateDeliveryDoesNotDuplicateCommittedEffects` shows a redelivered
-finished run committing nothing new, but the crash tests do not depend on the
-cache to avoid a duplicate. Atomic commit of effect and transcript, plus the
-fence, carry that load.
+still answers a repeated (run, call ID) pair:
+`TestCommittedCallIsAnsweredFromTheCacheUnderTheNewOwner` shows a new owner, at a
+higher fence, getting the saved result for a committed call and committing
+nothing. `TestDuplicateDeliveryDoesNotDuplicateCommittedEffects` shows only that a
+redelivered finished run commits nothing new; it returns at the completed status
+before any call is dispatched, so it does not exercise the cache. The crash tests
+do not depend on the cache to avoid a duplicate. Atomic commit of effect and
+transcript, plus the fence, carry that load.
 
 **The lease unit tests did not run against PostgreSQL.** ADR 0020 said each test
 "runs against SQLite by default and against real PostgreSQL when a DSN is
@@ -281,5 +284,6 @@ believes the cause was transient re-enqueues it and gets a fresh budget.
 
 ## Corrections
 
+- 2026-10-28: the paragraph on the call-ID cache no longer credits `TestDuplicateDeliveryDoesNotDuplicateCommittedEffects` with showing the saved-result lookup, because that test redelivers a finished run, which returns before any call is dispatched, and a mutation that disables the cache passes it (CORE-5). `TestCommittedCallIsAnsweredFromTheCacheUnderTheNewOwner` is the test of the lookup under a new owner, and fails under that mutation.
 - 2026-10-28: a worker told to stop while a run executes now hands its claim back and gives the delivery back instead of leaving the lease to lapse with the delivery counted, because a review found that `worker --drain` and `--max-runs` exited with a requeue error on SIGTERM and every graceful stop burned an attempt (CORE-9). The sentence "a delivery that never reports back now counts toward the bound" is unchanged for a worker that dies.
 - 2026-10-28: the crash matrix's stale-worker check covers the runner's own writes (a model turn and a status change) as well as the dispatcher's, because a review found that dropping the fence from every runner write passed all suites (CORE-1). `TestStaleRunnerWritesNothingAfterTakeover` reaches each of the runner's seven durable writes with a superseded fence.

@@ -274,9 +274,12 @@ func TestCrashedWorkerIsTakenOverAndRunCompletesOnce(t *testing.T) {
 	}
 }
 
-// TestDuplicateDeliveryDoesNotDuplicateCommittedEffects states the delivery
-// contract directly: the same run delivered twice, with the same call IDs,
-// commits its side effects once.
+// TestDuplicateDeliveryDoesNotDuplicateCommittedEffects shows that delivering a
+// finished run a second time commits nothing new. It does not exercise the
+// call-ID cache: the second delivery returns at the run's completed status
+// (internal/agent/runner.go), before any call is dispatched, so no call ID is
+// presented twice. TestCommittedCallIsAnsweredFromTheCacheUnderTheNewOwner is the
+// test of that.
 func TestDuplicateDeliveryDoesNotDuplicateCommittedEffects(t *testing.T) {
 	ctx := context.Background()
 	manifest := billingManifest(t)

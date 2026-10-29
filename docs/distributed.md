@@ -65,7 +65,10 @@ lineage and checkpoint reconstruction digest a run's event prefix, so if
 ownership transitions lived there an identical agent trajectory would digest
 differently depending on which worker executed it and how often the lease
 changed hands. Keeping the ledger a pure record of what the agent did is what
-lets a distributed run and a single-node replay produce byte-identical ledgers.
+lets a distributed run and a single-node replay produce the same agent events,
+tool results and world rows. Replay compares them by value: event types and
+payloads, saved results and world tables. The ledgers are not byte-identical,
+since every event's `recorded_at` differs and replay does not compare it.
 
 ## A worker dies mid-run
 
@@ -126,12 +129,14 @@ stateDiagram-v2
     note right of Expired
         Expiry alone disqualifies the old owner, because
         the instant a lease lapses another worker may take
-        the run. The presented fence must also be at least
-        committed_fence, the highest that has committed.
-        That condition involves no clock at all, so it is
-        still correct under skew between a worker and the
-        database, which is the case a TTL check alone gets
-        wrong.
+        the run. The row must also still name the presented
+        owner and fence. That match involves no clock, so
+        it is still correct under skew between a worker and
+        the database, which is the case a TTL check alone
+        gets wrong. committed_fence, the highest fence that
+        has committed, is a record on top of it: it refuses
+        a lower fence even if the row's owner and fence
+        were put back by a restore or a repair by hand.
     end note
 ```
 
@@ -342,4 +347,5 @@ twinwright demo --dir <dir>     # step 8 crashes a worker and shows the takeover
 The crash tests advance a controlled clock past the lease TTL rather than
 sleeping it out, so the whole distributed section of the demo finishes in about
 half a second. Every recovered run is replayed and required to verify, which is
-what makes "byte-identical ledgers" a measurement instead of a claim.
+what makes "the same agent events, tool results and world rows" a measurement
+instead of a claim.

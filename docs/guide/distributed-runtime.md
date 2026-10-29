@@ -87,9 +87,11 @@ the owner and expiry. After `kill -9` the lease has to expire, up to 15 seconds,
 before `resume` is accepted.
 
 Every lease acquisition raises the fence, including re-acquisition by the same
-owner, so a reconnected worker cannot reuse an old token. The check rejects both a
-token below the highest that has committed - which needs no clock and is therefore
-immune to clock skew - and an expired lease. Losing a renewal cancels execution
+owner, so a reconnected worker cannot reuse an old token. The check rejects a token
+that is not the one the lease row names - a match that needs no clock and is therefore
+immune to clock skew - and an expired lease. The highest fence that has committed is
+recorded as well, and refuses a lower one even if the row's owner and fence were put
+back by hand. Losing a renewal cancels execution
 immediately rather than spending model calls on work that can no longer commit.
 A renewal that merely fails (a dropped connection, a locked SQLite file) is
 retried at the next interval while the worker's own clock says the lease is still

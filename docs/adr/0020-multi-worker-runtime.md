@@ -63,15 +63,21 @@ independent reasons:
    still owns the run, inside the same transaction as the write. A worker that
    stalled past its lease cannot commit after a newer worker took over.
 
-The fence check has two conditions, and both are needed:
+The fence check refuses a write unless all of these hold:
 
-- The lease row must still name this owner and token and must not have expired.
-  Expiry alone disqualifies, because the instant a lease lapses another worker
-  may take the run.
+- The lease row must still name this owner and token. This involves no clock, so
+  it stays correct under clock skew between workers and the database -
+  precisely the case a TTL check alone gets wrong: a displaced worker finds a
+  different owner or a newer token in the row, however its own clock reads.
+- The lease must not have expired by the caller's clock. Expiry alone
+  disqualifies, because the instant a lease lapses another worker may take the
+  run.
 - The presented token must be at least `committed_fence`, the highest token
-  that has already committed. This condition involves no clock at all, so it
-  stays correct under clock skew between workers and the database - precisely
-  the case a TTL check alone gets wrong.
+  that has already committed. While the row's fence only goes up, the first
+  condition already refuses such a token, so this one is a record rather than a
+  second guard: an acquisition never lowers it, so it still refuses a
+  superseded token if the row's owner and fence are put back by a restore or a
+  repair by hand.
 
 Every acquisition increments the fence, *including* re-acquisition by the same
 owner. A worker that lost contact and reconnected must not keep using its old
@@ -92,8 +98,10 @@ changed hands, so an identical agent trajectory would produce different digests
 on a single node and in a fleet, and replay would have to special-case events it
 cannot regenerate. Keeping the ledger a pure record of what the *agent* did
 means a distributed run and a single-node replay of the same trajectory produce
-byte-identical ledgers - which the crash-recovery tests assert by replaying
-every recovered run.
+the same agent events, tool results and world rows - which the crash-recovery
+tests assert by replaying every recovered run. Replay compares event types and
+payloads, saved results and world tables by value; `recorded_at` differs in every
+event and is not compared, so the ledgers are not byte-identical.
 
 One consequence, stated plainly: a fencing rejection cannot be a ledger event
 either, because the rejected worker has no authority to append to that run. It
@@ -161,3 +169,8 @@ worker abandoning execution mid-flight when it loses its lease; several
 independent runs progressing in parallel with no re-delivery; and six workers
 racing for one run with exactly one winner. Each runs against SQLite by default
 and against real PostgreSQL when a DSN is configured.
+
+## Corrections
+
+- 2026-10-28: the fence check is described as three conditions, not two that are both needed. The first version credited `committed_fence` with keeping fencing correct under clock skew, but the owner-and-token match in the lease row involves no clock either and already refuses every token the mark would refuse while the row's fence only goes up. A mutation that removes the mark passed every suite until `TestGuardFenceRefusesATokenBelowTheCommittedMarkWhenTheFenceWasRewound` was added for the case where it matters (CORE-6).
+- 2026-10-28: "byte-identical ledgers" became "the same agent events, tool results and world rows". Replay compares event types and payloads by decoded value, saved results and world tables, and skips `recorded_at`, which differs in every event, so the property that holds and is measured is the narrower one (CORE-10).

@@ -242,16 +242,21 @@ func (s *Store) RunLease(ctx context.Context, runID string) (RunLease, error) {
 // GuardFenceTx asserts, inside an existing transaction, that fence still owns
 // the run, and records the fence as the highest one that has committed.
 //
-// This is the single choke point for every durable write a worker makes. Two
-// independent conditions must hold, and both matter:
+// This is the single choke point for every durable write a worker makes. What
+// it checks:
 //
-//   - The lease row must still name this owner and token, and must not have
-//     expired. Expiry alone is disqualifying, because the moment a lease lapses
-//     another worker may take the run.
-//   - The presented token must be at least the highest token that has already
-//     committed. This one does not depend on any clock, so it stays correct
-//     under clock skew between workers and the database, which is precisely the
-//     case a TTL check alone gets wrong.
+//   - The lease row must still name this owner and token. This is the guard that
+//     involves no clock: a worker that was displaced, however its clock reads,
+//     finds a different owner or a newer token in the row and is refused.
+//   - The lease must not have expired by the caller's clock. Expiry alone is
+//     disqualifying, because the moment a lease lapses another worker may take
+//     the run. This is the one condition that depends on a clock.
+//   - The presented token must be at least committed_fence, the highest token
+//     that has committed. While the row's fence only goes up, the first condition
+//     already refuses every token below it, so this one adds nothing on its own;
+//     it is a high-water mark that an acquisition never lowers, and it refuses a
+//     superseded token if the row's owner and fence are ever put back (a restore
+//     or a repair by hand). It is not what keeps fencing correct under clock skew.
 //
 // Recording committed_fence inside the caller's transaction is what makes the
 // check atomic with the work it guards: a takeover cannot slip between the

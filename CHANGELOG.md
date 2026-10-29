@@ -13,6 +13,18 @@ database written by a newer build is refused rather than downgraded.
 
 ### Fixed
 
+- **Three claims about delivery and fencing now say what their tests show.** The duplicate
+  delivery test redelivers a finished run, which returns before any call is dispatched, so it
+  could not fail for the call-ID cache; a worker-level test now has a new owner present a
+  committed call ID and requires the saved result and no new effect, and fails when the cache
+  is disabled (`TestCommittedCallIsAnsweredFromTheCacheUnderTheNewOwner`). The
+  `committed_fence` comparison was documented as the clock-free guard, but the owner and token
+  match in the lease row is that guard and the comparison is a high-water mark; the docs and ADR
+  0020 say so, and a test now fails when the comparison is removed, by putting the row's owner
+  and fence back after a newer token committed
+  (`TestGuardFenceRefusesATokenBelowTheCommittedMarkWhenTheFenceWasRewound`). "Byte-identical
+  ledgers" became "the same agent events, tool results and world rows": replay compares them by
+  value and every event's `recorded_at` differs. No behaviour changed.
 - **Stopping a worker with Ctrl-C or SIGTERM during `--drain` or `--max-runs` is a clean stop
   and no longer spends an attempt.** The cut-short run was requeued with the cancelled
   context, the requeue failed, and the command exited with `requeue run: context canceled` (at
