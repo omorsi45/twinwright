@@ -1,6 +1,6 @@
 # The distributed runtime
 
-This page was moved out of the project README when the README was rewritten as the Twinwright Cloud overview. It holds the README section "Distributed runtime", unchanged except where noted. The description of what `docker compose up -d` starts was corrected, and a paragraph on `make up` and `make down` was added. Paths in backticks are relative to the repository root. [Back to the guide index](README.md).
+This page was moved out of the project README when the README was rewritten as the Twinwright Cloud overview. It holds the README section "Distributed runtime", unchanged except where noted. The description of what `docker compose up -d` starts was corrected and its comment in the first code block now names all four services, and a paragraph on `make up` and `make down` was added. A duplicate delivery is safe for three reasons, not two (atomic commit was added to idempotency and fencing), and ADR 0029 was added to the references. The sentence on the fence check was corrected: the lease row must still name the presented owner and token, which needs no clock, and the highest committed fence is a record on top of it, not the check that is immune to skew. Four things were added to moved paragraphs: that PostgreSQL's host port is `TW_DEMO_PG_PORT`, that a renewal that merely fails is retried while the lease is valid, that `doctor` and `queue` open the database read-only and never migrate it, and that the timestamps stored as text are the ones replay compares in the world tables. Paths in backticks are relative to the repository root. [Back to the guide index](README.md).
 
 ## Distributed runtime
 
@@ -132,8 +132,9 @@ Schema state is versioned in `schema_migrations`. Each migration commits with it
 own bookkeeping row, so a failed migration leaves neither a partial schema nor a
 false record of success. A database written before migration tracking is adopted
 in place; a database recording a newer version is refused rather than downgraded.
-Timestamps are stored as RFC 3339 text on both backends so replay comparisons
-stay byte-identical. Times in `run_leases`, `work_queue` and `workers` use the
+Timestamps are stored as RFC 3339 text on both backends so the `created_at` values
+that replay compares in the world tables are the same text on both. Replay does not
+compare a ledger event's `recorded_at`. Times in `run_leases`, `work_queue` and `workers` use the
 fixed-width form `2006-01-02T15:04:05.000000000Z` so that comparing them as text
 in SQL orders them as times; migration 3 (schema version 3) rewrites existing
 rows and refuses a value it cannot parse. **Upgrading:** stop workers running an

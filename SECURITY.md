@@ -60,8 +60,8 @@ runs under a read-only root, with all capabilities dropped, no-new-privileges, a
 non-root user, resource caps and no network by default. The limits of that mode:
 the Docker daemon is trusted, there is no custom seccomp profile, a network you
 allow is unrestricted, on macOS and Windows the boundary is the Docker Desktop VM,
-and the container of an agent that timed out can keep running after the docker
-client that started it has gone. Section 7 of `docs/security-review.md` has the
+and a container is left running if Twinwright itself is killed mid-turn (a turn that
+times out, is cancelled or floods its output has its container removed). Section 7 of `docs/security-review.md` has the
 test behind each claim, and ADR 0033 records the decision.
 
 **Recordings.** `run --record-cassette` writes the provider's HTTP exchanges to a
