@@ -1,6 +1,6 @@
 # Engineering guarantees
 
-This page was moved out of the project README when the README was rewritten as the platform overview. It holds the README section "Engineering guarantees", unchanged except where noted. Paths in backticks are relative to the repository root. [Back to the guide index](README.md).
+This page was moved out of the project README when the README was rewritten as the Twinwright Cloud overview. It holds the README section "Engineering guarantees", unchanged except where noted. Paths in backticks are relative to the repository root. [Back to the guide index](README.md).
 
 ## Engineering guarantees
 
