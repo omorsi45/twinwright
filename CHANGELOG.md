@@ -13,6 +13,12 @@ database written by a newer build is refused rather than downgraded.
 
 ### Fixed
 
+- **The benchmark document test holds the throughput table to its report row for row.**
+  `TestBenchmarkDocsMatchTheirReports` compared the rows a table had, so a dropped row, a committed
+  report that no table quotes and a stale `Runs per trial` all passed. It now requires each table
+  to quote exactly the worker counts of its report, once each, with the report's runs per trial, and
+  every committed report to be quoted; `TestBenchmarkDocsCheckNoticesWhatItWasWrittenToCatch` edits
+  the real document each of those ways and requires a failure. ADR 0034 says the same.
 - **`twinwright perf` refuses an `--out` it cannot write before it measures, and a Ctrl-C during a
   recovery wait is reported as a cancellation.** The report is written after the whole measurement,
   so a mistyped directory cost over a minute and the figures; the command now opens the path first

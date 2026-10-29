@@ -153,9 +153,14 @@ of it that is cheap to hold exactly. It decodes every `docs/benchmarks/*.json` a
 object, a report with an unknown field or data after it) fails. It reads the Results
 section of `docs/performance.md`, finds each table headed `Runs/s median`, and requires
 every row's minimum, median and maximum to equal, as numbers, the row of the report the
-table cites for the same worker count. It fails when there is no report, no Results
-section, no quoted median, a citation of a file that is not committed, or a row whose
-worker count the report lacks. It runs with `go test ./...` and needs nothing outside
+table cites for the same worker count, and its `Runs per trial` to equal the report's
+`runs`. It also requires the worker counts a table quotes to be exactly the report's,
+each once, and every committed report to be quoted by some table, so an omitted or
+repeated row fails as well as an altered one. It fails when there is no report, no
+Results section, no quoted median, a citation of a file that is not committed, or a row
+whose worker count the report lacks. `TestBenchmarkDocsCheckNoticesWhatItWasWrittenToCatch`
+edits the real section (a row deleted, a row repeated, a stale `Runs per trial`, a whole
+table removed) and requires the comparison to report each. It runs with `go test ./...` and needs nothing outside
 the repository.
 
 It does not read the recovery, replay and crash matrix tables or the prose. They were
@@ -261,3 +266,4 @@ backend, so a joint table would invite a conclusion they do not support.
 - 2026-10-28: "The database address is never recorded" claimed that an error from `perf.Run` has the DSN and its password removed, and cited two tests for it that pass with the scrubber removed. That held only for a DSN that parses: for a PostgreSQL password with an unencoded `/`, `#` or `?` the error quoted a piece of the password, and `redact.URL` kept the userinfo of such a string. The scrubber now replaces the text of an error about a DSN that does not parse cleanly, and the cited tests now use such DSNs.
 - 2026-10-28: `make perf` ran `go run`, whose binary carries no VCS stamp, so its report named no commit and still wrote `git_modified: false`, a statement about a tree nobody read (PERF-2). The target now depends on `build` and runs `./twinwright perf`. `git_modified` is omitted, not false, when the build recorded no tree state: the field kept its name and its meaning when present, so schema version 1 and the committed reports, which carry `git_modified: false` from stamped builds, read as before.
 - 2026-10-28: `perf` now exits 1, after writing the report, when a replay verified fewer runs than it executed (PERF-4). The ADR listed replay verification as a measured invariant ("replay verified 20 of 20") while only a duplicated mutation and a crash matrix violation could fail the run, so an unverified replay left the CI `perf` job green. The consequence recorded in the ledger ruling for the original task, that an unverified replay is reported in the JSON but does not change the exit code, is superseded.
+- 2026-10-28: `TestBenchmarkDocsMatchTheirReports` is now what the ADR said it was, a table equal to its report "row for row" (PERF-5). It checked each row that was present, so a dropped row, a table missing for a committed report and a stale `Runs per trial` all passed (a copy of the document with the PostgreSQL 8-worker row deleted and `40` changed to `400` still passed). It now also requires the worker counts of each table to equal its report's, once each, compares `Runs per trial` with the report's `runs`, and requires every committed report to be quoted; `TestBenchmarkDocsCheckNoticesWhatItWasWrittenToCatch` shows each of those edits failing.
