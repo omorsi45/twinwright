@@ -1,6 +1,6 @@
 <div align="center">
 
-# Twinwright Cloud
+# Twinwright
 
 **A self-hosted platform for testing autonomous AI agents against stateful simulated worlds, with a regression gate, a worker fleet that survives crashes, and traces and metrics a real collector can ingest.**
 
@@ -18,7 +18,7 @@
 
 Autonomous agents call tools, change business state, retry failed operations and carry on after partial failures. A mock returns canned answers. Twinwright runs the agent against simulated software that keeps state: billing, CRM, ticketing and messaging services over one database, with injected faults and runtime permissions. It records every model turn and tool call in an ordered ledger, decides success by checking the world's final state rather than the agent's account of itself, and can replay, fork and compare the run afterwards.
 
-"Twinwright Cloud" names the self-hosted platform built on that runtime: a fleet of workers over one PostgreSQL database, a regression gate that fails CI when an agent gets worse, provider recording, a protocol for testing an agent written in any language, traces and metrics for a real collector and Prometheus, and published benchmarks. **It is not a hosted service.** There are no accounts, no tenants and no web UI, and there is no HTTP API for submitting runs: the CLI and the PostgreSQL queue are the interface.
+The platform built on that runtime is self-hosted: a fleet of workers over one PostgreSQL database, a regression gate that fails CI when an agent gets worse, provider recording, a protocol for testing an agent written in any language, traces and metrics for a real collector and Prometheus, and published benchmarks. **It is not a hosted service.** There are no accounts, no tenants and no web UI, and there is no HTTP API for submitting runs: the CLI and the PostgreSQL queue are the interface.
 
 What a run can do. Every line is held by a test or a CI job named in [docs/claims.md](docs/claims.md).
 

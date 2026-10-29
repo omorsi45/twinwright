@@ -11,6 +11,13 @@ database written by a newer build is refused rather than downgraded.
 
 ## Unreleased
 
+### Changed
+
+- **The README's title is `Twinwright`, the repository's name.** It said "Twinwright Cloud".
+- **The design record, plans and build notes are no longer tracked.** They are kept as local
+  working notes and are ignored by `.gitignore`; the one public link into them, from a `cut`
+  row of `docs/claims.md`, now states the reason inline.
+
 ### Fixed
 
 - **The claims table can no longer put an opt-in test in the local suite, link to a heading that
@@ -48,10 +55,8 @@ database written by a newer build is refused rather than downgraded.
   compares an event's type and decoded payload and the world tables' `created_at`), and ADR 0021
   no longer says there are no histograms and that the Compose collector is not in CI. The
   retries are listed by status, with the Anthropic 529, where the README said "a 5xx".
-- **Two tracked plan files no longer open with an instruction block that names a development
-  tool, one verification command no longer contains an em dash, and `.superpowers/` is in
-  `.gitignore`.** The documents call that directory git-ignored, which was true only through a
-  local exclude file.
+- **`.superpowers/` is in `.gitignore`.** The documents call that directory git-ignored, which
+  was true only through a local exclude file.
 - **`make demo-stack` no longer trusts whatever answers on the workers' metrics ports, follows the
   PostgreSQL port Compose published, shows its failure files in CI, and cleans up after a success.**
   Checks 3 and 4 read Prometheus, which scrapes ports 9095 and 9096 on the host, so a worker left
@@ -603,7 +608,7 @@ database written by a newer build is refused rather than downgraded.
 
 ### Added
 
-- **Documentation as Twinwright Cloud.** The README is rewritten as the overview of the
+- **Documentation as a platform overview.** The README is rewritten as the overview of the
   self-hosted platform, in under 450 lines: what it is, a 60-second quick start (`make
   demo` and `make demo-stack`), the regression gate in CI, running your own agent, real
   models and cassettes, the fleet, observability, benchmarks, limitations and

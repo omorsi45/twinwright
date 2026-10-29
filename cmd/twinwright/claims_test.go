@@ -44,7 +44,7 @@ import (
 const (
 	claimsDocPath = "../../docs/claims.md"
 	claimsRepo    = "../.."
-	// The design spec has seven goals and six milestone sections, and the README
+	// The design has seven goals and six milestone sections, and the README
 	// adds claims of its own, so a table shorter than this is not the table.
 	minimumClaimRows = 20
 )

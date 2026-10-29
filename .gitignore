@@ -26,3 +26,5 @@ bench-candidate.json
 /design/
 # Scratch for local working notes: scripts, logs and built binaries from a working session.
 .superpowers/
+# Local working notes: the design record, plans and build notes. Never published.
+docs/superpowers/

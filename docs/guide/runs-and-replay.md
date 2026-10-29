@@ -1,6 +1,6 @@
 # Inspecting, verifying and tracing a run
 
-This page was moved out of the project README when the README was rewritten as the Twinwright Cloud overview. It holds the README sections "Inspect and verify a run", "Run traces", "Event model", unchanged except where noted. One sentence in "Run traces" that said no live run or collector delivery had been verified now says what has been. Paths in backticks are relative to the repository root. [Back to the guide index](README.md).
+This page was moved out of the project README when the README was rewritten as the platform overview. It holds the README sections "Inspect and verify a run", "Run traces", "Event model", unchanged except where noted. One sentence in "Run traces" that said no live run or collector delivery had been verified now says what has been. Paths in backticks are relative to the repository root. [Back to the guide index](README.md).
 
 ## Inspect and verify a run
 
