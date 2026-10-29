@@ -551,8 +551,9 @@ finding:
   model rather than a fourth registry entry.
 - **No hosted-provider call has ever been verified.** A run of a local Ollama model
   is recorded in `docs/live-model-run.md` and is what the Integration workflow's
-  `real-model` job runs (`.github/workflows/integration.yml`); that document does
-  not record the job's own result. There is no OpenAI or Anthropic API key on the
+  `real-model` job runs (`.github/workflows/integration.yml`); that document records that
+  the job passed on every Integration run from 2026-10-28 to 2026-10-29, and takes none of
+  its figures from those runs. There is no OpenAI or Anthropic API key on the
   development host, so every hosted-provider behaviour in this repository is held
   against an `httptest` server.
 - **Ownership history is deliberately not in the run ledger**, so this review makes
