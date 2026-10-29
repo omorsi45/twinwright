@@ -13,6 +13,13 @@ database written by a newer build is refused rather than downgraded.
 
 ### Fixed
 
+- **The `observability` CI job fails when either gated test is skipped or does not run.** `go test`
+  exits 0 when a test skips and when the `-run` pattern matches nothing, so a renamed test or
+  environment variable left the job green with nothing checked. The step now requires a
+  `--- PASS:` line for `TestSpansAreQueryableInJaeger` and `TestPrometheusScrapesAWorker` in the
+  `-v` output. Run locally against the extracted step it exits 1 with the variable unset (both
+  tests skip) and with a pattern that matches no test, and with canned output it exits 0 only
+  when both print a pass; the job itself has not run on a runner.
 - **`twinwright_queue_oldest_runnable_age_seconds` now answers for what a worker can claim.** The
   gauge counted every `runnable` row with a past `available_at`, so it read 0 while a crashed
   worker's run sat claimable behind an expired lease (the recovery path) and reported minutes of

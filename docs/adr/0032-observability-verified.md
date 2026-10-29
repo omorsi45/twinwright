@@ -96,6 +96,11 @@ The `observability` job in `.github/workflows/integration.yml` runs on
 TWINWRIGHT_TEST_OTEL=1 go test -count=1 -v -run 'TestSpansAreQueryableInJaeger|TestPrometheusScrapesAWorker' ./internal/trace/ ./internal/metrics/
 ```
 
+and then requires a `--- PASS:` line for each of the two tests in the `-v` output. `go
+test` exits 0 when a test skips and when the `-run` pattern matches nothing, so a
+renamed test, a renamed environment variable or a skip would otherwise leave the
+job green with nothing checked. The step fails for each of those.
+
 A failed job prints `docker compose logs`, and `docker compose down -v` runs
 whatever happened. **The CI job is the evidence for what follows. This ADR does not
 claim it has passed**: the run is recorded where the job's results are, not here.
@@ -169,3 +174,4 @@ When the job passes, for one scripted run and the pinned images:
 ## Corrections
 
 - 2026-10-28: the exporter returned the collector endpoint as it was given, so `trace --otlp-endpoint` printed the endpoint's userinfo and query in its delivery report and in its errors, which the worker's log line had always scrubbed. `Delivery.Endpoint` and every error the exporter returns now name the address without userinfo or query, and mask header values and the endpoint's own credentials if a collector echoes them back. An endpoint with a query string was posted to the wrong path and now keeps its query. Collector headers can be set with the standard `OTEL_EXPORTER_OTLP_HEADERS` variable (comma-separated `name=value` pairs, values percent-decoded) on both `trace` and `worker` when `--otlp-header` is not given, so a worker's credential need not sit in its command line.
+- 2026-10-28: the `observability` job trusted `go test`'s exit status, which is 0 when a test skips and when the `-run` pattern matches no test, so a renamed test or environment variable left it green with nothing checked. The step now requires a `--- PASS:` line for each of the two tests in the `-v` output and fails otherwise.

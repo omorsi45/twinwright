@@ -206,7 +206,24 @@ jobs:
           exit 1
 
       - name: export a run and query it back, scrape a worker and query it back
-        run: go test -count=1 -v -run 'TestSpansAreQueryableInJaeger|TestPrometheusScrapesAWorker' ./internal/trace/ ./internal/metrics/
+        # go test exits 0 when the -run pattern matches no test and when a test
+        # skips (these two skip unless TWINWRIGHT_TEST_OTEL=1), and neither is
+        # evidence that Jaeger or Prometheus was asked anything. So the passes are
+        # required by name in the -v output: a renamed test, a renamed environment
+        # variable or a skip fails the step.
+        run: |
+          set -euo pipefail
+          go test -count=1 -v -run 'TestSpansAreQueryableInJaeger|TestPrometheusScrapesAWorker' ./internal/trace/ ./internal/metrics/ | tee observability.log
+          missing=0
+          for want in \
+            '--- PASS: TestSpansAreQueryableInJaeger (' \
+            '--- PASS: TestPrometheusScrapesAWorker ('; do
+            if ! grep -qF -- "$want" observability.log; then
+              echo "::error::missing from the test output: $want"
+              missing=1
+            fi
+          done
+          exit "$missing"
 
       - name: stack logs
         if: failure()
