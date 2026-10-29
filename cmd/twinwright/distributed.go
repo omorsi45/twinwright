@@ -256,6 +256,10 @@ func workerCommand(ctx context.Context, args []string, out io.Writer) error {
 	// so they cannot drift from the ledger.
 	counters := metrics.NewCounters()
 	instrumentWorker(w, counters)
+	// A run's trace is exported behind the claim loop, so the last one may still be
+	// on its way when the command ends. This runs before the store is closed, which
+	// the export reads from.
+	defer w.Close()
 
 	// Ctrl-C and SIGTERM cancel the context. A run in flight is not committed
 	// half way: ClaimAndRun hands its claim back (runnable at once, the delivery

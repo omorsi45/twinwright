@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sync"
 	"time"
 
 	"twinwright/internal/store"
@@ -75,9 +76,10 @@ type Config struct {
 	// Logger defaults to slog.Default.
 	Logger *slog.Logger
 	// ExportTrace, when set, sends the trace of a run this worker has just
-	// finished as completed. Nil means no export. It runs after the queue entry
-	// is finished and before the claim is observed and logged, under a context
-	// bounded by trace.DefaultExportTimeout.
+	// finished as completed. Nil means no export. It is called after the queue
+	// entry is finished, from a goroutine of its own, so the next claim does not
+	// wait for it; see exportTrace for the one-in-flight rule. Its context is
+	// bounded by trace.DefaultExportTimeout and is not cancelled by a stop request.
 	//
 	// The export is best effort. Its error is logged at warn level and never
 	// changes the claim's disposition: the run is complete and recorded, and a
@@ -156,6 +158,11 @@ type Worker struct {
 	// error to return, so ClaimAndRun and Serve report it before they claim anything.
 	configErr error
 
+	// exportMu guards inFlight, the one trace export this worker may have running.
+	// inFlight is closed when that export ends, and nil while none is running.
+	exportMu sync.Mutex
+	inFlight chan struct{}
+
 	// Observer, when set, receives every claim that ended in a disposition. A claim
 	// whose closing write failed for a reason other than the fence ended in none and
 	// is reported by ClaimAndRun's error instead, so the observed claims and the sum
@@ -198,10 +205,39 @@ type Outcome struct {
 	// ID, so it is set for every outcome that has a run, whether or not a trace
 	// was exported.
 	TraceID string `json:"trace_id"`
-	// TraceExported is true when the worker delivered the run's trace to the
-	// collector. It stays false when export is not configured, when the claim
-	// did not end finished with a completed run, and when the export failed.
-	TraceExported bool `json:"trace_exported,omitempty"`
+	// TraceExportQueued is true when the worker handed the run's trace to its
+	// exporter. It is not a delivery: the export runs behind the claim loop and ends
+	// after this outcome is returned, so whether the collector took the trace is
+	// known only from the log ("trace export failed" at warn, "trace exported"
+	// at info). It stays false when export is not configured, when the claim did
+	// not end finished with a completed run, and when the export was dropped because
+	// the previous one was still in flight.
+	TraceExportQueued bool `json:"trace_export_queued,omitempty"`
+}
+
+// exportDrainTimeout bounds how long Close waits for the export in flight. It is
+// the export's own bound, so a hook that honours its context is never waited on
+// for longer than it takes to end, and one that ignores it cannot hold shutdown.
+var exportDrainTimeout = trace.DefaultExportTimeout
+
+// Close finishes the worker's shutdown after its last claim: it waits at most
+// exportDrainTimeout for the trace export in flight, if any. Serve calls it before
+// it returns; a caller that drives ClaimAndRun itself calls it when it is done, or
+// the process may end before the last trace has been sent.
+func (w *Worker) Close() {
+	w.exportMu.Lock()
+	done := w.inFlight
+	w.exportMu.Unlock()
+	if done == nil {
+		return
+	}
+	timer := time.NewTimer(exportDrainTimeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+		w.Config.Logger.Warn("trace export still running at shutdown; abandoned", "worker", w.Config.ID)
+	}
 }
 
 // New returns a worker with defaults applied. A configuration that cannot hold a
@@ -389,25 +425,55 @@ func (w *Worker) settleOverDelivered(ctx context.Context, lease store.RunLease, 
 	return w.observe(outcome), nil
 }
 
-// exportTrace sends the trace of a run this claim finished as completed, when
-// the worker was given an exporter. A run paused at its step budget, a failed
-// attempt and a fenced claim all skip it: none of them leaves a finished run
-// whose trace is complete. Called only after the queue entry is finished, so a
-// failed FinishRun never exports for a claim that did not end.
+// exportTrace hands the trace of a run this claim finished as completed to the
+// worker's exporter, when it was given one. A run paused at its step budget, a
+// failed attempt and a fenced claim all skip it: none of them leaves a finished
+// run whose trace is complete. Called only after the queue entry is finished, so
+// a failed FinishRun never exports for a claim that did not end.
+//
+// The export runs in a goroutine of its own, so a collector that does not answer
+// cannot hold the claim loop for the export bound after every run. At most one is
+// in flight per worker. A run that finishes while one is running is not exported:
+// the drop is logged at warn with the trace ID, and the trace can be sent later
+// with `twinwright trace`, because it is derived from the ledger. The export is
+// not cancelled when the worker is told to stop: it keeps the stop request's
+// values but not its cancellation, and is bounded by trace.DefaultExportTimeout,
+// which Close waits for.
 //
 // A failure is logged and otherwise ignored; see Config.ExportTrace.
 func (w *Worker) exportTrace(ctx context.Context, outcome Outcome) Outcome {
 	if w.Config.ExportTrace == nil || outcome.Disposition != Finished || outcome.RunStatus != "completed" {
 		return outcome
 	}
-	exportCtx, cancel := context.WithTimeout(ctx, trace.DefaultExportTimeout)
-	defer cancel()
-	if err := w.Config.ExportTrace(exportCtx, outcome.RunID); err != nil {
-		w.Config.Logger.Warn("trace export failed",
-			"worker", outcome.WorkerID, "run", outcome.RunID, "trace_id", outcome.TraceID, "error", err)
+	w.exportMu.Lock()
+	if w.inFlight != nil {
+		w.exportMu.Unlock()
+		w.Config.Logger.Warn("trace export dropped: the previous export is still in flight",
+			"worker", outcome.WorkerID, "run", outcome.RunID, "trace_id", outcome.TraceID)
 		return outcome
 	}
-	outcome.TraceExported = true
+	done := make(chan struct{})
+	w.inFlight = done
+	w.exportMu.Unlock()
+
+	exportCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), trace.DefaultExportTimeout)
+	go func() {
+		defer func() {
+			cancel()
+			w.exportMu.Lock()
+			w.inFlight = nil
+			w.exportMu.Unlock()
+			close(done)
+		}()
+		if err := w.Config.ExportTrace(exportCtx, outcome.RunID); err != nil {
+			w.Config.Logger.Warn("trace export failed",
+				"worker", outcome.WorkerID, "run", outcome.RunID, "trace_id", outcome.TraceID, "error", err)
+			return
+		}
+		w.Config.Logger.Info("trace exported",
+			"worker", outcome.WorkerID, "run", outcome.RunID, "trace_id", outcome.TraceID)
+	}()
+	outcome.TraceExportQueued = true
 	return outcome
 }
 
@@ -496,6 +562,9 @@ func (w *Worker) Serve(ctx context.Context) error {
 	if err := w.Register(ctx); err != nil {
 		return fmt.Errorf("register worker: %w", err)
 	}
+	// The last run's export may still be running when the loop ends, and the process
+	// is about to exit.
+	defer w.Close()
 	w.Config.Logger.Info("worker started", "worker", w.Config.ID, "lease_ttl", w.Config.LeaseTTL.String())
 	for {
 		if ctx.Err() != nil {

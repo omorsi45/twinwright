@@ -2272,12 +2272,12 @@ func traceIDs(t *testing.T, post collectedPost) []string {
 // workerOutcome mirrors the fields of worker.Outcome these tests read, so the
 // test decodes the JSON the operator sees rather than the Go struct.
 type workerOutcome struct {
-	WorkerID      string `json:"worker_id"`
-	RunID         string `json:"run_id"`
-	Disposition   string `json:"disposition"`
-	RunStatus     string `json:"run_status"`
-	TraceID       string `json:"trace_id"`
-	TraceExported bool   `json:"trace_exported"`
+	WorkerID          string `json:"worker_id"`
+	RunID             string `json:"run_id"`
+	Disposition       string `json:"disposition"`
+	RunStatus         string `json:"run_status"`
+	TraceID           string `json:"trace_id"`
+	TraceExportQueued bool   `json:"trace_export_queued"`
 }
 
 // enqueueBillingRun creates a duplicate-charge run on the queue without
@@ -2337,7 +2337,7 @@ func TestWorkerExportsACompletedRunsTrace(t *testing.T) {
 	if outcome.TraceID != wantTraceID {
 		t.Fatalf("outcome trace id=%q want %q", outcome.TraceID, wantTraceID)
 	}
-	if !outcome.TraceExported {
+	if !outcome.TraceExportQueued {
 		t.Fatalf("outcome does not report the export: %+v", outcome)
 	}
 
@@ -2364,7 +2364,7 @@ func TestWorkerExportsACompletedRunsTrace(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, event := range events {
-		for _, banned := range []string{"export-worker", wantTraceID, "otlp", "trace_exported"} {
+		for _, banned := range []string{"export-worker", wantTraceID, "otlp", "trace_exported", "trace_export_queued"} {
 			if strings.Contains(string(event.Payload), banned) || strings.Contains(event.Type, banned) {
 				t.Fatalf("ledger event %d (%s) mentions %q: %s", event.Seq, event.Type, banned, event.Payload)
 			}
@@ -2432,8 +2432,11 @@ func TestWorkerExportFailureDoesNotFailTheRun(t *testing.T) {
 			if outcome.Disposition != "finished" || outcome.RunStatus != "completed" {
 				t.Fatalf("a failed export changed the outcome: %+v", outcome)
 			}
-			if outcome.TraceExported {
-				t.Fatalf("outcome claims an export the collector refused: %+v", outcome)
+			// The outcome is printed when the worker ends, after the export it queued
+			// has finished, but it only says the trace was handed to the exporter;
+			// the refusal is in the worker's log (TestWorkerExportFailureWarnsWithoutLeakingCredentials).
+			if !outcome.TraceExportQueued {
+				t.Fatalf("outcome does not say the export was queued: %+v", outcome)
 			}
 			if outcome.TraceID != trace.TraceIDFor(runID) {
 				t.Fatalf("trace id=%q want %q", outcome.TraceID, trace.TraceIDFor(runID))
@@ -2467,7 +2470,7 @@ func TestWorkerDoesNotExportWithoutTheFlag(t *testing.T) {
 	if len(outcomes) != 1 || outcomes[0].Disposition != "finished" {
 		t.Fatalf("outcomes=%+v", outcomes)
 	}
-	if outcomes[0].TraceExported {
+	if outcomes[0].TraceExportQueued {
 		t.Fatalf("worker exported without --otlp-endpoint: %+v", outcomes[0])
 	}
 	if posts := collector.received(); len(posts) != 0 {
@@ -2512,7 +2515,7 @@ func TestWorkerExportFailureWarnsWithoutLeakingCredentials(t *testing.T) {
 	db := filepath.Join(dir, "world.db")
 	runID := enqueueBillingRun(t, manifestPath, db)
 	outcomes := drainWorker(t, manifestPath, db, "--otlp-endpoint", endpoint, "--otlp-header", "X-Api-Key: "+token)
-	if len(outcomes) != 1 || outcomes[0].Disposition != "finished" || outcomes[0].TraceExported {
+	if len(outcomes) != 1 || outcomes[0].Disposition != "finished" || !outcomes[0].TraceExportQueued {
 		t.Fatalf("outcomes=%+v", outcomes)
 	}
 

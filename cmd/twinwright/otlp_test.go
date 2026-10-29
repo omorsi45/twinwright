@@ -3,12 +3,16 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"twinwright/internal/trace"
 )
@@ -167,7 +171,7 @@ func TestWorkerExportFailureForAMalformedEndpointDoesNotLeak(t *testing.T) {
 		logs.mu.Unlock()
 		enqueueBillingRun(t, manifestPath, db)
 		outcomes := drainWorker(t, manifestPath, db, "--otlp-endpoint", endpoint)
-		if len(outcomes) == 0 || outcomes[0].Disposition != "finished" || outcomes[0].TraceExported {
+		if len(outcomes) == 0 || outcomes[0].Disposition != "finished" {
 			t.Fatalf("outcomes=%+v", outcomes)
 		}
 		text := logs.String()
@@ -213,8 +217,10 @@ func TestWorkerWarnsOnAPartialSuccess(t *testing.T) {
 	if len(outcomes) != 1 || outcomes[0].Disposition != "finished" || outcomes[0].RunStatus != "completed" {
 		t.Fatalf("a partial success changed the outcome: %+v", outcomes)
 	}
-	if outcomes[0].TraceExported {
-		t.Fatalf("the outcome reports a delivery the collector only partly took: %+v", outcomes[0])
+	// The outcome only says the trace was handed to the exporter; the collector's
+	// partial answer is in the log, below.
+	if !outcomes[0].TraceExportQueued {
+		t.Fatalf("the outcome does not say the export was queued: %+v", outcomes[0])
 	}
 	warning := ""
 	for _, line := range strings.Split(logs.String(), "\n") {
@@ -226,6 +232,33 @@ func TestWorkerWarnsOnAPartialSuccess(t *testing.T) {
 		if !strings.Contains(warning, want) {
 			t.Fatalf("the warning lacks %q:\n%s", want, logs.String())
 		}
+	}
+}
+
+// The export runs behind the claim loop, so the command that drains the queue and
+// exits has to wait for the last one, or the process would end with a trace still
+// on its way. The collector here answers slowly; the command must not return until
+// it has.
+func TestDrainWorkerWaitsForTheExportItQueued(t *testing.T) {
+	var answered atomic.Int32
+	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		time.Sleep(400 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+		answered.Add(1)
+	}))
+	t.Cleanup(collector.Close)
+
+	dir := t.TempDir()
+	manifestPath := buildBillingManifest(t, dir)
+	db := filepath.Join(dir, "world.db")
+	enqueueBillingRun(t, manifestPath, db)
+	outcomes := drainWorker(t, manifestPath, db, "--otlp-endpoint", collector.URL)
+	if len(outcomes) != 1 || !outcomes[0].TraceExportQueued {
+		t.Fatalf("outcomes=%+v", outcomes)
+	}
+	if got := answered.Load(); got != 1 {
+		t.Fatalf("the worker command returned with %d of 1 exports answered: it did not wait for the export it queued", got)
 	}
 }
 
@@ -265,7 +298,7 @@ func TestWorkerReadsTheOTLPHeaderFromTheEnvironment(t *testing.T) {
 	enqueueBillingRun(t, manifestPath, db)
 	t.Setenv("OTEL_EXPORTER_OTLP_HEADERS", "Authorization=Bearer%20env-token-not-a-secret,X-Tenant=acme")
 	outcomes := drainWorker(t, manifestPath, db, "--otlp-endpoint", collector.URL)
-	if len(outcomes) != 1 || !outcomes[0].TraceExported {
+	if len(outcomes) != 1 || !outcomes[0].TraceExportQueued {
 		t.Fatalf("outcomes=%+v", outcomes)
 	}
 	posts := collector.received()

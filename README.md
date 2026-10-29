@@ -131,7 +131,7 @@ go run ./cmd/twinwright queue --db "$TW_DSN"
 
 ## Observability
 
-Traces are projected from the durable ledger, so they can be produced long after a run finished. `trace --format otlp --otlp-endpoint URL` posts one OTLP/HTTP JSON document to a collector and reports the status code and trace ID; a rejection is an error. `worker --otlp-endpoint` exports the trace of each run it finishes, best effort, without changing the claim's outcome. Every span carries `twinwright.event.start_seq` and `twinwright.event.end_seq`, so a span can be traced back to ledger events.
+Traces are projected from the durable ledger, so they can be produced long after a run finished. `trace --format otlp --otlp-endpoint URL` posts one OTLP/HTTP JSON document to a collector and reports the status code and trace ID; a rejection is an error. `worker --otlp-endpoint` exports the trace of each run it finishes, in the background and best effort, one export at a time, without changing the claim's outcome. Every span carries `twinwright.event.start_seq` and `twinwright.event.end_seq`, so a span can be traced back to ledger events.
 
 `docker compose up -d` starts PostgreSQL, the collector, Jaeger and Prometheus, all published on loopback. A worker serves Prometheus metrics with `--metrics-addr`. **The database-derived gauges are served by every worker, so with several workers on one database scrape one of them or aggregate with `max`, never `sum`.** Making them fleet-wide was cut.
 

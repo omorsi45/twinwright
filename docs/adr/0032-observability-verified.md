@@ -142,10 +142,13 @@ When the job passes, for one scripted run and the pinned images:
   at, so several workers on one database serve the same values. Scrape one of them,
   or aggregate with `max`; `sum` multiplies every such gauge by the worker count.
   The job scrapes one worker and does not test a multi-worker setup.
-- **Trace export from a worker is best effort.** A failure is logged and never
-  changes a claim's disposition. The job exports with `trace.Exporter` directly; it
-  does not start a worker with `--otlp-endpoint`, whose wiring is covered by tests
-  against an in-process server.
+- **Trace export from a worker is best effort, and runs behind the claim loop.** A failure is
+  logged and never changes a claim's disposition. The export is a goroutine of its own, one at a
+  time per worker: a run that finishes while one is in flight is not exported (logged at warn with
+  its trace ID), and a stop waits at most 10 seconds for the one running. The outcome's
+  `trace_export_queued` says the trace was handed over, not that it arrived; the result is in the
+  log. The job exports with `trace.Exporter` directly; it does not start a worker with
+  `--otlp-endpoint`, whose wiring is covered by tests against an in-process server.
 - **Nothing about traces or metrics is written to the event ledger.** The ledger
   records the agent's trajectory and never a worker's identity, and an export or a
   scrape leaves it as it was.
@@ -175,3 +178,4 @@ When the job passes, for one scripted run and the pinned images:
 
 - 2026-10-28: the exporter returned the collector endpoint as it was given, so `trace --otlp-endpoint` printed the endpoint's userinfo and query in its delivery report and in its errors, which the worker's log line had always scrubbed. `Delivery.Endpoint` and every error the exporter returns now name the address without userinfo or query, and mask header values and the endpoint's own credentials if a collector echoes them back. An endpoint with a query string was posted to the wrong path and now keeps its query. Collector headers can be set with the standard `OTEL_EXPORTER_OTLP_HEADERS` variable (comma-separated `name=value` pairs, values percent-decoded) on both `trace` and `worker` when `--otlp-header` is not given, so a worker's credential need not sit in its command line.
 - 2026-10-28: the `observability` job trusted `go test`'s exit status, which is 0 when a test skips and when the `-run` pattern matches no test, so a renamed test or environment variable left it green with nothing checked. The step now requires a `--- PASS:` line for each of the two tests in the `-v` output and fails otherwise.
+- 2026-10-28: a worker exported a finished run's trace inside `ClaimAndRun`, so a collector that did not answer held the worker for the whole export bound (10 seconds) after every completed run, and nothing in the metrics showed it. The export now runs in a goroutine of its own, at most one per worker: a run that finishes while one is in flight is not exported and is logged at warn with its trace ID, and a stop waits at most `trace.DefaultExportTimeout` for the one running. `Outcome.TraceExported` (`trace_exported`, unreleased) therefore could not say a trace was delivered, and is replaced by `TraceExportQueued` (`trace_export_queued`), which says it was handed to the exporter; the result is in the log. The Limits entry on worker export now says so.

@@ -13,6 +13,17 @@ database written by a newer build is refused rather than downgraded.
 
 ### Fixed
 
+- **A collector that does not answer no longer stalls a worker after every run.** The worker
+  exported a finished run's trace inside the claim, so a blackholed collector held it for the
+  10 second export bound per completed run and the run-duration metrics did not show it. The export
+  now runs in a goroutine of its own, one at a time per worker: a run that finishes while one is in
+  flight is not exported and is logged at warn with its trace ID, and `Serve`, `--drain` and
+  `--max-runs` wait at most 10 seconds for the one running when they stop. `Outcome.TraceExported`
+  (`trace_exported`, never released) could no longer say a trace arrived and is replaced by
+  `TraceExportQueued` (`trace_export_queued`); the result is in the log (`trace exported` at info,
+  `trace export failed` at warn). ADR 0032 and the guide say so (`TestExportDoesNotDelayTheNextClaim`,
+  `TestStopDoesNotCancelTheExportInFlight`, `TestServeWaitsForTheExportInFlightBeforeItReturns`,
+  `TestCloseGivesUpOnAnExportThatIgnoresItsContext`).
 - **An OTLP partial success is no longer reported as a full delivery.** A collector that answers
   200 with `partialSuccess.rejectedSpans` above zero has refused some of the spans, but the
   exporter looked only at the status code and reported `delivered: true`. The exporter now reads
