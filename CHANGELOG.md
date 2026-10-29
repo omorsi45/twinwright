@@ -13,6 +13,14 @@ database written by a newer build is refused rather than downgraded.
 
 ### Fixed
 
+- **`twinwright_queue_oldest_runnable_age_seconds` now answers for what a worker can claim.** The
+  gauge counted every `runnable` row with a past `available_at`, so it read 0 while a crashed
+  worker's run sat claimable behind an expired lease (the recovery path) and reported minutes of
+  waiting for a run that an operator had re-enqueued while another worker's live lease still held
+  it. It now uses the same predicate `ClaimRun` selects by (shared as one constant in the store),
+  dates an expired lease from its expiry, and its HELP text says so
+  (`TestOldestRunnableAgeCountsAnExpiredLease`, `TestOldestRunnableAgeIgnoresARunHeldByALiveLease`,
+  `TestOldestClaimableSince`; the last also runs on PostgreSQL when a DSN is configured).
 - **The "the gate fails" checks now require the missing-write regression, not any regression.**
   Two cases error under `fixture-regressed-v1` and regress by themselves, so the CI step (exit
   code 1 only) would have passed with the failed-status path broken, and the test and demo step

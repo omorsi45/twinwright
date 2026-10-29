@@ -27,8 +27,6 @@ package metrics
 
 import (
 	"context"
-	"database/sql"
-	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -295,7 +293,7 @@ func (c Collector) Render(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("oldest runnable entry: %w", err)
 	}
 	writeHelp(&b, queueOldestRunnableAge, "gauge",
-		"Seconds the longest-waiting runnable entry has been available to claim; 0 when none is runnable. An entry still in backoff is not runnable yet.")
+		"Seconds the longest-waiting entry a worker could claim right now has been claimable: a runnable entry counts from when it became available, an entry whose lease expired from when the lease expired; 0 when none. An entry in backoff, and a run another worker's live lease holds, do not count.")
 	writeSample(&b, queueOldestRunnableAge, nil, oldest)
 
 	runs, err := countBy(ctx, c.Store, "SELECT status, count(*) FROM runs GROUP BY status")
@@ -400,21 +398,22 @@ func writeHistogram(b *strings.Builder, spec histogramSpec, worker string, h his
 	writeSample(b, spec.name+"_count", map[string]string{"worker": worker}, float64(h.count))
 }
 
-// oldestRunnableAge is how long the longest-waiting runnable entry has been
-// available, 0 when none is. An entry whose available_at is still in the future
-// is in backoff and is not waiting for a worker yet, so it does not count.
+// oldestRunnableAge is how long the entry that has been claimable longest has
+// been claimable, 0 when no worker could claim anything. The store decides what
+// is claimable, with the predicate ClaimRun selects by, so the gauge answers for
+// the entries a worker could take right now: a runnable entry whose backoff has
+// passed, and an entry a crashed worker left behind once its lease expired. A
+// backed-off entry and a run another worker's live lease still holds are not
+// waiting for a worker, so they do not count.
 func oldestRunnableAge(ctx context.Context, s *store.Store, now time.Time) (float64, error) {
-	var availableAt string
-	err := s.DB.QueryRowContext(ctx,
-		"SELECT available_at FROM work_queue WHERE state=? AND available_at <= ? ORDER BY available_at LIMIT 1",
-		store.QueueRunnable, store.CoordinationTime(now)).Scan(&availableAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		return 0, nil
-	}
+	since, found, err := s.OldestClaimableSince(ctx, now)
 	if err != nil {
 		return 0, err
 	}
-	return ageSeconds(availableAt, now)
+	if !found {
+		return 0, nil
+	}
+	return ageSeconds(since, now)
 }
 
 // ageSeconds is how long before now a coordination timestamp was. A stamp ahead

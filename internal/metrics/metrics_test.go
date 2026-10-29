@@ -697,6 +697,177 @@ func TestOldestRunnableAge(t *testing.T) {
 	}
 }
 
+// oldestRunnableAgeFor renders the gauge for a store at the given instant.
+func oldestRunnableAgeFor(t *testing.T, s *store.Store, now time.Time) float64 {
+	t.Helper()
+	body, err := Collector{Store: s, Counters: NewCounters(), WorkerID: "w", Clock: func() time.Time { return now }}.Render(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	family := mustParse(t, body)[queueOldestRunnableAge]
+	return sampleValue(t, family, queueOldestRunnableAge, map[string]string{})
+}
+
+// queuedRun creates a run and enqueues it as available at availableAt.
+func queuedRun(t *testing.T, s *store.Store, availableAt time.Time) string {
+	t.Helper()
+	ctx := context.Background()
+	world, err := s.Seed(ctx, 42, "digest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := s.CreateRun(ctx, world.ID, "duplicate-charge", "scripted", "fixture-v1", "task", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Enqueue(ctx, run.ID, 10, availableAt); err != nil {
+		t.Fatal(err)
+	}
+	return run.ID
+}
+
+// A worker that dies leaves its run marked leased with a lease that then
+// expires, and ClaimRun takes such a run over: it is the product's recovery path.
+// The gauge has to count it, from the moment the lease expired, or an alert on it
+// stays silent while a crashed fleet leaves work claimable.
+func TestOldestRunnableAgeCountsAnExpiredLease(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	runID := queuedRun(t, s, now.Add(-20*time.Minute))
+	// worker-a claims ten minutes ago with a one minute lease and is never heard
+	// from again, so the lease expired nine minutes ago.
+	if _, _, err := s.ClaimRun(ctx, "worker-a", time.Minute, now.Add(-10*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := oldestRunnableAgeFor(t, s, now.Add(-10*time.Minute+30*time.Second)); got != 0 {
+		t.Fatalf("while the lease is still live: age=%v want 0", got)
+	}
+	// Measured from the expiry, not from the enqueue time: for twenty minutes
+	// the run was not claimable for eleven of them.
+	if got := oldestRunnableAgeFor(t, s, now); got != 540 {
+		t.Fatalf("lease expired 9 minutes ago: age=%v want 540", got)
+	}
+	// The gauge's claim is true: a worker can take the run.
+	lease, entry, err := s.ClaimRun(ctx, "worker-b", time.Minute, now)
+	if err != nil || entry.RunID != runID || !entry.Takeover || lease.Token != 2 {
+		t.Fatalf("worker-b claim: entry=%+v lease=%+v err=%v", entry, lease, err)
+	}
+	if got := oldestRunnableAgeFor(t, s, now); got != 0 {
+		t.Fatalf("after the takeover: age=%v want 0", got)
+	}
+}
+
+// An operator who re-enqueues a run that another worker is executing resets the
+// queue row to runnable and leaves the live lease alone. ClaimRun refuses that
+// run, so no worker can end its wait and the gauge must not report one.
+func TestOldestRunnableAgeIgnoresARunHeldByALiveLease(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	runID := queuedRun(t, s, now.Add(-5*time.Minute))
+	if _, _, err := s.ClaimRun(ctx, "worker-a", time.Hour, now.Add(-5*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Enqueue(ctx, runID, 10, now.Add(-4*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.ClaimRun(ctx, "worker-b", time.Minute, now); !errors.Is(err, store.ErrNoWork) {
+		t.Fatalf("worker-b claim err=%v, want ErrNoWork: the premise of the test is a run no worker can claim", err)
+	}
+	if got := oldestRunnableAgeFor(t, s, now); got != 0 {
+		t.Fatalf("a run held by a live lease: age=%v want 0", got)
+	}
+
+	// Once the holder's lease lapses the same run is claimable, and it has been
+	// since the lease expired (an hour after it was taken), not since the re-enqueue.
+	later := now.Add(-5*time.Minute + time.Hour + 90*time.Second)
+	if got := oldestRunnableAgeFor(t, s, later); got != 90 {
+		t.Fatalf("90s after the holder's lease lapsed: age=%v want 90", got)
+	}
+}
+
+// The gauge may only count what ClaimRun would take. Both read the same
+// predicate (store.Store.OldestClaimableSince), and this walks the states a queue
+// entry can be in so that a change to one cannot leave the other behind.
+func TestOldestRunnableAgeAgreesWithClaimRun(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, s *store.Store)
+		want  bool // claimable
+	}{
+		{"empty queue", func(*testing.T, *store.Store) {}, false},
+		{"runnable and available", func(t *testing.T, s *store.Store) { queuedRun(t, s, now.Add(-time.Minute)) }, true},
+		{"runnable in backoff", func(t *testing.T, s *store.Store) { queuedRun(t, s, now.Add(time.Minute)) }, false},
+		{"leased with a live lease", func(t *testing.T, s *store.Store) {
+			queuedRun(t, s, now.Add(-time.Minute))
+			if _, _, err := s.ClaimRun(ctx, "worker-a", time.Hour, now); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+		{"leased with an expired lease", func(t *testing.T, s *store.Store) {
+			queuedRun(t, s, now.Add(-time.Hour))
+			if _, _, err := s.ClaimRun(ctx, "worker-a", time.Minute, now.Add(-30*time.Minute)); err != nil {
+				t.Fatal(err)
+			}
+		}, true},
+		{"runnable with a live foreign lease", func(t *testing.T, s *store.Store) {
+			id := queuedRun(t, s, now.Add(-time.Hour))
+			if _, _, err := s.ClaimRun(ctx, "worker-a", time.Hour, now); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.Enqueue(ctx, id, 10, now.Add(-time.Minute)); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+		{"runnable with an expired lease", func(t *testing.T, s *store.Store) {
+			id := queuedRun(t, s, now.Add(-time.Hour))
+			if _, _, err := s.ClaimRun(ctx, "worker-a", time.Minute, now.Add(-30*time.Minute)); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.Enqueue(ctx, id, 10, now.Add(-time.Minute)); err != nil {
+				t.Fatal(err)
+			}
+		}, true},
+		{"finished", func(t *testing.T, s *store.Store) {
+			queuedRun(t, s, now.Add(-time.Hour))
+			lease, _, err := s.ClaimRun(ctx, "worker-a", time.Hour, now.Add(-time.Minute))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = s.FinishRun(ctx, lease, now); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+		{"failed", func(t *testing.T, s *store.Store) {
+			queuedRun(t, s, now.Add(-time.Hour))
+			lease, _, err := s.ClaimRun(ctx, "worker-a", time.Hour, now.Add(-time.Minute))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = s.FailRun(ctx, lease, now, "boom"); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := testStore(t)
+			tc.setup(t, s)
+			gauge := oldestRunnableAgeFor(t, s, now)
+			if (gauge > 0) != tc.want {
+				t.Fatalf("gauge=%v, want it above zero: %v", gauge, tc.want)
+			}
+			_, _, err := s.ClaimRun(ctx, "worker-z", time.Minute, now)
+			if claimable := err == nil; claimable != tc.want {
+				t.Fatalf("ClaimRun err=%v, claimable=%v want %v", err, claimable, tc.want)
+			}
+		})
+	}
+}
+
 func TestWorkerLastSeenAge(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)
@@ -749,7 +920,10 @@ func TestExpositionIsWellFormed(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err = s.AcquireRunLease(ctx, run.ID, "worker-a", time.Minute, now); err != nil {
+	// The lease is acquired long ago and has expired. A live lease on a runnable
+	// entry would make the entry unclaimable, and this test reads the age of one a
+	// worker can claim.
+	if _, err = s.AcquireRunLease(ctx, run.ID, "worker-a", time.Minute, now.Add(-time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	// Worker IDs are operator input and other workers' IDs are rendered too, so
